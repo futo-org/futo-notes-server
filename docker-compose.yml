@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: stonefruit-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: stonefruit
+      POSTGRES_PASSWORD: stonefruit
+      POSTGRES_DB: stonefruit
+    ports:
+      - "5433:5432"
+    volumes:
+      - stonefruit-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stonefruit -d stonefruit"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  stonefruit-pg-data:

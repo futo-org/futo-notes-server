@@ -1,0 +1,8 @@
+node_modules/
+blobs/
+cookies-*.txt
+.env
+.env.local
+dist/
+*.log
+.DS_Store
