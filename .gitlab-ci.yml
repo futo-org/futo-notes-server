@@ -1,0 +1,107 @@
+default:
+  tags:
+    - dind
+  image: node:24-slim
+  interruptible: true
+  before_script:
+    - corepack enable
+    - corepack prepare pnpm@10 --activate
+
+variables:
+  PNPM_STORE_DIR: $CI_PROJECT_DIR/.pnpm-store
+
+workflow:
+  rules:
+    - if: $CI_COMMIT_TAG
+    - if: $CI_MERGE_REQUEST_IID
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+stages:
+  - test
+  - build
+
+# ─────────────────────────────────────────────────────────────
+# Cache
+# ─────────────────────────────────────────────────────────────
+
+.cache-pnpm:
+  cache:
+    key:
+      files:
+        - pnpm-lock.yaml
+    paths:
+      - .pnpm-store/
+    policy: pull-push
+
+# ─────────────────────────────────────────────────────────────
+# Test
+# ─────────────────────────────────────────────────────────────
+
+test:
+  stage: test
+  cache:
+    - !reference [.cache-pnpm, cache]
+  services:
+    - name: postgres:16
+      alias: postgres
+      variables:
+        POSTGRES_USER: stonefruit
+        POSTGRES_PASSWORD: ci
+        POSTGRES_DB: stonefruit
+  variables:
+    DATABASE_URL: postgres://stonefruit:ci@postgres:5432/stonefruit
+    AUTH_MODE: dev
+  script:
+    - pnpm install --frozen-lockfile
+    - pnpm exec tsc --noEmit
+    - pnpm test
+
+test:build:
+  stage: test
+  cache:
+    - !reference [.cache-pnpm, cache]
+  script:
+    - pnpm install --frozen-lockfile
+    - pnpm run build
+    - ls -la dist/index.js
+    - echo "Bundle size:" && wc -c dist/index.js
+
+test:docker:
+  stage: test
+  script:
+    - |
+      docker build -t stonefruit-server:ci .
+      echo "Docker image built successfully"
+      docker image inspect stonefruit-server:ci --format '{{.Size}}' | awk '{printf "Image size: %.1f MB\n", $1/1048576}'
+  rules:
+    - if: $CI_COMMIT_TAG
+    - if: $CI_MERGE_REQUEST_IID
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# ─────────────────────────────────────────────────────────────
+# Build + push Docker image
+# ─────────────────────────────────────────────────────────────
+
+build:image:
+  stage: build
+  needs:
+    - job: test
+    - job: test:build
+    - job: test:docker
+  script:
+    - |
+      docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - |
+      IMAGE="${CI_REGISTRY_IMAGE}/server"
+      if [ -n "$CI_COMMIT_TAG" ]; then
+        TAG="${CI_COMMIT_TAG}"
+      else
+        TAG="${CI_COMMIT_SHORT_SHA}"
+      fi
+      docker build -t "${IMAGE}:${TAG}" -t "${IMAGE}:latest" .
+      docker push "${IMAGE}:${TAG}"
+      docker push "${IMAGE}:latest"
+      echo "Pushed ${IMAGE}:${TAG} and ${IMAGE}:latest"
+  rules:
+    - if: $CI_COMMIT_TAG
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH

@@ -1,8 +1,9 @@
 import { Hono } from 'hono'
-import { sql } from 'kysely'
+import { sql, type Transaction } from 'kysely'
 import { uuidv7 } from 'uuidv7'
 import type { AuthContext } from '../auth/middleware.ts'
 import { db } from '../db/connection.ts'
+import type { Database } from '../db/types.ts'
 
 export const objectsRoutes = new Hono<{ Variables: AuthContext }>()
 
@@ -42,6 +43,21 @@ async function ensureCollectionOwned(
   return !!row
 }
 
+async function nextCollectionVersion(
+  trx: Transaction<Database>,
+  userId: string,
+  collectionId: string,
+): Promise<string> {
+  const row = await trx
+    .updateTable('collections')
+    .set({ current_version: sql`current_version + 1` })
+    .where('id', '=', collectionId)
+    .where('user_id', '=', userId)
+    .returning('current_version')
+    .executeTakeFirstOrThrow()
+  return row.current_version
+}
+
 // Pull sync + list.
 objectsRoutes.get('/:cid/objects', async (c) => {
   const userId = c.var.user.id
@@ -58,18 +74,19 @@ objectsRoutes.get('/:cid/objects', async (c) => {
     .selectFrom('objects')
     .where('collection_id', '=', cid)
     .where('user_id', '=', userId)
-    .where('version', '>', String(sinceVersion))
+    .where('change_seq', '>', String(sinceVersion))
     .select([
       'id',
       'collection_id',
       'version',
+      'change_seq',
       'deleted',
       'blob_key',
       'size_bytes',
       'created_at',
       'updated_at',
     ])
-    .orderBy('version', 'asc')
+    .orderBy('change_seq', 'asc')
     .execute()
 
   return c.json({ objects: rows })
@@ -88,6 +105,7 @@ objectsRoutes.get('/:cid/objects/:oid', async (c) => {
       'id',
       'collection_id',
       'version',
+      'change_seq',
       'deleted',
       'blob_key',
       'size_bytes',
@@ -118,28 +136,33 @@ objectsRoutes.post('/:cid/objects', async (c) => {
     return c.json({ error: 'valid blob_key and size_bytes required' }, 400)
   }
 
-  const row = await db
-    .insertInto('objects')
-    .values({
-      id: uuidv7(),
-      collection_id: cid,
-      user_id: userId,
-      blob_key,
-      size_bytes: String(size_bytes),
-    })
-    .returning([
-      'id',
-      'collection_id',
-      'version',
-      'deleted',
-      'blob_key',
-      'size_bytes',
-      'created_at',
-      'updated_at',
-    ])
-    .executeTakeFirstOrThrow()
+  return await db.transaction().execute(async (trx) => {
+    const changeSeq = await nextCollectionVersion(trx, userId, cid)
+    const row = await trx
+      .insertInto('objects')
+      .values({
+        id: uuidv7(),
+        collection_id: cid,
+        user_id: userId,
+        blob_key,
+        size_bytes: String(size_bytes),
+        change_seq: changeSeq,
+      })
+      .returning([
+        'id',
+        'collection_id',
+        'version',
+        'change_seq',
+        'deleted',
+        'blob_key',
+        'size_bytes',
+        'created_at',
+        'updated_at',
+      ])
+      .executeTakeFirstOrThrow()
 
-  return c.json({ object: row }, 201)
+    return c.json({ object: row, collectionVersion: Number(changeSeq) }, 201)
+  })
 })
 
 // Atomic version-check update. On stale version, returns 409 with current state.
@@ -168,36 +191,6 @@ objectsRoutes.put('/:cid/objects/:oid', async (c) => {
   }
 
   return await db.transaction().execute(async (trx) => {
-    const updated = await trx
-      .updateTable('objects')
-      .set({
-        version: String(version),
-        blob_key,
-        size_bytes: String(size_bytes),
-        updated_at: sql`now()`,
-      })
-      .where('id', '=', oid)
-      .where('collection_id', '=', cid)
-      .where('user_id', '=', userId)
-      .where('version', '=', String(version - 1))
-      .returning([
-        'id',
-        'collection_id',
-        'version',
-        'deleted',
-        'blob_key',
-        'size_bytes',
-        'created_at',
-        'updated_at',
-      ])
-      .executeTakeFirst()
-
-    if (updated) {
-      return c.json({ object: updated })
-    }
-
-    // Zero rows updated. Either the object doesn't exist (for this user)
-    // or the version is stale. Distinguish, and surface 409 on stale.
     const current = await trx
       .selectFrom('objects')
       .where('id', '=', oid)
@@ -210,11 +203,66 @@ objectsRoutes.put('/:cid/objects/:oid', async (c) => {
       return c.json({ error: 'not found' }, 404)
     }
 
+    if (Number(current.version) !== version - 1) {
+      return c.json(
+        {
+          error: 'version conflict',
+          currentVersion: Number(current.version),
+          currentBlobKey: current.blob_key,
+        },
+        409,
+      )
+    }
+
+    const changeSeq = await nextCollectionVersion(trx, userId, cid)
+    const updated = await trx
+      .updateTable('objects')
+      .set({
+        version: String(version),
+        change_seq: changeSeq,
+        blob_key,
+        size_bytes: String(size_bytes),
+        updated_at: sql`now()`,
+      })
+      .where('id', '=', oid)
+      .where('collection_id', '=', cid)
+      .where('user_id', '=', userId)
+      .where('version', '=', String(version - 1))
+      .returning([
+        'id',
+        'collection_id',
+        'version',
+        'change_seq',
+        'deleted',
+        'blob_key',
+        'size_bytes',
+        'created_at',
+        'updated_at',
+      ])
+      .executeTakeFirst()
+
+    if (updated) {
+      return c.json({ object: updated, collectionVersion: Number(changeSeq) })
+    }
+
+    // A concurrent writer won between the read above and the guarded update.
+    const latest = await trx
+      .selectFrom('objects')
+      .where('id', '=', oid)
+      .where('collection_id', '=', cid)
+      .where('user_id', '=', userId)
+      .select(['version', 'blob_key'])
+      .executeTakeFirst()
+
+    if (!latest) {
+      return c.json({ error: 'not found' }, 404)
+    }
+
     return c.json(
       {
         error: 'version conflict',
-        currentVersion: Number(current.version),
-        currentBlobKey: current.blob_key,
+        currentVersion: Number(latest.version),
+        currentBlobKey: latest.blob_key,
       },
       409,
     )
@@ -227,17 +275,32 @@ objectsRoutes.delete('/:cid/objects/:oid', async (c) => {
   const cid = c.req.param('cid')
   const oid = c.req.param('oid')
   const row = await db
-    .updateTable('objects')
-    .set({
-      deleted: true,
-      version: sql`version + 1`,
-      updated_at: sql`now()`,
+    .transaction()
+    .execute(async (trx) => {
+      const existing = await trx
+        .selectFrom('objects')
+        .where('id', '=', oid)
+        .where('collection_id', '=', cid)
+        .where('user_id', '=', userId)
+        .select('id')
+        .executeTakeFirst()
+      if (!existing) return null
+
+      const changeSeq = await nextCollectionVersion(trx, userId, cid)
+      return await trx
+        .updateTable('objects')
+        .set({
+          deleted: true,
+          version: sql`version + 1`,
+          change_seq: changeSeq,
+          updated_at: sql`now()`,
+        })
+        .where('id', '=', oid)
+        .where('collection_id', '=', cid)
+        .where('user_id', '=', userId)
+        .returning(['id', 'version', 'change_seq', 'deleted'])
+        .executeTakeFirst()
     })
-    .where('id', '=', oid)
-    .where('collection_id', '=', cid)
-    .where('user_id', '=', userId)
-    .returning(['id', 'version', 'deleted'])
-    .executeTakeFirst()
   if (!row) return c.json({ error: 'not found' }, 404)
-  return c.json({ object: row })
+  return c.json({ object: row, collectionVersion: Number(row.change_seq) })
 })

@@ -1,0 +1,11 @@
+node_modules/
+blobs/
+dist/
+.env
+.env.local
+*.log
+.git/
+.DS_Store
+tests/
+.stonefruit-cli.json
+packages/

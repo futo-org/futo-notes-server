@@ -124,10 +124,16 @@ Encryption is entirely a client-side concern. The server never sees plaintext.
 
 The server's responsibilities:
 - Store and serve opaque encrypted blobs
-- Optionally store an encrypted master key blob (encrypted by the client with a password-derived key) so users can recover from a new device
+- Store encrypted vault key material (a random vault key encrypted by the client with a password-derived key) so users can unlock a vault from a new device after login
 - TLS in transit
 
 The client chooses its own encryption scheme. The server is agnostic.
+
+Current client key model:
+- Notes are encrypted with a random AES-256-GCM vault key.
+- The vault key is wrapped client-side with a PBKDF2-SHA-256 password key.
+- The server stores `key_salt`, `key_kdf`, and `encrypted_vault_key` on the collection.
+- The server never sees the vault password, password-derived key, vault key, filenames, or note content.
 
 ## Threat model
 
@@ -164,6 +170,11 @@ Postgres is a single shared instance. All users' rows live in the same tables, s
 collections
   id          uuid PK
   user_id     uuid FK → users
+  current_version bigint -- collection-global sync cursor
+  key_salt    text       -- client KDF salt for encrypted_vault_key
+  key_kdf     jsonb      -- client KDF parameters
+  encrypted_vault_key text -- password-wrapped vault key bytes
+  key_updated_at timestamptz
   created_at  timestamptz
 ```
 
@@ -176,7 +187,8 @@ objects
   id             uuid PK
   collection_id  uuid FK → collections
   user_id        uuid FK → users   -- denormalized for direct scoping; equal to collections.user_id
-  version        bigint
+  version        bigint            -- per-object conflict counter
+  change_seq     bigint            -- collection-global ordering cursor
   deleted        boolean
   blob_key       text              -- S3 key for the current version's blob
   size_bytes     bigint
@@ -210,18 +222,19 @@ Keeping the DB small protects the scaling path: Immich is nervous about DB-at-sc
 
 ## Sync protocol
 
-Version-vector sync with per-object granularity. No CRDTs — last-write-wins with conflict surfacing.
+Versioned sync with per-object conflict checks and a collection-global pull cursor. No CRDTs — last-write-wins with conflict surfacing.
 
 ### Push (client → server)
 1. Client encrypts object content, uploads blob to server
 2. Client sends sync request: `{ objectId, version, blobKey }`
-3. Server checks: is `version` exactly `server_version + 1`?
+3. Server checks: is `version` exactly `server_object_version + 1`?
    - Yes → accept, update metadata
    - No → reject with `409 Conflict`, return current server version and blob key so client can resolve
+4. On accepted create/update/delete, server increments `collections.current_version` and writes that value to `objects.change_seq`
 
 ### Pull (server → client)
-1. Client connects via WebSocket, sends last-known version per object
-2. Server sends deltas: all objects where `server_version > client_version`
+1. Client sends its last seen collection cursor
+2. Server sends deltas ordered by `change_seq`: all objects where `change_seq > client_cursor`
 3. Ongoing: server pushes updates over WS as they arrive
 
 ### Conflict resolution
@@ -293,6 +306,8 @@ POST /api/auth/logout                             → destroy session
 POST   /api/collections                           → create collection
 GET    /api/collections                           → list user's collections
 GET    /api/collections/:id                       → get collection
+GET    /api/collections/:id/key                   → get encrypted vault key material
+PUT    /api/collections/:id/key                   → create/update encrypted vault key material
 DELETE /api/collections/:id                       → delete collection
 ```
 
