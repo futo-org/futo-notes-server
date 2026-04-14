@@ -3,6 +3,7 @@ import { setCookie } from 'hono/cookie'
 import { randomBytes } from 'node:crypto'
 import { uuidv7 } from 'uuidv7'
 import { db } from '../db/connection.ts'
+import { env } from '../env.ts'
 import { log } from '../logger.ts'
 import { hashPassword, verifyPassword } from './password.ts'
 import { createSession } from './session.ts'
@@ -147,8 +148,9 @@ passwordRoutes.post('/admin/reset-password', async (c) => {
   return c.json({ ok: true }, 200)
 })
 
-/** Check whether a password has been configured. */
+/** Check whether a password has been configured (always true in dev mode). */
 export async function isSetupComplete(): Promise<boolean> {
+  if (env.AUTH_MODE === 'dev') return true
   const hash = await getConfig('password_hash')
   return !!hash
 }
