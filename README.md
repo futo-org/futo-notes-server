@@ -15,9 +15,14 @@ This will:
 2. Prompt for a port (default `3005`)
 3. Generate `docker-compose.yml` in the current directory
 4. Pull the server + Postgres images and start the containers
-5. Print next steps for connecting Stonefruit
 
-After setup, open `http://localhost:3005/start` in your browser to create your account, then enter the server URL, email, and password in the Stonefruit app's **Settings → Sync** screen.
+### After setup
+
+1. **Create your account** — open `http://localhost:3005/start` in your browser and sign up with an email and password. Your credentials stay on your server; nothing is sent anywhere else.
+2. **Connect the app** — open Stonefruit on your phone or computer, go to **Settings → Sync**, and enter:
+   - Server URL: `http://localhost:3005` (or whatever port you picked)
+   - The same email and password
+3. **Sync starts automatically** once connected.
 
 ### Requirements
 

@@ -1,7 +1,7 @@
 import { Command } from 'commander'
 import { randomBytes } from 'node:crypto'
 import { loadConfig, saveConfig, type CliConfig } from '../lib/config.ts'
-import { checkDocker, composePull, composeUp, writeCompose } from '../lib/docker.ts'
+import { checkDocker, composePull, composeUp, removeStaleStonefruitContainers, writeCompose } from '../lib/docker.ts'
 import { waitForHealthy } from '../lib/api.ts'
 import { askPort } from '../lib/prompt.ts'
 
@@ -51,6 +51,10 @@ export const setup = new Command('setup')
       console.log('  Wrote docker-compose.yml')
     }
 
+    // Remove containers from any other compose project with the same names
+    // so `docker compose up` doesn't fail with "container name in use".
+    await removeStaleStonefruitContainers(workDir)
+
     // Pull + start
     process.stdout.write('  Pulling images... ')
     await composePull(workDir)
@@ -68,11 +72,11 @@ export const setup = new Command('setup')
 
     console.log()
     console.log('  Stonefruit server is running!')
-    console.log(`    Server: ${baseUrl}`)
     console.log()
-    console.log('  Next steps:')
-    console.log(`    1. Open ${baseUrl}/start in your browser to create your account`)
-    console.log('    2. Open Stonefruit on your phone or computer')
-    console.log('    3. Go to Settings > Sync and enter the server URL, email, and password')
+    console.log(`  Create your account at: ${baseUrl}/start`)
+    console.log()
+    console.log('  Then open Stonefruit, go to Settings > Sync, and enter:')
+    console.log(`    Server URL: ${baseUrl}`)
+    console.log('    Email + password you just signed up with')
     console.log()
   })

@@ -54,6 +54,45 @@ export async function getContainerImageId(name: string): Promise<string | null> 
   }
 }
 
+/**
+ * Return the compose working dir a container was created from, or null
+ * if the container doesn't exist / isn't from a compose project.
+ */
+async function getContainerComposeDir(name: string): Promise<string | null> {
+  try {
+    const out = await exec(
+      'docker',
+      ['inspect', '--format', '{{index .Config.Labels "com.docker.compose.project.working_dir"}}', name],
+      '.',
+    )
+    return out || null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Remove Stonefruit containers that were created from a different compose
+ * working directory. Prevents "container name in use" errors when a user
+ * re-runs setup after deleting an old install dir, or installed twice.
+ * Containers created from the *current* working dir are left alone so
+ * docker compose up can cleanly reuse them.
+ */
+export async function removeStaleStonefruitContainers(workDir: string): Promise<void> {
+  const names = ['stonefruit', 'stonefruit-postgres']
+  for (const name of names) {
+    const composeDir = await getContainerComposeDir(name)
+    if (composeDir === null) continue  // no such container
+    if (composeDir === workDir) continue // ours — compose will handle
+    console.log(`  Found stale ${name} container from ${composeDir || 'unknown'} — removing`)
+    try {
+      await exec('docker', ['rm', '-f', name], '.')
+    } catch (err) {
+      throw new Error(`Failed to remove stale container ${name}: ${err instanceof Error ? err.message : err}`)
+    }
+  }
+}
+
 const SERVER_IMAGE = 'gitlab.futo.org:5050/stonefruit/stonefruit-server/server:latest'
 
 function generateCompose(config: CliConfig): string {
