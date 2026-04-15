@@ -1,10 +1,10 @@
 #!/bin/sh
 # Stonefruit server installer.
-# Usage: curl -sSL https://gitlab.futo.org/stonefruit/stonefruit-e2ee-server-poc/-/raw/main/install.sh | sh
+# Usage: curl -sSL https://gitlab.futo.org/stonefruit/stonefruit-server/-/raw/main/install.sh | sh
 set -eu
 
 GITLAB_HOST="${GITLAB_HOST:-https://gitlab.futo.org}"
-PROJECT_PATH="stonefruit%2Fstonefruit-e2ee-server-poc"
+PROJECT_PATH="stonefruit%2Fstonefruit-server"
 BIN_DIR="${STONEFRUIT_BIN_DIR:-$HOME/.local/bin}"
 BIN_PATH="$BIN_DIR/stonefruit"
 

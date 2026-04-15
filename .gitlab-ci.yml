@@ -151,7 +151,7 @@ release:cli:
       release-cli create \
         --name "Stonefruit Server ${CI_COMMIT_TAG}" \
         --tag-name "${CI_COMMIT_TAG}" \
-        --description "Stonefruit self-hosted sync server ${CI_COMMIT_TAG}. Install via: curl -sSL https://gitlab.futo.org/stonefruit/stonefruit-e2ee-server-poc/-/raw/main/install.sh | sh" \
+        --description "Stonefruit self-hosted sync server ${CI_COMMIT_TAG}. Install via: curl -sSL https://gitlab.futo.org/stonefruit/stonefruit-server/-/raw/main/install.sh | sh" \
         --assets-link "{\"name\":\"stonefruit-cli.mjs\",\"url\":\"${PACKAGE_URL}\",\"link_type\":\"other\"}"
   needs:
     - job: build:image

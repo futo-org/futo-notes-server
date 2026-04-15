@@ -7,7 +7,7 @@ See [DESIGN.md](./DESIGN.md) for the architecture and threat model.
 ## Self-hosting — one command
 
 ```bash
-curl -sSL https://gitlab.futo.org/stonefruit/stonefruit-e2ee-server-poc/-/raw/main/install.sh | sh
+curl -sSL https://gitlab.futo.org/stonefruit/stonefruit-server/-/raw/main/install.sh | sh
 ```
 
 This will:
