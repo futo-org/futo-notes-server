@@ -7,7 +7,7 @@ COPY package.json pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile
 
 COPY src/ src/
-COPY tsconfig.json ./
+COPY tsconfig.json build.mjs ./
 
 RUN pnpm run build
 
