@@ -130,6 +130,8 @@ release:cli:
   cache:
     - !reference [.cache-pnpm, cache]
   script:
+    # Install curl + ca-certs (node:24-slim doesn't include them)
+    - apt-get update && apt-get install -y --no-install-recommends curl ca-certificates
     # Build CLI bundle
     - pnpm install --frozen-lockfile
     - pnpm --filter @futo-notes/cli run build
@@ -140,9 +142,8 @@ release:cli:
       curl --fail --header "JOB-TOKEN: $CI_JOB_TOKEN" \
         --upload-file packages/cli/dist/cli.js "$PACKAGE_URL"
       echo "Uploaded CLI bundle to $PACKAGE_URL"
-    # Create GitLab release linking to the package
+    # Install release-cli and create GitLab release linking to the package
     - |
-      apt-get update && apt-get install -y --no-install-recommends curl ca-certificates
       curl -sL "https://gitlab.com/api/v4/projects/gitlab-org%2Frelease-cli/packages/generic/release-cli/latest/release-cli-linux-amd64" \
         -o /usr/local/bin/release-cli && chmod +x /usr/local/bin/release-cli
     - |
