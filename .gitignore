@@ -1,5 +1,6 @@
 node_modules/
 /blobs/
+.claude/
 cookies-*.txt
 .env
 .env.local
