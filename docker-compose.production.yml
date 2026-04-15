@@ -3,7 +3,7 @@ services:
     container_name: stonefruit
     build: .
     ports:
-      - "${STONEFRUIT_PORT:-3000}:3000"
+      - "${STONEFRUIT_PORT:-3005}:3000"
     environment:
       DATABASE_URL: postgres://stonefruit:${POSTGRES_PASSWORD:-changeme}@postgres:5432/stonefruit
       PORT: "3000"

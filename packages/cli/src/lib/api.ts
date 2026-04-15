@@ -8,37 +8,6 @@ export async function checkHealth(baseUrl: string): Promise<{ status: string; db
   }
 }
 
-export async function setupServer(baseUrl: string, password: string): Promise<{ admin_token: string }> {
-  const res = await fetch(`${baseUrl}/setup`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ password }),
-  })
-  if (res.status === 409) {
-    throw new Error('Server is already configured.')
-  }
-  if (!res.ok) {
-    const body = await res.text()
-    throw new Error(`Setup failed (${res.status}): ${body}`)
-  }
-  return await res.json() as { admin_token: string }
-}
-
-export async function resetPassword(baseUrl: string, adminToken: string, password: string): Promise<void> {
-  const res = await fetch(`${baseUrl}/admin/reset-password`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'AdminToken': adminToken,
-    },
-    body: JSON.stringify({ password }),
-  })
-  if (!res.ok) {
-    const body = await res.text()
-    throw new Error(`Reset failed (${res.status}): ${body}`)
-  }
-}
-
 export async function waitForHealthy(baseUrl: string, timeoutMs = 30000): Promise<void> {
   const start = Date.now()
   while (Date.now() - start < timeoutMs) {

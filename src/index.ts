@@ -2,8 +2,8 @@ import { serve } from '@hono/node-server'
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { authMiddleware, type AuthContext } from './auth/middleware.ts'
-import { isSetupComplete, passwordRoutes } from './auth/password-routes.ts'
 import { authRoutes } from './auth/routes.ts'
+import { isSetupComplete, signupRoutes } from './auth/signup-routes.ts'
 import { FsBlobStore } from './blob/fs.ts'
 import { createBlobRoutes } from './blobs/routes.ts'
 import { collectionsRoutes } from './collections/routes.ts'
@@ -12,6 +12,7 @@ import { migrateToLatest } from './db/migrate.ts'
 import { env } from './env.ts'
 import { log } from './logger.ts'
 import { objectsRoutes } from './objects/routes.ts'
+import { startRoutes } from './routes/start.ts'
 
 const app = new Hono<{ Variables: AuthContext }>()
 
@@ -30,12 +31,15 @@ app.get('/health', async (c) => {
   }
 })
 
-// Password auth routes — /setup and /admin/reset-password are top-level,
-// /api/auth/login goes through the api middleware but is in PUBLIC_PATHS.
-app.route('/', passwordRoutes)
+// /start is a public HTML signup page.
+app.route('/', startRoutes)
 
 // Auth middleware applies to every /api/* path; public paths are exempted internally.
 app.use('/api/*', authMiddleware)
+
+// Signup + login routes (paths start with /api — they'll pass through middleware
+// as public routes).
+app.route('/', signupRoutes)
 
 app.route('/api/auth', authRoutes)
 app.route('/api/collections', collectionsRoutes)

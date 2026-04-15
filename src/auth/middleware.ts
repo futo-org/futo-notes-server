@@ -5,6 +5,7 @@ import { validateSession } from './session.ts'
 
 /** Paths that never require authentication. */
 const PUBLIC_PATHS = new Set<string>([
+  '/api/auth/signup',
   '/api/auth/login',
 ])
 
