@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
-    "build": "esbuild src/index.ts --bundle --platform=node --target=node24 --format=esm --outfile=dist/index.js --external:pg --external:pg-native --external:dotenv",
+    "build": "node build.mjs",
     "migrate": "tsx src/db/migrate.ts",
     "test": "node --import tsx --test \"tests/**/*.test.ts\""
   },

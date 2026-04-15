@@ -6,7 +6,7 @@
     "stonefruit": "./dist/cli.js"
   },
   "scripts": {
-    "build": "esbuild src/cli.ts --bundle --platform=node --target=node24 --format=esm --outfile=dist/cli.js --banner:js='#!/usr/bin/env node'",
+    "build": "node build.mjs",
     "dev": "tsx src/cli.ts"
   },
   "dependencies": {
