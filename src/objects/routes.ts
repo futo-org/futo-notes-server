@@ -270,11 +270,25 @@ objectsRoutes.put('/:cid/objects/:oid', async (c) => {
 })
 
 // Soft delete: set deleted=true, bump version so peers see the tombstone.
+// Optional ?version=N query rejects the delete with 409 if the caller's
+// expected version is stale — preventing a delete from clobbering a
+// newer edit from a peer (delete-vs-edit race; edit wins).
 objectsRoutes.delete('/:cid/objects/:oid', async (c) => {
   const userId = c.var.user.id
   const cid = c.req.param('cid')
   const oid = c.req.param('oid')
-  const row = await db
+
+  const expectedRaw = c.req.query('version')
+  let expectedVersion: number | null = null
+  if (expectedRaw !== undefined) {
+    const parsed = Number(expectedRaw)
+    if (!Number.isSafeInteger(parsed) || parsed < 1) {
+      return c.json({ error: 'invalid version' }, 400)
+    }
+    expectedVersion = parsed
+  }
+
+  const result = await db
     .transaction()
     .execute(async (trx) => {
       const existing = await trx
@@ -282,12 +296,24 @@ objectsRoutes.delete('/:cid/objects/:oid', async (c) => {
         .where('id', '=', oid)
         .where('collection_id', '=', cid)
         .where('user_id', '=', userId)
-        .select('id')
+        .select(['id', 'version', 'blob_key', 'deleted'])
         .executeTakeFirst()
-      if (!existing) return null
+      if (!existing) return { kind: 'missing' as const }
+
+      if (
+        expectedVersion !== null
+        && !existing.deleted
+        && Number(existing.version) !== expectedVersion
+      ) {
+        return {
+          kind: 'conflict' as const,
+          currentVersion: Number(existing.version),
+          currentBlobKey: existing.blob_key,
+        }
+      }
 
       const changeSeq = await nextCollectionVersion(trx, userId, cid)
-      return await trx
+      const updated = await trx
         .updateTable('objects')
         .set({
           deleted: true,
@@ -300,7 +326,20 @@ objectsRoutes.delete('/:cid/objects/:oid', async (c) => {
         .where('user_id', '=', userId)
         .returning(['id', 'version', 'change_seq', 'deleted'])
         .executeTakeFirst()
+      if (!updated) return { kind: 'missing' as const }
+      return { kind: 'ok' as const, row: updated }
     })
-  if (!row) return c.json({ error: 'not found' }, 404)
-  return c.json({ object: row, collectionVersion: Number(row.change_seq) })
+
+  if (result.kind === 'missing') return c.json({ error: 'not found' }, 404)
+  if (result.kind === 'conflict') {
+    return c.json(
+      {
+        error: 'version conflict',
+        currentVersion: result.currentVersion,
+        currentBlobKey: result.currentBlobKey,
+      },
+      409,
+    )
+  }
+  return c.json({ object: result.row, collectionVersion: Number(result.row.change_seq) })
 })
