@@ -69,7 +69,17 @@ The installer collects an admin password during setup, hashes it by shelling out
 
 ## CI/CD
 
-GitLab CI. Pipeline: type-check → test (against Postgres service) → build bundle → Docker image → push. Git tags trigger CLI releases to GitLab package registry.
+GitLab CI. Pipeline: type-check → test (against Postgres service) → build bundle → Docker image → push. Git tags trigger installer releases to GitLab package registry.
+
+**Image tags:** `build:image` pushes `server:${CI_COMMIT_TAG}` + `server:stable` on tagged releases, and `server:${CI_COMMIT_SHORT_SHA}` + `server:latest` on main branch pushes. Fresh installs default to `:stable` via the installer; `stonefruit release latest` switches to rolling.
+
+**Monitoring pipelines:** `$GITLAB_TOKEN` env var holds a PAT for `gitlab.futo.org`. Before using it (with `glab` or `curl`), verify it's not revoked — tokens get rotated:
+
+```bash
+curl -sS --header "PRIVATE-TOKEN: $GITLAB_TOKEN" "https://gitlab.futo.org/api/v4/user" | head -c 200
+```
+
+If it returns a user JSON, you can use `glab ci list`, `glab ci view <id>`, `curl .../pipelines`, etc. to monitor runs, tail job logs, and verify that a tag has picked up `release:installer` and published binaries. If the curl returns `invalid_token`/`Token was revoked`, ask the user to rotate the PAT.
 
 ## Design document
 
