@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import pkg from '../package.json' with { type: 'json' }
 import { authMiddleware, type AuthContext } from './auth/middleware.ts'
+import { passwordRoutes } from './auth/password-routes.ts'
 import { authRoutes } from './auth/routes.ts'
 import { FsBlobStore } from './blob/fs.ts'
 import { createBlobRoutes } from './blobs/routes.ts'
@@ -39,6 +40,9 @@ export function buildApp(): Hono<{ Variables: AuthContext }> {
   app.use('/api/*', authMiddleware)
 
   app.route('/api/auth', authRoutes)
+  if (env.AUTH_MODE === 'password') {
+    app.route('/api/auth/password', passwordRoutes)
+  }
   app.route('/api/collections', collectionsRoutes)
   app.route('/api/collections', objectsRoutes)
   app.route('/api/blobs', createBlobRoutes(new FsBlobStore(env.BLOB_DIR)))

@@ -8,6 +8,11 @@ const DEV_PUBLIC_PATHS = new Set<string>([
   '/api/auth/dev/login',
 ])
 
+/** Paths only public in password auth mode. */
+const PASSWORD_PUBLIC_PATHS = new Set<string>([
+  '/api/auth/password/login',
+])
+
 export interface AuthContext {
   user: { id: string; email: string; name: string }
   sessionId: string
@@ -16,6 +21,7 @@ export interface AuthContext {
 export const authMiddleware: MiddlewareHandler<{ Variables: AuthContext }> = async (c, next) => {
   const path = c.req.path
   if (env.AUTH_MODE === 'dev' && DEV_PUBLIC_PATHS.has(path)) return next()
+  if (env.AUTH_MODE === 'password' && PASSWORD_PUBLIC_PATHS.has(path)) return next()
 
   const token = getCookie(c, 'session')
     ?? c.req.header('Authorization')?.replace(/^Bearer\s+/i, '')
