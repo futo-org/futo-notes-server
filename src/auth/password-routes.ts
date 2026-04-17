@@ -33,12 +33,6 @@ function setSessionCookie(c: Context, rawToken: string): void {
  * the singleton user on first login, and opens a session.
  */
 passwordRoutes.post('/login', async (c) => {
-  const hash = env.STONEFRUIT_PASSWORD_HASH
-  if (!hash) {
-    // validateEnv should prevent this, but belt-and-suspenders.
-    return c.json({ error: 'server misconfigured: no password hash' }, 500)
-  }
-
   let body: { password?: string }
   try {
     body = await c.req.json()
@@ -51,12 +45,18 @@ passwordRoutes.post('/login', async (c) => {
     return c.json({ error: 'password is required' }, 400)
   }
 
-  const valid = await verifyPassword(password, hash)
+  const valid = await verifyPassword(password, env.STONEFRUIT_PASSWORD_HASH!)
   if (!valid) {
     return c.json({ error: 'invalid password' }, 401)
   }
 
-  const user = await db
+  const existing = await db
+    .selectFrom('users')
+    .select(['id', 'email', 'name'])
+    .where('sub', '=', SINGLETON_SUB)
+    .executeTakeFirst()
+
+  const user = existing ?? await db
     .insertInto('users')
     .values({
       id: uuidv7(),
@@ -64,7 +64,6 @@ passwordRoutes.post('/login', async (c) => {
       email: SINGLETON_EMAIL,
       name: SINGLETON_NAME,
     })
-    .onConflict((oc) => oc.column('sub').doUpdateSet({ name: SINGLETON_NAME }))
     .returning(['id', 'email', 'name'])
     .executeTakeFirstOrThrow()
 

@@ -155,8 +155,6 @@ func newModel(workDir string, defaultPort int, defaultDataPath string) model {
 	}
 }
 
-// buildPhases constructs the deploy phase list. Skips "Hashing password" when
-// we already have a hash from an existing .env.
 func buildPhases(needsHash bool) []phase {
 	phases := []phase{{label: "Pulling images"}}
 	if needsHash {
