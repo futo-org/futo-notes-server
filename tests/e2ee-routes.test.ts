@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict'
 import { after, before, test } from 'node:test'
-import { app } from '../src/index.ts'
+import { buildApp } from '../src/app.ts'
 import { db, waitForDb } from '../src/db/connection.ts'
 import { migrateToLatest } from '../src/db/migrate.ts'
+
+const app = buildApp()
 
 before(async () => {
   await waitForDb()
