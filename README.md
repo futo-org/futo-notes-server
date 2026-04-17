@@ -11,23 +11,21 @@ curl -sSL https://gitlab.futo.org/stonefruit/stonefruit-server/-/raw/main/instal
 ```
 
 This will:
-1. Download the `stonefruit` CLI to `~/.local/bin/`
-2. Prompt for a port (default `3005`)
-3. Generate `docker-compose.yml` in the current directory
+1. Download the `stonefruit` installer binary to `/usr/local/bin/` (a static Go binary, no runtime dependencies)
+2. Launch an interactive TUI that asks for a port, a notes storage directory, and an admin password
+3. Write `docker-compose.yml` and a sibling `.env` (with the scrypt-hashed password) in the current directory
 4. Pull the server + Postgres images and start the containers
 
 ### After setup
 
-1. **Create your account** — open `http://localhost:3005/start` in your browser and sign up with an email and password. Your credentials stay on your server; nothing is sent anywhere else.
-2. **Connect the app** — open Stonefruit on your phone or computer, go to **Settings → Sync**, and enter:
+1. **Connect the app** — open Stonefruit on your phone or computer, go to **Settings → Sync**, and enter:
    - Server URL: `http://localhost:3005` (or whatever port you picked)
-   - The same email and password
-3. **Sync starts automatically** once connected.
+   - Password: the admin password you set during install
+2. **Sync starts automatically** once connected.
 
 ### Requirements
 
 - Docker (with `docker compose`)
-- Node.js 20+
 - `curl`
 
 ### Other CLI commands
@@ -72,15 +70,16 @@ pnpm build                 # esbuild → dist/index.js
 
 ```
 src/
-  auth/         # session + password auth, signup
+  app.ts        # buildApp() factory — shared by both entrypoints
+  index.ts      # OSS entrypoint (ships in public Docker image)
+  hosted/       # hosted-only middleware + separate entrypoint
+  server.ts     # shared lifecycle (runServer, CLI subcommands like `hash`)
+  auth/         # session + password-mode login
   blob/         # blob storage abstraction (filesystem for now)
   collections/  # collection API
   objects/      # per-object versioned sync API
   db/           # Kysely connection + migrations
-  routes/       # /start signup page
-  index.ts      # server entry point
-packages/
-  cli/          # @futo-notes/cli — self-hosting CLI
+installer/      # Go + Bubble Tea `stonefruit` CLI (static binary)
 tests/          # integration tests (node:test)
 install.sh      # one-liner installer for end users
 ```

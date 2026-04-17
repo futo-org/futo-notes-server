@@ -6,16 +6,28 @@ Generic E2EE sync server. Stores opaque encrypted blobs and metadata — the ser
 
 ```bash
 pnpm dev              # Dev server with hot reload (tsx watch)
-pnpm build            # esbuild bundle → dist/index.js
+pnpm build            # esbuild bundle → dist/index.js (OSS entrypoint)
+pnpm build:hosted     # esbuild bundle → dist/hosted.js (hosted entrypoint)
 pnpm test             # Integration tests (needs running Postgres)
 pnpm migrate          # Run DB migrations
 docker compose up -d  # Local Postgres on port 5433
 tsc --noEmit          # Type-check only
+
+node dist/index.js hash <password>   # print a scrypt hash for STONEFRUIT_PASSWORD_HASH
 ```
 
 ## Environment
 
-Copy `.env.example` → `.env`. Only `DATABASE_URL` is required. Use `AUTH_MODE=dev` for development (enables passwordless login at `/api/auth/dev/login`).
+Copy `.env.example` → `.env`. `DATABASE_URL` is always required. Set `AUTH_MODE=dev` for development and tests (enables passwordless login at `/api/auth/dev/login`). Set `AUTH_MODE=password` + `STONEFRUIT_PASSWORD_HASH` for single-user self-hosted mode. Validation happens at boot via `validateEnv()` in `src/env.ts`.
+
+## App structure: OSS vs hosted
+
+- `src/app.ts` exports `buildApp()` — the shared Hono app factory (all sync routes).
+- `src/index.ts` is the OSS entrypoint; ships in the public `stonefruit/server` image.
+- `src/hosted/index.ts` is the hosted entrypoint; wraps `buildApp()` with hosted-only middleware (billing, etc.). Ships in a separate hosted image from the same commit.
+- `src/server.ts` holds the shared lifecycle (`runServer`, `runCliSubcommand`).
+
+**Invariant:** OSS code never imports from `src/hosted/*`. CI enforces this with a grep check in `test:build`. Hosted code can import freely from the rest of `src/`; the reverse must not happen.
 
 ## Code style
 
@@ -38,9 +50,10 @@ Copy `.env.example` → `.env`. Only `DATABASE_URL` is required. Use `AUTH_MODE=
 
 - Framework: `node:test` (native). No Jest, no Vitest.
 - Tests hit a real Postgres — no mocks for the database.
-- Tests call `app.fetch()` directly (no HTTP server started).
-- Requires `AUTH_MODE=dev` and a valid `DATABASE_URL`.
-- Prefer running individual tests over the full suite for speed.
+- Tests call `buildApp().fetch()` directly (no HTTP server started).
+- Requires a valid `DATABASE_URL`.
+- Two invocations because mode affects module-loaded env: `pnpm test:dev` (AUTH_MODE=dev) and `pnpm test:password` (AUTH_MODE=password). `pnpm test` runs both in sequence.
+- Password-mode tests set `STONEFRUIT_PASSWORD_HASH` at the top of the file via top-level await, before dynamic-importing modules that snapshot env.
 
 ## Migrations
 
@@ -48,9 +61,11 @@ Sequential files in `src/db/migrations/` (001_, 002_, ...). Each exports `up()` 
 
 IMPORTANT: When adding a migration, you MUST also register it in `src/db/migration-registry.ts`. The production bundle cannot discover migrations from the filesystem.
 
-## Monorepo
+## Self-hosting installer
 
-pnpm workspace. The self-hosting CLI is a separate package at `packages/cli/` (`@futo-notes/cli`).
+The `stonefruit` CLI that users install via `curl -sSL … install.sh | sh` is a separate Go module at `installer/` (Cobra + Bubble Tea TUI). It is not part of the pnpm workspace. Build it with `cd installer && go build ./`; run tests with `go test ./...`.
+
+The installer collects an admin password during setup, hashes it by shelling out to `docker run --rm <image> node dist/index.js hash <pw>` (single source of truth for scrypt format), and writes `STONEFRUIT_PASSWORD_HASH=...` to a sibling `.env` file. Docker compose substitutes it via `${STONEFRUIT_PASSWORD_HASH}` in `docker-compose.yml`. The `.env` is `0600`.
 
 ## CI/CD
 

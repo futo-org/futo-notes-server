@@ -15,7 +15,7 @@ The first client is a notes app, but the server knows nothing about notes — se
 | Database | PostgreSQL | Metadata only — kept intentionally small (see §Database footprint) |
 | Query builder | Kysely | Matches Yucca, type-safe, no ORM magic |
 | Blob storage | Cloudflare R2 (prod) | Stores encrypted blobs. Local dev uses an S3-compatible service (TBD — candidates: LocalStack, SeaweedFS, Garage) |
-| Auth | OIDC + PKCE | Opaque session tokens in Postgres. Zitadel is the current reference provider |
+| Auth | Password (v1) or OIDC (deferred) | Opaque session tokens in Postgres. Mode is per-deployment (`AUTH_MODE` env var) |
 | Real-time | WebSocket | Native WS, not Socket.IO |
 | Deployment | Hetzner + Kubernetes | Docker Compose is local-dev only |
 
@@ -53,24 +53,33 @@ v1 is designed so this is a forward-compatible extension, not a rewrite. The inv
 
 ## Auth
 
-OIDC Authorization Code flow with PKCE (S256). Zitadel is the current reference provider; Yucca's production IdP is TBD.
+Two modes, chosen per-deployment via `AUTH_MODE`. The server renders no auth UI in either mode — clients read the capability endpoint at `/` and drive the login flow themselves.
+
+### `AUTH_MODE=password` (v1 self-hosted)
+
+Single-user mode. The admin password is scrypt-hashed and passed in as the `STONEFRUIT_PASSWORD_HASH` env var (set by the installer TUI, which shells out to `node dist/index.js hash <pw>`). One singleton user row (`sub='local'`) is lazy-upserted on first successful login. There is no per-user password table and no reset endpoint — password change = re-run the installer, which rewrites the sibling `.env` and restarts the server.
 
 Flow:
-1. Client redirects to the IdP login
-2. IdP redirects back with authorization `code`
-3. Server exchanges code for tokens, extracts `sub`, `name`, `email`
-4. Server creates/updates user in Postgres, creates session
-5. Server generates opaque session token (random 32 bytes, hex-encoded), stores its **SHA-256 hash** in the `sessions` table, and returns the raw token as an `httpOnly` cookie
-6. Subsequent requests: server hashes the incoming cookie value and looks up the row by hash
+1. Client POSTs `{ password }` to `/api/auth/password/login`
+2. Server scrypt-verifies against `STONEFRUIT_PASSWORD_HASH`
+3. On success: upsert singleton user, open session, return `{ user, token }`
 
-Storing only the hash means a `sessions` table leak does not yield usable bearer credentials.
+### `AUTH_MODE=oidc` (deferred)
 
-Required OIDC claims: `sub`, `name`, `email`.
+Not implemented in v1. Will live in `src/hosted/` as middleware; `AUTH_MODE` gains `'oidc'` as a third value when it lands. Flow will be OIDC Authorization Code with PKCE (S256); required claims `sub`, `name`, `email`. The capability endpoint's `signup` field flips to `'open'` when this is enabled.
 
-Session expiry: 7 days (matches Yucca).
+### Session model (both modes)
+
+Server generates an opaque session token (32 random bytes, hex-encoded), stores its **SHA-256 hash** in the `sessions` table, and returns the raw token as an `httpOnly` cookie. Subsequent requests hash the cookie and look up the row. A `sessions` table leak therefore does not yield usable bearer credentials.
+
+Session expiry: 7 days.
+
+### Capability discovery
+
+`GET /` returns `{ name, version, auth_mode, signup, billing }`. Clients fetch it once at server-add time to render the right login UI per-server — one client build works against any deployment without per-server configuration.
 
 ### Yucca migration path
-Point `OIDC_ISSUER` at whatever provider Yucca uses. Session model is identical — no code changes needed.
+When OIDC lands, point `OIDC_ISSUER` at whatever provider Yucca uses. Session model is already identical — no code changes needed.
 
 ## Storage architecture
 
@@ -293,12 +302,19 @@ Clients receive a signed JWT carrying a `shard_id` claim. The stateless gateway 
 
 All endpoints under `/api`.
 
+### Capability
+```
+GET  /                                            → { name, version, auth_mode, signup, billing }
+GET  /health                                      → { status, db }
+```
+
 ### Auth
 ```
-GET  /api/auth                                    → current user
-GET  /api/auth/oidc/login                         → redirect to IdP
-GET  /api/auth/oidc/callback                      → complete OIDC flow
+GET  /api/auth                                    → current user (authenticated)
 POST /api/auth/logout                             → destroy session
+POST /api/auth/password/login                     → password-mode login (mode=password)
+GET  /api/auth/oidc/start                         → OIDC redirect to IdP (deferred)
+GET  /api/auth/oidc/callback                      → OIDC callback (deferred)
 ```
 
 ### Collections
