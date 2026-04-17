@@ -78,7 +78,7 @@ func runNonInteractive(workDir string, port int, dataPath, password string) erro
 		if err != nil {
 			return err
 		}
-		cfg = config.Config{Port: port, DataPath: dataPath, PostgresPassword: pw}
+		cfg = config.Config{Port: port, DataPath: dataPath, PostgresPassword: pw, Track: docker.DefaultTrack}
 		if err := docker.WriteCompose(workDir, cfg); err != nil {
 			return fmt.Errorf("write docker-compose.yml: %w", err)
 		}
@@ -110,7 +110,7 @@ func runNonInteractive(workDir string, port int, dataPath, password string) erro
 		fmt.Println("done")
 
 		fmt.Print("  Hashing password... ")
-		passwordHash, err = docker.HashPassword(docker.ServerImage, plain)
+		passwordHash, err = docker.HashPassword(docker.ServerImage(cfg.Track), plain)
 		if err != nil {
 			fmt.Println("failed")
 			return err

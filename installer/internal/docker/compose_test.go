@@ -14,6 +14,7 @@ func TestGenerateAndParseCompose_RoundTrip(t *testing.T) {
 		Port:             4242,
 		DataPath:         "./my-notes",
 		PostgresPassword: "deadbeef1234",
+		Track:            "stable",
 	}
 	if err := WriteCompose(dir, want); err != nil {
 		t.Fatalf("WriteCompose: %v", err)
@@ -30,6 +31,23 @@ func TestGenerateAndParseCompose_RoundTrip(t *testing.T) {
 	}
 	if *got != want {
 		t.Fatalf("round-trip mismatch:\n  got:  %+v\n  want: %+v", *got, want)
+	}
+}
+
+func TestGenerateCompose_TrackSelectsImage(t *testing.T) {
+	out := GenerateCompose(config.Config{Port: 3005, DataPath: "/d", PostgresPassword: "pw", Track: "latest"})
+	if !contains(out, ServerImageBase+":latest") {
+		t.Fatalf("expected image to use latest tag, got:\n%s", out)
+	}
+	if contains(out, ServerImageBase+":stable") {
+		t.Fatalf("expected no stable tag, got:\n%s", out)
+	}
+}
+
+func TestGenerateCompose_EmptyTrackDefaultsToStable(t *testing.T) {
+	out := GenerateCompose(config.Config{Port: 3005, DataPath: "/d", PostgresPassword: "pw"})
+	if !contains(out, ServerImageBase+":stable") {
+		t.Fatalf("expected image to use stable tag by default, got:\n%s", out)
 	}
 }
 

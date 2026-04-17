@@ -18,6 +18,10 @@ type Config struct {
 	// NOT inlined in docker-compose.yml so it can be rotated without
 	// rewriting compose.
 	PasswordHash string
+	// Release track: "stable" (tagged releases) or "latest" (main branch
+	// rolling). Defaults to stable on fresh installs; switched via
+	// `stonefruit release <track>`.
+	Track string
 }
 
 func GeneratePassword() (string, error) {

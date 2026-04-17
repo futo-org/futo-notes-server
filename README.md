@@ -31,9 +31,13 @@ This will:
 ### Other CLI commands
 
 ```bash
-stonefruit status     # Check server health
-stonefruit update     # Pull latest image and restart
+stonefruit status            # Check server health
+stonefruit update            # Pull current track and restart
+stonefruit release latest    # Switch to main-branch rolling builds
+stonefruit release stable    # Switch back to tagged releases (default)
 ```
+
+New installs default to the `stable` track (tagged releases). `latest` follows `main` — use it to dogfood unreleased fixes.
 
 Run any command with `--help` for the full flag list.
 

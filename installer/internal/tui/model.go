@@ -367,7 +367,7 @@ func (m model) submitConfig() (tea.Model, tea.Cmd) {
 		m.screen = screenError
 		return m, nil
 	}
-	m.cfg = config.Config{Port: port, DataPath: dataPath, PostgresPassword: pw}
+	m.cfg = config.Config{Port: port, DataPath: dataPath, PostgresPassword: pw, Track: docker.DefaultTrack}
 	m.configErr = ""
 
 	if err := docker.WriteCompose(m.workDir, m.cfg); err != nil {
@@ -490,7 +490,7 @@ func (m model) runPhaseCmd(index int) tea.Cmd {
 		case "Pulling images":
 			err = docker.ComposePull(workDir, &buf)
 		case "Hashing password":
-			hash, err = docker.HashPassword(docker.ServerImage, plain)
+			hash, err = docker.HashPassword(docker.ServerImage(cfg.Track), plain)
 			if err == nil {
 				err = docker.WriteEnvFile(workDir, hash)
 			}
