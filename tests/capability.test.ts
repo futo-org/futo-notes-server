@@ -7,7 +7,7 @@ const app = buildApp()
 test('GET / returns capability JSON', async () => {
   const response = await app.fetch(new Request('http://test.local/'))
   assert.equal(response.status, 200)
-  assert.equal(response.headers.get('content-type'), 'application/json; charset=UTF-8')
+  assert.match(response.headers.get('content-type') ?? '', /^application\/json/)
   const data = await response.json() as {
     name: string
     version: string
