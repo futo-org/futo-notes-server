@@ -23,6 +23,7 @@ const (
 	screenWelcome screen = iota
 	screenDocker
 	screenConfig
+	screenPassword
 	screenDeploy
 	screenSuccess
 	screenError
@@ -51,6 +52,7 @@ type phaseDoneMsg struct {
 	index int
 	err   error
 	log   string
+	hash  string // filled by the hashing phase so the model can store it
 }
 
 // Run launches the TUI. workDir is where the compose file will be
@@ -89,9 +91,17 @@ type model struct {
 	focused       int
 	configErr     string
 
+	// password form
+	passwordInput textinput.Model
+	confirmInput  textinput.Model
+	pwFocused     int
+	pwErr         string
+
 	// resolved config (from form submit or parsed existing compose)
 	cfg             config.Config
 	existingInstall bool
+	passwordPlain   string // set from the password screen; hashed in deploy phase
+	passwordHash    string // set when we read .env from existing install
 
 	// deploy
 	phases       []phase
@@ -116,6 +126,20 @@ func newModel(workDir string, defaultPort int, defaultDataPath string) model {
 	dp.CharLimit = 256
 	dp.Width = 40
 
+	pw := textinput.New()
+	pw.Prompt = ""
+	pw.EchoMode = textinput.EchoPassword
+	pw.EchoCharacter = '•'
+	pw.CharLimit = 128
+	pw.Width = 40
+
+	cf := textinput.New()
+	cf.Prompt = ""
+	cf.EchoMode = textinput.EchoPassword
+	cf.EchoCharacter = '•'
+	cf.CharLimit = 128
+	cf.Width = 40
+
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(accent)
@@ -125,13 +149,24 @@ func newModel(workDir string, defaultPort int, defaultDataPath string) model {
 		workDir:       workDir,
 		portInput:     port,
 		dataPathInput: dp,
+		passwordInput: pw,
+		confirmInput:  cf,
 		spinner:       sp,
-		phases: []phase{
-			{label: "Pulling images"},
-			{label: "Starting containers"},
-			{label: "Waiting for server"},
-		},
 	}
+}
+
+// buildPhases constructs the deploy phase list. Skips "Hashing password" when
+// we already have a hash from an existing .env.
+func buildPhases(needsHash bool) []phase {
+	phases := []phase{{label: "Pulling images"}}
+	if needsHash {
+		phases = append(phases, phase{label: "Hashing password"})
+	}
+	phases = append(phases,
+		phase{label: "Starting containers"},
+		phase{label: "Waiting for server"},
+	)
+	return phases
 }
 
 func (m model) Init() tea.Cmd {
@@ -159,6 +194,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateDocker(msg)
 	case screenConfig:
 		return m.updateConfig(msg)
+	case screenPassword:
+		return m.updatePassword(msg)
 	case screenDeploy:
 		return m.updateDeploy(msg)
 	case screenSuccess, screenError:
@@ -181,6 +218,8 @@ func (m model) View() string {
 		body = m.viewDocker()
 	case screenConfig:
 		body = m.viewConfig()
+	case screenPassword:
+		body = m.viewPassword()
 	case screenDeploy:
 		body = m.viewDeploy()
 	case screenSuccess:
@@ -238,7 +277,6 @@ func (m model) updateDocker(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.dockerVersion = msg.version
 
-		// Existing install? Skip straight to deploy with parsed config.
 		existing, err := docker.ParseExistingCompose(m.workDir)
 		if err != nil {
 			m.fatalErr = fmt.Errorf("read existing compose: %w", err)
@@ -248,8 +286,22 @@ func (m model) updateDocker(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if existing != nil {
 			m.cfg = *existing
 			m.existingInstall = true
-			m.screen = screenDeploy
-			return m, m.startDeploy()
+			hash, err := docker.ParseExistingEnv(m.workDir)
+			if err != nil {
+				m.fatalErr = fmt.Errorf("read existing .env: %w", err)
+				m.screen = screenError
+				return m, nil
+			}
+			if hash != "" {
+				m.passwordHash = hash
+				m.phases = buildPhases(false)
+				m.screen = screenDeploy
+				return m, m.startDeploy()
+			}
+			// Compose exists but no password hash — prompt for one.
+			m.passwordInput.Focus()
+			m.screen = screenPassword
+			return m, textinput.Blink
 		}
 		m.screen = screenConfig
 		return m, textinput.Blink
@@ -326,8 +378,9 @@ func (m model) submitConfig() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	m.screen = screenDeploy
-	return m, m.startDeploy()
+	m.passwordInput.Focus()
+	m.screen = screenPassword
+	return m, textinput.Blink
 }
 
 func (m model) viewConfig() string {
@@ -351,33 +404,109 @@ func renderField(label, input string, focused bool) string {
 	return marker + lbl + "  " + input
 }
 
+// ── Password form ───────────────────────────────────────────────────
+
+func (m model) updatePassword(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "tab", "down":
+			m.pwFocused = (m.pwFocused + 1) % 2
+			m.refocusPassword()
+			return m, textinput.Blink
+		case "shift+tab", "up":
+			m.pwFocused = (m.pwFocused + 1) % 2
+			m.refocusPassword()
+			return m, textinput.Blink
+		case "enter":
+			return m.submitPassword()
+		}
+	}
+	if m.pwFocused == 0 {
+		m.passwordInput, cmd = m.passwordInput.Update(msg)
+	} else {
+		m.confirmInput, cmd = m.confirmInput.Update(msg)
+	}
+	return m, cmd
+}
+
+func (m *model) refocusPassword() {
+	if m.pwFocused == 0 {
+		m.passwordInput.Focus()
+		m.confirmInput.Blur()
+	} else {
+		m.passwordInput.Blur()
+		m.confirmInput.Focus()
+	}
+}
+
+func (m model) submitPassword() (tea.Model, tea.Cmd) {
+	pw := m.passwordInput.Value()
+	confirm := m.confirmInput.Value()
+	if len(pw) < 8 {
+		m.pwErr = "Password must be at least 8 characters."
+		return m, nil
+	}
+	if pw != confirm {
+		m.pwErr = "Passwords do not match."
+		return m, nil
+	}
+	m.pwErr = ""
+	m.passwordPlain = pw
+	m.phases = buildPhases(true)
+	m.screen = screenDeploy
+	return m, m.startDeploy()
+}
+
+func (m model) viewPassword() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("Set the admin password") + "\n")
+	b.WriteString(hintStyle.Render("Used when connecting a client to this server. At least 8 characters.") + "\n\n")
+	b.WriteString(renderField("Password", m.passwordInput.View(), m.pwFocused == 0) + "\n")
+	b.WriteString(renderField("Confirm ", m.confirmInput.View(), m.pwFocused == 1) + "\n")
+	if m.pwErr != "" {
+		b.WriteString("\n" + dangerStyle.Render(m.pwErr) + "\n")
+	}
+	b.WriteString("\n" + hintStyle.Render("Tab to switch fields · Enter to confirm · Ctrl-C to quit"))
+	return b.String()
+}
+
 // ── Deploy ──────────────────────────────────────────────────────────
 
 func (m model) startDeploy() tea.Cmd {
 	m.phases[0].status = phaseRunning
-	return tea.Batch(m.spinner.Tick, runPhaseCmd(0, m.workDir, m.cfg))
+	return tea.Batch(m.spinner.Tick, m.runPhaseCmd(0))
 }
 
-func runPhaseCmd(index int, workDir string, cfg config.Config) tea.Cmd {
+func (m model) runPhaseCmd(index int) tea.Cmd {
+	workDir := m.workDir
+	cfg := m.cfg
+	plain := m.passwordPlain
+	label := m.phases[index].label
 	return func() tea.Msg {
 		var buf bytes.Buffer
 		var err error
-		switch index {
-		case 0:
+		var hash string
+		switch label {
+		case "Pulling images":
 			err = docker.ComposePull(workDir, &buf)
-		case 1:
-			// Stale-container cleanup runs inside the "Starting" phase
-			// — it's logically a prerequisite of `docker compose up`.
+		case "Hashing password":
+			hash, err = docker.HashPassword(docker.ServerImage, plain)
+			if err == nil {
+				err = docker.WriteEnvFile(workDir, hash)
+			}
+		case "Starting containers":
 			if cerr := docker.RemoveStaleContainers(workDir, func(s string) { buf.WriteString(s + "\n") }); cerr != nil {
 				err = cerr
 			} else {
 				err = docker.ComposeUp(workDir, &buf)
 			}
-		case 2:
+		case "Waiting for server":
 			baseURL := fmt.Sprintf("http://localhost:%d", cfg.Port)
 			err = api.WaitForHealthy(baseURL, 90*time.Second)
 		}
-		return phaseDoneMsg{index: index, err: err, log: buf.String()}
+		return phaseDoneMsg{index: index, err: err, log: buf.String(), hash: hash}
 	}
 }
 
@@ -386,6 +515,9 @@ func (m model) updateDeploy(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case phaseDoneMsg:
 		if msg.log != "" {
 			m.deployLog.WriteString(msg.log)
+		}
+		if msg.hash != "" {
+			m.passwordHash = msg.hash
 		}
 		if msg.err != nil {
 			m.phases[msg.index].status = phaseFailed
@@ -401,7 +533,7 @@ func (m model) updateDeploy(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.currentPhase = next
 		m.phases[next].status = phaseRunning
-		return m, runPhaseCmd(next, m.workDir, m.cfg)
+		return m, m.runPhaseCmd(next)
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
@@ -447,13 +579,10 @@ func (m model) viewSuccess() string {
 	if m.existingInstall {
 		b.WriteString("Updated and restarted.\n\n")
 	}
-	b.WriteString(labelStyle.Render("1. Create your account") + "\n")
-	b.WriteString(fmt.Sprintf("   Open %s/start in your browser and sign up.\n\n", url))
-	b.WriteString(labelStyle.Render("2. Connect the app") + "\n")
-	b.WriteString("   Settings → Sync in Stonefruit:\n")
-	b.WriteString(fmt.Sprintf("     Server URL:  %s\n", url))
-	b.WriteString("     Email:       (what you just signed up with)\n")
-	b.WriteString("     Password:    (what you just signed up with)\n\n")
+	b.WriteString(labelStyle.Render("Connect the app") + "\n")
+	b.WriteString("  Settings → Sync in Stonefruit:\n")
+	b.WriteString(fmt.Sprintf("    Server URL:  %s\n", url))
+	b.WriteString("    Password:    (the password you just set)\n\n")
 	b.WriteString(hintStyle.Render("Press Enter to exit"))
 	return b.String()
 }
