@@ -1,18 +1,15 @@
 import 'dotenv/config'
 
-function required(name: string): string {
-  const v = process.env[name]
-  if (!v) throw new Error(`Missing required env var: ${name}`)
-  return v
-}
-
 export const AUTH_MODES = ['dev', 'password'] as const
 export type AuthMode = (typeof AUTH_MODES)[number]
 
 const rawAuthMode = process.env.AUTH_MODE ?? 'dev'
 
+// Reads at import time. Validation happens in validateEnv(), called by
+// runServer() — keeps CLI subcommands (e.g. `hash`) runnable without a
+// full server env (no DATABASE_URL required).
 export const env = {
-  DATABASE_URL: required('DATABASE_URL'),
+  DATABASE_URL: process.env.DATABASE_URL ?? '',
   PORT: Number(process.env.PORT ?? 3000),
   BLOB_DIR: process.env.BLOB_DIR ?? './blobs',
   LOG_LEVEL: (process.env.LOG_LEVEL ?? 'info') as 'debug' | 'info' | 'warn' | 'error',
@@ -24,6 +21,9 @@ export const env = {
 }
 
 export function validateEnv(): void {
+  if (!env.DATABASE_URL) {
+    throw new Error('DATABASE_URL is required')
+  }
   if (!(AUTH_MODES as readonly string[]).includes(rawAuthMode)) {
     throw new Error(`Invalid AUTH_MODE=${rawAuthMode}. Valid: ${AUTH_MODES.join(', ')}`)
   }

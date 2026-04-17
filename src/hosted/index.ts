@@ -1,6 +1,6 @@
 import { buildApp } from '../app.ts'
 import { log } from '../logger.ts'
-import { runServer } from '../server.ts'
+import { runCliSubcommand, runServer } from '../server.ts'
 
 // Hosted entrypoint. Starts the same app as OSS; hosted-only middleware
 // (billing, analytics, etc.) will wire in here as it's added.
@@ -11,8 +11,10 @@ function buildHostedApp() {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  runServer(buildHostedApp(), 'stonefruit (hosted)').catch((err) => {
-    log.error('fatal startup error', { error: String(err) })
-    process.exit(1)
-  })
+  runCliSubcommand()
+    .then(() => runServer(buildHostedApp(), 'stonefruit (hosted)'))
+    .catch((err) => {
+      log.error('fatal startup error', { error: String(err) })
+      process.exit(1)
+    })
 }
