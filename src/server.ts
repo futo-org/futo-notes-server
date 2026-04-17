@@ -3,10 +3,11 @@ import type { Hono } from 'hono'
 import type { AuthContext } from './auth/middleware.ts'
 import { db, waitForDb } from './db/connection.ts'
 import { migrateToLatest } from './db/migrate.ts'
-import { env } from './env.ts'
+import { env, validateEnv } from './env.ts'
 import { log } from './logger.ts'
 
 export async function runServer(app: Hono<{ Variables: AuthContext }>, label = 'stonefruit'): Promise<void> {
+  validateEnv()
   await waitForDb()
   await migrateToLatest()
 
