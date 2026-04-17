@@ -3,14 +3,12 @@ import { cors } from 'hono/cors'
 import pkg from '../package.json' with { type: 'json' }
 import { authMiddleware, type AuthContext } from './auth/middleware.ts'
 import { authRoutes } from './auth/routes.ts'
-import { isSetupComplete, signupRoutes } from './auth/signup-routes.ts'
 import { FsBlobStore } from './blob/fs.ts'
 import { createBlobRoutes } from './blobs/routes.ts'
 import { collectionsRoutes } from './collections/routes.ts'
 import { pool } from './db/connection.ts'
 import { env } from './env.ts'
 import { objectsRoutes } from './objects/routes.ts'
-import { startRoutes } from './routes/start.ts'
 
 const VERSION: string = pkg.version
 
@@ -31,22 +29,14 @@ export function buildApp(): Hono<{ Variables: AuthContext }> {
     try {
       const client = await pool.connect()
       client.release()
-      const setupComplete = await isSetupComplete()
-      return c.json({ status: 'ok', db: 'connected', setup_complete: setupComplete })
+      return c.json({ status: 'ok', db: 'connected' })
     } catch {
-      return c.json({ status: 'degraded', db: 'unreachable', setup_complete: false }, 503)
+      return c.json({ status: 'degraded', db: 'unreachable' }, 503)
     }
   })
 
-  // /start is a public HTML signup page.
-  app.route('/', startRoutes)
-
   // Auth middleware applies to every /api/* path; public paths are exempted internally.
   app.use('/api/*', authMiddleware)
-
-  // Signup + login routes (paths start with /api — they'll pass through middleware
-  // as public routes).
-  app.route('/', signupRoutes)
 
   app.route('/api/auth', authRoutes)
   app.route('/api/collections', collectionsRoutes)

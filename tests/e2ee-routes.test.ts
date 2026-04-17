@@ -38,9 +38,8 @@ async function uploadBlob(token: string, body: string): Promise<string> {
 }
 
 test('health responds without auth', async () => {
-  const data = await json<{ status: string; setup_complete: boolean }>('/health')
+  const data = await json<{ status: string }>('/health')
   assert.equal(data.status, 'ok')
-  assert.equal(data.setup_complete, true)
 })
 
 test('dev auth, collections, blobs, and global sync cursor round-trip', async () => {

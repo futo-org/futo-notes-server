@@ -3,12 +3,6 @@ import { getCookie } from 'hono/cookie'
 import { env } from '../env.ts'
 import { validateSession } from './session.ts'
 
-/** Paths that never require authentication. */
-const PUBLIC_PATHS = new Set<string>([
-  '/api/auth/signup',
-  '/api/auth/login',
-])
-
 /** Paths only public in dev auth mode. */
 const DEV_PUBLIC_PATHS = new Set<string>([
   '/api/auth/dev/login',
@@ -21,7 +15,6 @@ export interface AuthContext {
 
 export const authMiddleware: MiddlewareHandler<{ Variables: AuthContext }> = async (c, next) => {
   const path = c.req.path
-  if (PUBLIC_PATHS.has(path)) return next()
   if (env.AUTH_MODE === 'dev' && DEV_PUBLIC_PATHS.has(path)) return next()
 
   const token = getCookie(c, 'session')
