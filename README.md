@@ -31,6 +31,8 @@ This will:
 ### Other CLI commands
 
 ```bash
+stonefruit start             # Start the server containers
+stonefruit stop              # Stop them
 stonefruit status            # Check server health
 stonefruit update            # Pull current track and restart
 stonefruit release latest    # Switch to main-branch rolling builds
