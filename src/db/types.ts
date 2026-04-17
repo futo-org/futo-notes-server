@@ -13,7 +13,6 @@ export interface UsersTable {
   sub: string
   name: string
   email: string
-  password_hash: string | null
 }
 
 export interface SessionsTable {
