@@ -120,3 +120,103 @@ test('dev auth, collections, blobs, and global sync cursor round-trip', async ()
   assert.equal(downloaded.status, 200)
   assert.equal(await downloaded.text(), 'encrypted-two')
 })
+
+test('blob-objects single-round-trip create, update, and conflict', async () => {
+  const email = `bulk-${Date.now()}-${Math.random().toString(16).slice(2)}@example.test`
+  const login = await json<{ token: string; user: { id: string } }>('/api/auth/dev/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, name: 'Bulk Test' }),
+  })
+  const auth = { Authorization: `Bearer ${login.token}` }
+
+  const created = await json<{ collection: { id: string } }>('/api/collections', {
+    method: 'POST',
+    headers: auth,
+  })
+  const cid = created.collection.id
+
+  // Create via blob-objects — one request.
+  const createRes = await app.fetch(new Request(
+    `http://test.local/api/collections/${cid}/blob-objects`,
+    {
+      method: 'POST',
+      headers: { ...auth, 'Content-Type': 'application/octet-stream' },
+      body: 'ciphertext-one',
+    },
+  ))
+  assert.equal(createRes.status, 201)
+  const createBody = await createRes.json() as {
+    object: { id: string; version: string; change_seq: string; blob_key: string; size_bytes: string }
+    collectionVersion: number
+  }
+  assert.equal(Number(createBody.object.version), 1)
+  assert.equal(Number(createBody.object.change_seq), 1)
+  assert.equal(Number(createBody.object.size_bytes), 'ciphertext-one'.length)
+  assert.equal(createBody.collectionVersion, 1)
+
+  // Blob is fetchable.
+  const blobRes = await app.fetch(new Request(
+    `http://test.local/api/blobs/${createBody.object.blob_key}`,
+    { headers: auth },
+  ))
+  assert.equal(blobRes.status, 200)
+  assert.equal(await blobRes.text(), 'ciphertext-one')
+
+  // Update via blob-objects — one request.
+  const updateRes = await app.fetch(new Request(
+    `http://test.local/api/collections/${cid}/blob-objects/${createBody.object.id}?version=2`,
+    {
+      method: 'PUT',
+      headers: { ...auth, 'Content-Type': 'application/octet-stream' },
+      body: 'ciphertext-two',
+    },
+  ))
+  assert.equal(updateRes.status, 200)
+  const updateBody = await updateRes.json() as {
+    object: { version: string; blob_key: string }
+    collectionVersion: number
+  }
+  assert.equal(Number(updateBody.object.version), 2)
+  assert.notEqual(updateBody.object.blob_key, createBody.object.blob_key)
+
+  // Stale version → 409 with current state.
+  const conflictRes = await app.fetch(new Request(
+    `http://test.local/api/collections/${cid}/blob-objects/${createBody.object.id}?version=2`,
+    {
+      method: 'PUT',
+      headers: { ...auth, 'Content-Type': 'application/octet-stream' },
+      body: 'ciphertext-stale',
+    },
+  ))
+  assert.equal(conflictRes.status, 409)
+  const conflictBody = await conflictRes.json() as {
+    error: string
+    currentVersion: number
+    currentBlobKey: string
+  }
+  assert.equal(conflictBody.currentVersion, 2)
+  assert.equal(conflictBody.currentBlobKey, updateBody.object.blob_key)
+
+  // Empty body rejected.
+  const emptyRes = await app.fetch(new Request(
+    `http://test.local/api/collections/${cid}/blob-objects`,
+    {
+      method: 'POST',
+      headers: { ...auth, 'Content-Type': 'application/octet-stream' },
+      body: new Uint8Array(0),
+    },
+  ))
+  assert.equal(emptyRes.status, 400)
+
+  // Missing version rejected on PUT.
+  const missingVersionRes = await app.fetch(new Request(
+    `http://test.local/api/collections/${cid}/blob-objects/${createBody.object.id}`,
+    {
+      method: 'PUT',
+      headers: { ...auth, 'Content-Type': 'application/octet-stream' },
+      body: 'x',
+    },
+  ))
+  assert.equal(missingVersionRes.status, 400)
+})

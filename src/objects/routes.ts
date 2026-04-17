@@ -2,10 +2,14 @@ import { Hono } from 'hono'
 import { sql, type Transaction } from 'kysely'
 import { uuidv7 } from 'uuidv7'
 import type { AuthContext } from '../auth/middleware.ts'
+import type { BlobStore } from '../blob/interface.ts'
 import { db } from '../db/connection.ts'
 import type { Database } from '../db/types.ts'
 
-export const objectsRoutes = new Hono<{ Variables: AuthContext }>()
+export function createObjectsRoutes(
+  store: BlobStore,
+): Hono<{ Variables: AuthContext }> {
+  const objectsRoutes = new Hono<{ Variables: AuthContext }>()
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -343,3 +347,157 @@ objectsRoutes.delete('/:cid/objects/:oid', async (c) => {
   }
   return c.json({ object: result.row, collectionVersion: Number(result.row.change_seq) })
 })
+
+  // Single-round-trip create: body is raw ciphertext. Server mints the
+  // blob key, writes the blob, then inserts the object row. Halves the
+  // RTT cost of the original POST /blobs + POST /objects pair, which
+  // matters a lot on first-sync of a large collection over high-latency
+  // networks. Semantically equivalent to those two calls — same response
+  // shape, same invariants.
+  objectsRoutes.post('/:cid/blob-objects', async (c) => {
+    const userId = c.var.user.id
+    const cid = c.req.param('cid')
+    if (!(await ensureCollectionOwned(userId, cid))) {
+      return c.json({ error: 'not found' }, 404)
+    }
+
+    const body = await c.req.arrayBuffer()
+    if (body.byteLength === 0) {
+      return c.json({ error: 'empty body' }, 400)
+    }
+
+    const blobKey = `${userId}/${uuidv7()}`
+    await store.put(blobKey, new Uint8Array(body))
+
+    return await db.transaction().execute(async (trx) => {
+      const changeSeq = await nextCollectionVersion(trx, userId, cid)
+      const row = await trx
+        .insertInto('objects')
+        .values({
+          id: uuidv7(),
+          collection_id: cid,
+          user_id: userId,
+          blob_key: blobKey,
+          size_bytes: String(body.byteLength),
+          change_seq: changeSeq,
+        })
+        .returning([
+          'id',
+          'collection_id',
+          'version',
+          'change_seq',
+          'deleted',
+          'blob_key',
+          'size_bytes',
+          'created_at',
+          'updated_at',
+        ])
+        .executeTakeFirstOrThrow()
+
+      return c.json({ object: row, collectionVersion: Number(changeSeq) }, 201)
+    })
+  })
+
+  // Single-round-trip update: body is raw ciphertext, ?version=N is the
+  // expected next version. Mirrors PUT /objects/:oid's version-check +
+  // conflict semantics exactly so the client's merge path is unchanged.
+  objectsRoutes.put('/:cid/blob-objects/:oid', async (c) => {
+    const userId = c.var.user.id
+    const cid = c.req.param('cid')
+    const oid = c.req.param('oid')
+
+    const versionRaw = c.req.query('version')
+    const version = Number(versionRaw)
+    if (!Number.isSafeInteger(version) || version < 1) {
+      return c.json({ error: 'valid ?version query required' }, 400)
+    }
+
+    const body = await c.req.arrayBuffer()
+    if (body.byteLength === 0) {
+      return c.json({ error: 'empty body' }, 400)
+    }
+
+    const blobKey = `${userId}/${uuidv7()}`
+    await store.put(blobKey, new Uint8Array(body))
+    const sizeBytes = body.byteLength
+
+    return await db.transaction().execute(async (trx) => {
+      const current = await trx
+        .selectFrom('objects')
+        .where('id', '=', oid)
+        .where('collection_id', '=', cid)
+        .where('user_id', '=', userId)
+        .select(['version', 'blob_key'])
+        .executeTakeFirst()
+
+      if (!current) {
+        return c.json({ error: 'not found' }, 404)
+      }
+
+      if (Number(current.version) !== version - 1) {
+        return c.json(
+          {
+            error: 'version conflict',
+            currentVersion: Number(current.version),
+            currentBlobKey: current.blob_key,
+          },
+          409,
+        )
+      }
+
+      const changeSeq = await nextCollectionVersion(trx, userId, cid)
+      const updated = await trx
+        .updateTable('objects')
+        .set({
+          version: String(version),
+          change_seq: changeSeq,
+          blob_key: blobKey,
+          size_bytes: String(sizeBytes),
+          updated_at: sql`now()`,
+        })
+        .where('id', '=', oid)
+        .where('collection_id', '=', cid)
+        .where('user_id', '=', userId)
+        .where('version', '=', String(version - 1))
+        .returning([
+          'id',
+          'collection_id',
+          'version',
+          'change_seq',
+          'deleted',
+          'blob_key',
+          'size_bytes',
+          'created_at',
+          'updated_at',
+        ])
+        .executeTakeFirst()
+
+      if (updated) {
+        return c.json({ object: updated, collectionVersion: Number(changeSeq) })
+      }
+
+      const latest = await trx
+        .selectFrom('objects')
+        .where('id', '=', oid)
+        .where('collection_id', '=', cid)
+        .where('user_id', '=', userId)
+        .select(['version', 'blob_key'])
+        .executeTakeFirst()
+
+      if (!latest) {
+        return c.json({ error: 'not found' }, 404)
+      }
+
+      return c.json(
+        {
+          error: 'version conflict',
+          currentVersion: Number(latest.version),
+          currentBlobKey: latest.blob_key,
+        },
+        409,
+      )
+    })
+  })
+
+  return objectsRoutes
+}

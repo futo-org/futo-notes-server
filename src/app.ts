@@ -9,7 +9,7 @@ import { createBlobRoutes } from './blobs/routes.ts'
 import { collectionsRoutes } from './collections/routes.ts'
 import { pool } from './db/connection.ts'
 import { env } from './env.ts'
-import { objectsRoutes } from './objects/routes.ts'
+import { createObjectsRoutes } from './objects/routes.ts'
 
 const VERSION: string = pkg.version
 
@@ -43,9 +43,10 @@ export function buildApp(): Hono<{ Variables: AuthContext }> {
   if (env.AUTH_MODE === 'password') {
     app.route('/api/auth/password', passwordRoutes)
   }
+  const blobStore = new FsBlobStore(env.BLOB_DIR)
   app.route('/api/collections', collectionsRoutes)
-  app.route('/api/collections', objectsRoutes)
-  app.route('/api/blobs', createBlobRoutes(new FsBlobStore(env.BLOB_DIR)))
+  app.route('/api/collections', createObjectsRoutes(blobStore))
+  app.route('/api/blobs', createBlobRoutes(blobStore))
 
   return app
 }
