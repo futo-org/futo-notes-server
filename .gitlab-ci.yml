@@ -63,9 +63,13 @@ test:build:
     - !reference [.cache-pnpm, cache]
   script:
     - pnpm install --frozen-lockfile
+    # OSS code must never import from src/hosted/ (hosted code wraps OSS, not vice versa).
+    - '! grep -rnE "from [''\"][^''\"]*hosted/" src --include=*.ts | grep -v "^src/hosted/"'
     - pnpm run build
-    - ls -la dist/index.js
-    - echo "Bundle size:" && wc -c dist/index.js
+    - pnpm run build:hosted
+    - ls -la dist/index.js dist/hosted.js
+    - echo "OSS bundle:"    && wc -c dist/index.js
+    - echo "Hosted bundle:" && wc -c dist/hosted.js
 
 test:docker:
   stage: test
@@ -120,39 +124,65 @@ build:image:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
 
 # ─────────────────────────────────────────────────────────────
-# CLI release (tags only)
-# Builds the CLI bundle, uploads to the generic package registry,
-# then creates a GitLab release that install.sh can resolve.
+# Installer (Go binary) — test + release
 # ─────────────────────────────────────────────────────────────
 
-release:cli:
-  stage: release
-  cache:
-    - !reference [.cache-pnpm, cache]
+test:installer:
+  stage: test
+  image: golang:1.25
+  before_script: []
   script:
-    # Install curl + ca-certs (node:24-slim doesn't include them)
-    - apt-get update && apt-get install -y --no-install-recommends curl ca-certificates
-    # Build CLI bundle
-    - pnpm install --frozen-lockfile
-    - pnpm --filter @futo-notes/cli run build
-    - ls -la packages/cli/dist/cli.js
-    # Upload to generic package registry
+    - cd installer
+    - go vet ./...
+    - go test ./...
+    - go build ./...
+
+release:installer:
+  stage: release
+  image: golang:1.25
+  before_script: []
+  script:
+    # Cross-compile all 4 targets.
+    - mkdir -p dist
     - |
-      PACKAGE_URL="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/stonefruit-cli/${CI_COMMIT_TAG}/stonefruit-cli.mjs"
-      curl --fail --header "JOB-TOKEN: $CI_JOB_TOKEN" \
-        --upload-file packages/cli/dist/cli.js "$PACKAGE_URL"
-      echo "Uploaded CLI bundle to $PACKAGE_URL"
-    # Install release-cli and create GitLab release linking to the package
+      set -e
+      cd installer
+      for target in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64; do
+        os="${target%-*}"; arch="${target#*-}"
+        GOOS=$os GOARCH=$arch CGO_ENABLED=0 \
+          go build -trimpath -ldflags="-s -w -X gitlab.futo.org/stonefruit/stonefruit-server/installer/cmd.Version=${CI_COMMIT_TAG}" \
+          -o "../dist/stonefruit-${target}" ./
+      done
+      cd ..
+      ls -lh dist/
+    # Upload each binary to the generic package registry.
+    - |
+      set -e
+      for bin in dist/stonefruit-*; do
+        name=$(basename "$bin")
+        URL="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/stonefruit-installer/${CI_COMMIT_TAG}/${name}"
+        curl --fail --header "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file "$bin" "$URL"
+        echo "Uploaded $name"
+      done
+    # Install release-cli.
     - |
       curl -sL "https://gitlab.com/api/v4/projects/gitlab-org%2Frelease-cli/packages/generic/release-cli/latest/release-cli-linux-amd64" \
         -o /usr/local/bin/release-cli && chmod +x /usr/local/bin/release-cli
+    # Create the release with one asset link per binary.
     - |
-      PACKAGE_URL="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/stonefruit-cli/${CI_COMMIT_TAG}/stonefruit-cli.mjs"
+      set -e
+      ARGS=""
+      for bin in dist/stonefruit-*; do
+        name=$(basename "$bin")
+        URL="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/stonefruit-installer/${CI_COMMIT_TAG}/${name}"
+        ARGS="$ARGS --assets-link={\"name\":\"${name}\",\"url\":\"${URL}\",\"link_type\":\"package\"}"
+      done
+      # shellcheck disable=SC2086
       release-cli create \
         --name "Stonefruit Server ${CI_COMMIT_TAG}" \
         --tag-name "${CI_COMMIT_TAG}" \
         --description "Stonefruit self-hosted sync server ${CI_COMMIT_TAG}. Install via: curl -sSL https://gitlab.futo.org/stonefruit/stonefruit-server/-/raw/main/install.sh | sh" \
-        --assets-link "{\"name\":\"stonefruit-cli.mjs\",\"url\":\"${PACKAGE_URL}\",\"link_type\":\"other\"}"
+        $ARGS
   needs:
     - job: build:image
   rules:

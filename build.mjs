@@ -1,12 +1,16 @@
 import { build } from 'esbuild'
 
+const hosted = process.argv.includes('--hosted')
+const entryPoint = hosted ? 'src/hosted/index.ts' : 'src/index.ts'
+const outfile = hosted ? 'dist/hosted.js' : 'dist/index.js'
+
 await build({
-  entryPoints: ['src/index.ts'],
+  entryPoints: [entryPoint],
   bundle: true,
   platform: 'node',
   target: 'node24',
   format: 'esm',
-  outfile: 'dist/index.js',
+  outfile,
   external: ['pg', 'pg-native', 'dotenv'],
   // createRequire shim so bundled CommonJS deps can still call require() under ESM.
   banner: {

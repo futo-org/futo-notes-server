@@ -7,6 +7,7 @@
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
     "build": "node build.mjs",
+    "build:hosted": "node build.mjs --hosted",
     "migrate": "tsx src/db/migrate.ts",
     "test": "node --import tsx --test \"tests/**/*.test.ts\""
   },
