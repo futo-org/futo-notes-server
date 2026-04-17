@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
+import pkg from '../package.json' with { type: 'json' }
 import { authMiddleware, type AuthContext } from './auth/middleware.ts'
 import { authRoutes } from './auth/routes.ts'
 import { isSetupComplete, signupRoutes } from './auth/signup-routes.ts'
@@ -11,12 +12,20 @@ import { env } from './env.ts'
 import { objectsRoutes } from './objects/routes.ts'
 import { startRoutes } from './routes/start.ts'
 
+const VERSION: string = pkg.version
+
 export function buildApp(): Hono<{ Variables: AuthContext }> {
   const app = new Hono<{ Variables: AuthContext }>()
 
   app.use('*', cors({ origin: '*', allowHeaders: ['Content-Type', 'Authorization'], allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'] }))
 
-  app.get('/', (c) => c.text('stonefruit server\n'))
+  app.get('/', (c) => c.json({
+    name: 'stonefruit',
+    version: VERSION,
+    auth_mode: env.AUTH_MODE,
+    signup: 'closed',
+    billing: false,
+  }))
 
   app.get('/health', async (c) => {
     try {
