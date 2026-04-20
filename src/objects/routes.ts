@@ -62,6 +62,29 @@ async function nextCollectionVersion(
   return row.current_version
 }
 
+// Record an old blob_key as orphaned at the moment it's replaced by a newer
+// version. The blob file itself stays in the blob store — the periodic GC
+// job (see src/maintenance/blobGc.ts) deletes rows (and their blobs) past the
+// retention window. Clients rely on these orphaned blobs to fetch the common
+// ancestor during three-way merge conflict resolution.
+async function recordOrphanedBlob(
+  trx: Transaction<Database>,
+  userId: string,
+  blobKey: string | null,
+  sizeBytes: string | null,
+): Promise<void> {
+  if (!blobKey) return
+  await trx
+    .insertInto('orphaned_blobs')
+    .values({
+      blob_key: blobKey,
+      user_id: userId,
+      size_bytes: sizeBytes ?? '0',
+    })
+    .onConflict((oc) => oc.column('blob_key').doNothing())
+    .execute()
+}
+
 // Pull sync + list.
 objectsRoutes.get('/:cid/objects', async (c) => {
   const userId = c.var.user.id
@@ -200,7 +223,7 @@ objectsRoutes.put('/:cid/objects/:oid', async (c) => {
       .where('id', '=', oid)
       .where('collection_id', '=', cid)
       .where('user_id', '=', userId)
-      .select(['version', 'blob_key'])
+      .select(['version', 'blob_key', 'size_bytes'])
       .executeTakeFirst()
 
     if (!current) {
@@ -246,6 +269,7 @@ objectsRoutes.put('/:cid/objects/:oid', async (c) => {
       .executeTakeFirst()
 
     if (updated) {
+      await recordOrphanedBlob(trx, userId, current.blob_key, current.size_bytes)
       return c.json({ object: updated, collectionVersion: Number(changeSeq) })
     }
 
@@ -427,14 +451,18 @@ objectsRoutes.delete('/:cid/objects/:oid', async (c) => {
         .where('id', '=', oid)
         .where('collection_id', '=', cid)
         .where('user_id', '=', userId)
-        .select(['version', 'blob_key'])
+        .select(['version', 'blob_key', 'size_bytes'])
         .executeTakeFirst()
 
       if (!current) {
+        // Our freshly-uploaded blob will never be referenced; orphan it
+        // so the retention GC can reclaim it.
+        await recordOrphanedBlob(trx, userId, blobKey, String(sizeBytes))
         return c.json({ error: 'not found' }, 404)
       }
 
       if (Number(current.version) !== version - 1) {
+        await recordOrphanedBlob(trx, userId, blobKey, String(sizeBytes))
         return c.json(
           {
             error: 'version conflict',
@@ -473,8 +501,12 @@ objectsRoutes.delete('/:cid/objects/:oid', async (c) => {
         .executeTakeFirst()
 
       if (updated) {
+        await recordOrphanedBlob(trx, userId, current.blob_key, current.size_bytes)
         return c.json({ object: updated, collectionVersion: Number(changeSeq) })
       }
+
+      // Concurrent writer won the race; orphan our uploaded blob.
+      await recordOrphanedBlob(trx, userId, blobKey, String(sizeBytes))
 
       const latest = await trx
         .selectFrom('objects')

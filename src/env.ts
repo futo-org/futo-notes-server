@@ -18,6 +18,9 @@ export const env = {
   DB_POOL_MAX: Number(process.env.DB_POOL_MAX ?? 10),
   DB_POOL_IDLE_TIMEOUT_MS: Number(process.env.DB_POOL_IDLE_TIMEOUT_MS ?? 10000),
   DB_SSL: process.env.DB_SSL === 'true',
+  BLOB_RETENTION_DAYS: process.env.BLOB_RETENTION_DAYS,
+  BLOB_GC_INTERVAL_MS: process.env.BLOB_GC_INTERVAL_MS,
+  BLOB_GC_ENABLED: process.env.BLOB_GC_ENABLED !== 'false',
 }
 
 export function validateEnv(): void {

@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict'
 import { after, before, test } from 'node:test'
 import { buildApp } from '../src/app.ts'
+import { FsBlobStore } from '../src/blob/fs.ts'
 import { db, waitForDb } from '../src/db/connection.ts'
 import { migrateToLatest } from '../src/db/migrate.ts'
+import { env } from '../src/env.ts'
+import { runBlobGcOnce } from '../src/maintenance/blobGc.ts'
 
 const app = buildApp()
 
@@ -219,4 +222,85 @@ test('blob-objects single-round-trip create, update, and conflict', async () => 
     },
   ))
   assert.equal(missingVersionRes.status, 400)
+})
+
+test('orphaned blobs are retained and reclaimed after retention window', async () => {
+  const email = `orphan-${Date.now()}-${Math.random().toString(16).slice(2)}@example.test`
+  const login = await json<{ token: string }>('/api/auth/dev/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, name: 'Orphan Test' }),
+  })
+  const auth = { Authorization: `Bearer ${login.token}` }
+  const created = await json<{ collection: { id: string } }>('/api/collections', {
+    method: 'POST',
+    headers: auth,
+  })
+  const cid = created.collection.id
+
+  // Create → v1 — first blob reference.
+  const v1Res = await app.fetch(new Request(
+    `http://test.local/api/collections/${cid}/blob-objects`,
+    { method: 'POST', headers: { ...auth, 'Content-Type': 'application/octet-stream' }, body: 'v1-body' },
+  ))
+  const v1 = (await v1Res.json()) as { object: { id: string; blob_key: string } }
+
+  // Update → v2 — v1's blobKey becomes orphaned.
+  const v2Res = await app.fetch(new Request(
+    `http://test.local/api/collections/${cid}/blob-objects/${v1.object.id}?version=2`,
+    { method: 'PUT', headers: { ...auth, 'Content-Type': 'application/octet-stream' }, body: 'v2-body' },
+  ))
+  const v2 = (await v2Res.json()) as { object: { blob_key: string } }
+  assert.notEqual(v2.object.blob_key, v1.object.blob_key)
+
+  // v1 blob still reachable — needed for conflict resolution.
+  const stillThere = await app.fetch(new Request(
+    `http://test.local/api/blobs/${v1.object.blob_key}`,
+    { headers: auth },
+  ))
+  assert.equal(stillThere.status, 200)
+  assert.equal(await stillThere.text(), 'v1-body')
+
+  // Ledger records the orphan.
+  const ledgerRows = await db
+    .selectFrom('orphaned_blobs')
+    .where('blob_key', '=', v1.object.blob_key)
+    .selectAll()
+    .execute()
+  assert.equal(ledgerRows.length, 1)
+
+  // Stale update leaks its own blob — it lands in orphaned_blobs too.
+  const staleRes = await app.fetch(new Request(
+    `http://test.local/api/collections/${cid}/blob-objects/${v1.object.id}?version=2`,
+    { method: 'PUT', headers: { ...auth, 'Content-Type': 'application/octet-stream' }, body: 'stale-body' },
+  ))
+  assert.equal(staleRes.status, 409)
+  const staleLeakCount = await db
+    .selectFrom('orphaned_blobs')
+    .where('user_id', '=', ledgerRows[0].user_id)
+    .select(({ fn }) => fn.count<number>('blob_key').as('count'))
+    .executeTakeFirstOrThrow()
+  assert.ok(Number(staleLeakCount.count) >= 2)
+
+  // GC with a 0-day retention deletes everything orphaned so far. This is the
+  // one-shot GC runner the scheduled loop calls.
+  const store = new FsBlobStore(env.BLOB_DIR)
+  const before = await db.selectFrom('orphaned_blobs').selectAll().execute()
+  assert.ok(before.length >= 2)
+  const result = await runBlobGcOnce(store, 0)
+  assert.ok(result.deleted >= 2)
+
+  // Blob is gone from storage.
+  const gone = await app.fetch(new Request(
+    `http://test.local/api/blobs/${v1.object.blob_key}`,
+    { headers: auth },
+  ))
+  assert.equal(gone.status, 404)
+
+  // v2 — the live blob — is still reachable. GC must never touch live blobs.
+  const live = await app.fetch(new Request(
+    `http://test.local/api/blobs/${v2.object.blob_key}`,
+    { headers: auth },
+  ))
+  assert.equal(live.status, 200)
 })

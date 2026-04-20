@@ -5,6 +5,7 @@ export interface Database {
   sessions: SessionsTable
   collections: CollectionsTable
   objects: ObjectsTable
+  orphaned_blobs: OrphanedBlobsTable
   server_config: ServerConfigTable
 }
 
@@ -44,6 +45,13 @@ export interface ObjectsTable {
   size_bytes: string | null // bigint
   created_at: Generated<Date>
   updated_at: Generated<Date>
+}
+
+export interface OrphanedBlobsTable {
+  blob_key: string
+  user_id: string
+  size_bytes: string // bigint
+  orphaned_at: Generated<Date>
 }
 
 export interface ServerConfigTable {
