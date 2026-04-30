@@ -16,8 +16,8 @@ FROM node:24-slim
 ENV NODE_ENV=production
 WORKDIR /app
 
-LABEL org.opencontainers.image.title="Stonefruit Server"
-LABEL org.opencontainers.image.description="Self-hosted E2EE sync server for Stonefruit"
+LABEL org.opencontainers.image.title="FUTO Notes Server"
+LABEL org.opencontainers.image.description="Self-hosted E2EE sync server for FUTO Notes"
 
 COPY --from=builder /app/dist/ dist/
 COPY --from=builder /app/package.json ./

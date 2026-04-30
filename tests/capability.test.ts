@@ -15,7 +15,7 @@ test('GET / returns capability JSON', async () => {
     signup: string
     billing: boolean
   }
-  assert.equal(data.name, 'stonefruit')
+  assert.equal(data.name, 'futo-notes')
   assert.match(data.version, /^\d+\.\d+\.\d+$/)
   assert.equal(data.auth_mode, 'dev')
   assert.equal(data.signup, 'closed')

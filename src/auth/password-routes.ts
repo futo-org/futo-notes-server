@@ -12,8 +12,8 @@ const SESSION_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
 
 // The singleton user in password mode. All E2EE data is owned by this row.
 const SINGLETON_SUB = 'local'
-const SINGLETON_EMAIL = 'local@stonefruit.local'
-const SINGLETON_NAME = 'Stonefruit'
+const SINGLETON_EMAIL = 'local@futo-notes.local'
+const SINGLETON_NAME = 'FUTO Notes'
 
 export const passwordRoutes = new Hono()
 
@@ -29,7 +29,7 @@ function setSessionCookie(c: Context, rawToken: string): void {
 /**
  * POST /api/auth/password/login
  *
- * Verifies the submitted password against STONEFRUIT_PASSWORD_HASH, upserts
+ * Verifies the submitted password against FUTO_NOTES_PASSWORD_HASH, upserts
  * the singleton user on first login, and opens a session.
  */
 passwordRoutes.post('/login', async (c) => {
@@ -45,7 +45,7 @@ passwordRoutes.post('/login', async (c) => {
     return c.json({ error: 'password is required' }, 400)
   }
 
-  const valid = await verifyPassword(password, env.STONEFRUIT_PASSWORD_HASH!)
+  const valid = await verifyPassword(password, env.FUTO_NOTES_PASSWORD_HASH!)
   if (!valid) {
     return c.json({ error: 'invalid password' }, 401)
   }

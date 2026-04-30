@@ -19,7 +19,6 @@ workflow:
 stages:
   - test
   - build
-  - release
 
 # ─────────────────────────────────────────────────────────────
 # Cache
@@ -46,11 +45,11 @@ test:
     - name: postgres:16
       alias: postgres
       variables:
-        POSTGRES_USER: stonefruit
+        POSTGRES_USER: futo_notes
         POSTGRES_PASSWORD: ci
-        POSTGRES_DB: stonefruit
+        POSTGRES_DB: futo_notes
   variables:
-    DATABASE_URL: postgres://stonefruit:ci@postgres:5432/stonefruit
+    DATABASE_URL: postgres://futo_notes:ci@postgres:5432/futo_notes
     AUTH_MODE: dev
   script:
     - pnpm install --frozen-lockfile
@@ -81,9 +80,9 @@ test:docker:
   before_script: []
   script:
     - |
-      docker build -t stonefruit-server:ci .
+      docker build -t futo-notes-server:ci .
       echo "Docker image built successfully"
-      docker image inspect stonefruit-server:ci --format '{{.Size}}' | awk '{printf "Image size: %.1f MB\n", $1/1048576}'
+      docker image inspect futo-notes-server:ci --format '{{.Size}}' | awk '{printf "Image size: %.1f MB\n", $1/1048576}'
   rules:
     - if: $CI_COMMIT_TAG
     - if: $CI_MERGE_REQUEST_IID
@@ -112,8 +111,6 @@ build:image:
       # Tag semantics:
       #   tagged release -> push ${CI_COMMIT_TAG} + :stable
       #   main branch    -> push ${CI_COMMIT_SHORT_SHA} + :latest
-      # The installer points new installs at :stable and can switch to
-      # :latest via `stonefruit release latest`.
       IMAGE="${CI_REGISTRY_IMAGE}/server"
       docker build -t "${IMAGE}:build" .
       if [ -n "$CI_COMMIT_TAG" ]; then
@@ -132,68 +129,3 @@ build:image:
   rules:
     - if: $CI_COMMIT_TAG
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-
-# ─────────────────────────────────────────────────────────────
-# Installer (Go binary) — test + release
-# ─────────────────────────────────────────────────────────────
-
-test:installer:
-  stage: test
-  image: golang:1.25
-  before_script: []
-  script:
-    - cd installer
-    - go vet ./...
-    - go test ./...
-    - go build ./...
-
-release:installer:
-  stage: release
-  image: golang:1.25
-  before_script: []
-  script:
-    # Cross-compile all 4 targets.
-    - mkdir -p dist
-    - |
-      set -e
-      cd installer
-      for target in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64; do
-        os="${target%-*}"; arch="${target#*-}"
-        GOOS=$os GOARCH=$arch CGO_ENABLED=0 \
-          go build -trimpath -ldflags="-s -w -X gitlab.futo.org/stonefruit/stonefruit-server/installer/cmd.Version=${CI_COMMIT_TAG}" \
-          -o "../dist/stonefruit-${target}" ./
-      done
-      cd ..
-      ls -lh dist/
-    # Upload each binary to the generic package registry.
-    - |
-      set -e
-      for bin in dist/stonefruit-*; do
-        name=$(basename "$bin")
-        URL="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/stonefruit-installer/${CI_COMMIT_TAG}/${name}"
-        curl --fail --header "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file "$bin" "$URL"
-        echo "Uploaded $name"
-      done
-    # Install release-cli.
-    - |
-      curl -sL "https://gitlab.com/api/v4/projects/gitlab-org%2Frelease-cli/packages/generic/release-cli/latest/release-cli-linux-amd64" \
-        -o /usr/local/bin/release-cli && chmod +x /usr/local/bin/release-cli
-    # Create the release with one asset link per binary.
-    - |
-      set -e
-      ARGS=""
-      for bin in dist/stonefruit-*; do
-        name=$(basename "$bin")
-        URL="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/stonefruit-installer/${CI_COMMIT_TAG}/${name}"
-        ARGS="$ARGS --assets-link={\"name\":\"${name}\",\"url\":\"${URL}\",\"link_type\":\"package\"}"
-      done
-      # shellcheck disable=SC2086
-      release-cli create \
-        --name "Stonefruit Server ${CI_COMMIT_TAG}" \
-        --tag-name "${CI_COMMIT_TAG}" \
-        --description "Stonefruit self-hosted sync server ${CI_COMMIT_TAG}. Install via: curl -sSL https://gitlab.futo.org/stonefruit/stonefruit-server/-/raw/main/install.sh | sh" \
-        $ARGS
-  needs:
-    - job: build:image
-  rules:
-    - if: $CI_COMMIT_TAG

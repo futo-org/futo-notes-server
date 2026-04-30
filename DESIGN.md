@@ -1,4 +1,4 @@
-# Stonefruit Server — Design Document
+# FUTO Notes Server — Design Document
 
 A generic E2EE sync server. Paid service, licensed under [FUTO Source First License](https://sourcefirst.com/). Designed for future migration to [Yucca](https://github.com/immich-app/yucca) for auth and storage.
 
@@ -34,7 +34,7 @@ This keeps the server reusable for any E2EE-sync client.
 
 ## Sync model scope
 
-Stonefruit v1 syncs **single-user data** across that user's devices. Every collection has exactly one owner. There is no server-mediated sharing, ACLs, or cross-user access in v1.
+FUTO Notes v1 syncs **single-user data** across that user's devices. Every collection has exactly one owner. There is no server-mediated sharing, ACLs, or cross-user access in v1.
 
 Clients that want to share encrypted data between users handle it client-side — out-of-band key exchange, copy-on-share, or a higher-level protocol layered on top. In an E2EE setting this is the only sharing that actually preserves the E2EE property, since server-mediated sharing would require the server to know about relationships between users.
 
@@ -57,11 +57,11 @@ Two modes, chosen per-deployment via `AUTH_MODE`. The server renders no auth UI 
 
 ### `AUTH_MODE=password` (v1 self-hosted)
 
-Single-user mode. The admin password is scrypt-hashed and passed in as the `STONEFRUIT_PASSWORD_HASH` env var (set by the installer TUI, which shells out to `node dist/index.js hash <pw>`). One singleton user row (`sub='local'`) is lazy-upserted on first successful login. There is no per-user password table and no reset endpoint — password change = re-run the installer, which rewrites the sibling `.env` and restarts the server.
+Single-user mode. The admin password is scrypt-hashed and passed in as the `FUTO_NOTES_PASSWORD_HASH` env var (produced by `node dist/index.js hash <pw>`). One singleton user row (`sub='local'`) is lazy-upserted on first successful login. There is no per-user password table and no reset endpoint — to change the password, regenerate the hash, update `.env`, and restart the server.
 
 Flow:
 1. Client POSTs `{ password }` to `/api/auth/password/login`
-2. Server scrypt-verifies against `STONEFRUIT_PASSWORD_HASH`
+2. Server scrypt-verifies against `FUTO_NOTES_PASSWORD_HASH`
 3. On success: upsert singleton user, open session, return `{ user, token }`
 
 ### `AUTH_MODE=oidc` (deferred)
@@ -165,7 +165,7 @@ Explicit about what the server is trusted with and what it is not, so future sch
 
 ### Accepted tradeoffs
 
-True zero-knowledge — hiding even collection/object IDs and activity shape — would require encrypting sync-coordination identifiers, which breaks the server's ability to coordinate sync efficiently. Stonefruit accepts the same tradeoff Yucca, Immich, and other hosted E2EE services accept: the server learns *that* you have data and *when* you touched it, but never *what* it is.
+True zero-knowledge — hiding even collection/object IDs and activity shape — would require encrypting sync-coordination identifiers, which breaks the server's ability to coordinate sync efficiently. FUTO Notes accepts the same tradeoff Yucca, Immich, and other hosted E2EE services accept: the server learns *that* you have data and *when* you touched it, but never *what* it is.
 
 ### Multi-tenant isolation
 

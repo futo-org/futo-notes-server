@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end acceptance script for the Stonefruit POC.
+# End-to-end acceptance script for the FUTO Notes POC.
 #
 # Starts by assuming the server is running at BASE (default localhost:3000).
 # Exits 0 if every step produces the expected HTTP status and payload shape.
@@ -9,9 +9,9 @@
 set -uo pipefail
 
 BASE="${BASE:-http://localhost:3000/api}"
-ALICE_COOKIES="$(mktemp -t stonefruit-alice-cookies.XXXXXX)"
-BOB_COOKIES="$(mktemp -t stonefruit-bob-cookies.XXXXXX)"
-BLOB_FILE="$(mktemp -t stonefruit-blob.XXXXXX)"
+ALICE_COOKIES="$(mktemp -t futo-notes-alice-cookies.XXXXXX)"
+BOB_COOKIES="$(mktemp -t futo-notes-bob-cookies.XXXXXX)"
+BLOB_FILE="$(mktemp -t futo-notes-blob.XXXXXX)"
 head -c 256 /dev/urandom > "$BLOB_FILE"
 
 cleanup() {
@@ -69,7 +69,7 @@ http() {
   rm -f "$tmp"
 }
 
-echo "Stonefruit POC acceptance test — target: $BASE"
+echo "FUTO Notes POC acceptance test — target: $BASE"
 echo
 
 # 1. Alice logs in.
@@ -147,7 +147,7 @@ http GET "$BASE/collections/$COLLECTION_ID/objects/$OBJECT_ID" "$BOB_COOKIES"
 step "Bob blocked from Alice's object (404)" 404 "$STATUS"
 
 # 12. Unauthenticated access to a protected route — 401.
-UNAUTH_JAR="$(mktemp -t stonefruit-unauth.XXXXXX)"
+UNAUTH_JAR="$(mktemp -t futo-notes-unauth.XXXXXX)"
 http GET "$BASE/collections" "$UNAUTH_JAR"
 rm -f "$UNAUTH_JAR"
 step "Unauthenticated request returns 401" 401 "$STATUS"

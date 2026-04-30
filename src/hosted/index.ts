@@ -12,7 +12,7 @@ function buildHostedApp() {
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   runCliSubcommand()
-    .then(() => runServer(buildHostedApp(), 'stonefruit (hosted)'))
+    .then(() => runServer(buildHostedApp(), 'futo-notes (hosted)'))
     .catch((err) => {
       log.error('fatal startup error', { error: String(err) })
       process.exit(1)

@@ -19,7 +19,7 @@ export function buildApp(): Hono<{ Variables: AuthContext }> {
   app.use('*', cors({ origin: '*', allowHeaders: ['Content-Type', 'Authorization'], allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'] }))
 
   app.get('/', (c) => c.json({
-    name: 'stonefruit',
+    name: 'futo-notes',
     version: VERSION,
     auth_mode: env.AUTH_MODE,
     signup: 'closed',

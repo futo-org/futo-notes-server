@@ -1,15 +1,16 @@
 services:
   server:
-    container_name: stonefruit
+    container_name: futo-notes
     build: .
     ports:
-      - "${STONEFRUIT_PORT:-3005}:3000"
+      - "${FUTO_NOTES_PORT:-3005}:3000"
     environment:
-      DATABASE_URL: postgres://stonefruit:${POSTGRES_PASSWORD:-changeme}@postgres:5432/stonefruit
+      DATABASE_URL: postgres://futo_notes:${POSTGRES_PASSWORD:-changeme}@postgres:5432/futo_notes
       PORT: "3000"
       BLOB_DIR: /data/blobs
       LOG_LEVEL: ${LOG_LEVEL:-info}
       AUTH_MODE: password
+      FUTO_NOTES_PASSWORD_HASH: ${FUTO_NOTES_PASSWORD_HASH}
     volumes:
       - blob-data:/data/blobs
     depends_on:
@@ -19,16 +20,16 @@ services:
 
   postgres:
     image: postgres:16
-    container_name: stonefruit-postgres
+    container_name: futo-notes-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: stonefruit
+      POSTGRES_USER: futo_notes
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
-      POSTGRES_DB: stonefruit
+      POSTGRES_DB: futo_notes
     volumes:
       - pg-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U stonefruit -d stonefruit"]
+      test: ["CMD-SHELL", "pg_isready -U futo_notes -d futo_notes"]
       interval: 5s
       timeout: 3s
       retries: 15

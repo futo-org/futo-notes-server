@@ -33,7 +33,7 @@ export async function runCliSubcommand(): Promise<boolean> {
   return false
 }
 
-export async function runServer(app: Hono<{ Variables: AuthContext }>, label = 'stonefruit'): Promise<void> {
+export async function runServer(app: Hono<{ Variables: AuthContext }>, label = 'futo-notes'): Promise<void> {
   validateEnv()
   await waitForDb()
   await migrateToLatest()
