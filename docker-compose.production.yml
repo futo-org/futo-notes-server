@@ -1,6 +1,5 @@
 services:
   server:
-    container_name: futo-notes
     image: ${FUTO_NOTES_IMAGE:-gitlab.futo.org:5050/futo-notes/futo-notes-server/server:stable}
     ports:
       - "${FUTO_NOTES_PORT:-3005}:3000"
@@ -20,7 +19,6 @@ services:
 
   postgres:
     image: postgres:16
-    container_name: futo-notes-postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: futo_notes

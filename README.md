@@ -41,43 +41,46 @@ pnpm build:hosted               # → dist/hosted.js (hosted entrypoint)
 
 ## Self-hosting with Docker
 
-Requires Docker with the Compose v2 plugin. One command:
+Requires Docker with the Compose v2 plugin.
 
 ```bash
-curl -sSL https://gitlab.futo.org/futo-notes/futo-notes-server/-/raw/main/install.sh | bash
+# 1. Make a directory for your install
+mkdir my-futo-notes && cd my-futo-notes
+
+# 2. Grab the compose file and a starter .env
+curl -sSL https://gitlab.futo.org/futo-notes/futo-notes-server/-/raw/main/docker-compose.production.yml -o docker-compose.yml
+curl -sSL https://gitlab.futo.org/futo-notes/futo-notes-server/-/raw/main/.env.production.example -o .env
+
+# 3. Generate an admin password hash
+docker run --rm \
+  gitlab.futo.org:5050/futo-notes/futo-notes-server/server:stable \
+  node dist/index.js hash 'your-admin-password'
+
+# 4. Edit .env: paste the hash from step 3 into FUTO_NOTES_PASSWORD_HASH,
+#    and set POSTGRES_PASSWORD to a strong random string (e.g. `openssl rand -hex 32`).
+$EDITOR .env
+
+# 5. Start
+docker compose up -d
 ```
 
-The installer asks where to keep your encrypted notes (default: `./futo-notes-data`) and prompts for an admin password, then writes `docker-compose.production.yml` + `.env` into the current directory and starts the stack on `http://localhost:3005`.
+The server listens on `http://localhost:3005` (override with `FUTO_NOTES_PORT` in `.env`).
 
-Re-run the same command later to upgrade — your password and database credentials in `.env` are reused.
-
-### Options
+### Day-to-day
 
 ```bash
-curl -sSL https://gitlab.futo.org/futo-notes/futo-notes-server/-/raw/main/install.sh -o install.sh
-bash install.sh --help
+docker compose ps
+docker compose logs -f
+docker compose pull && docker compose up -d   # upgrade
+docker compose down                            # stop (data is preserved)
 ```
-
-Flags worth knowing:
-
-- `--data-dir DIR` — where encrypted blobs and Postgres data live (skips the prompt). Back this up to back up your notes.
-- `--port N` — host port to expose the server on (default: 3005).
-- `--password PW` + `--non-interactive` — for unattended installs.
 
 ### Where your data lives
 
-By default, everything sits under `./futo-notes-data/`:
+Encrypted blobs and Postgres data are bind-mounted from `./futo-notes-data/` next to your `.env` (override with `FUTO_NOTES_DATA_DIR`):
 
 - `futo-notes-data/blobs/` — encrypted note content (opaque to the server)
 - `futo-notes-data/postgres/` — Postgres data directory (sync metadata)
-
-Move the directory anywhere by setting `FUTO_NOTES_DATA_DIR` in `.env` and restarting:
-
-```bash
-docker compose -f docker-compose.production.yml down
-# edit .env: FUTO_NOTES_DATA_DIR=/srv/futo-notes-data
-docker compose -f docker-compose.production.yml up -d
-```
 
 A snapshot of `$FUTO_NOTES_DATA_DIR` plus `.env` is a complete backup.
 
@@ -86,7 +89,7 @@ A snapshot of `$FUTO_NOTES_DATA_DIR` plus `.env` is a complete backup.
 Open FUTO Notes, go to **Settings → Sync**, and enter:
 
 - Server URL: `http://localhost:3005` (or whatever port you exposed)
-- Password: the admin password you set during install
+- Password: the admin password you hashed above
 
 ### HTTPS for remote access
 
