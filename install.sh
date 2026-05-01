@@ -73,12 +73,39 @@ fi
 # ─── Resolve directories ────────────────────────────────────────────
 mkdir -p "$INSTALL_DIR"
 INSTALL_DIR="$(cd "$INSTALL_DIR" && pwd)"
-[ -z "$DATA_DIR" ] && DATA_DIR="$INSTALL_DIR/data"
-mkdir -p "$DATA_DIR/blobs" "$DATA_DIR/postgres"
-DATA_DIR="$(cd "$DATA_DIR" && pwd)"
 
 ENV_FILE="$INSTALL_DIR/.env"
 COMPOSE_FILE="$INSTALL_DIR/docker-compose.production.yml"
+
+# Pick the data dir. Precedence: --data-dir flag > existing .env > prompt > default.
+DEFAULT_DATA_DIR="$INSTALL_DIR/futo-notes-data"
+if [ -z "$DATA_DIR" ] && [ -f "$ENV_FILE" ]; then
+  EXISTING_DATA_DIR="$(grep -E '^FUTO_NOTES_DATA_DIR=' "$ENV_FILE" | head -n1 | cut -d= -f2- || true)"
+  [ -n "$EXISTING_DATA_DIR" ] && DATA_DIR="$EXISTING_DATA_DIR"
+fi
+if [ -z "$DATA_DIR" ]; then
+  if [ "$NON_INTERACTIVE" = 1 ]; then
+    DATA_DIR="$DEFAULT_DATA_DIR"
+  else
+    TTY=/dev/tty
+    if [ -r "$TTY" ] && [ -w "$TTY" ]; then
+      printf '  Where should encrypted notes and Postgres data live?\n' >"$TTY"
+      printf '  Data directory [%s]: ' "$DEFAULT_DATA_DIR" >"$TTY"
+      IFS= read -r DATA_DIR <"$TTY"
+      [ -z "$DATA_DIR" ] && DATA_DIR="$DEFAULT_DATA_DIR"
+    else
+      DATA_DIR="$DEFAULT_DATA_DIR"
+    fi
+  fi
+fi
+
+# Expand a leading ~ and resolve to an absolute path.
+case "$DATA_DIR" in
+  "~")    DATA_DIR="$HOME" ;;
+  "~/"*)  DATA_DIR="$HOME/${DATA_DIR:2}" ;;
+esac
+mkdir -p "$DATA_DIR/blobs" "$DATA_DIR/postgres"
+DATA_DIR="$(cd "$DATA_DIR" && pwd)"
 
 cd "$INSTALL_DIR"
 

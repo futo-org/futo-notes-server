@@ -47,7 +47,7 @@ Requires Docker with the Compose v2 plugin. One command:
 curl -sSL https://gitlab.futo.org/futo-notes/futo-notes-server/-/raw/main/install.sh | bash
 ```
 
-The installer prompts for an admin password, generates a hashed credential, writes `docker-compose.production.yml` + `.env` into the current directory, creates a `data/` subdirectory for your notes, and starts the stack on `http://localhost:3005`.
+The installer asks where to keep your encrypted notes (default: `./futo-notes-data`) and prompts for an admin password, then writes `docker-compose.production.yml` + `.env` into the current directory and starts the stack on `http://localhost:3005`.
 
 Re-run the same command later to upgrade — your password and database credentials in `.env` are reused.
 
@@ -60,16 +60,16 @@ bash install.sh --help
 
 Flags worth knowing:
 
-- `--data-dir DIR` — where encrypted blobs and Postgres data live (default: `./data` next to `.env`). Back this up to back up your notes.
+- `--data-dir DIR` — where encrypted blobs and Postgres data live (skips the prompt). Back this up to back up your notes.
 - `--port N` — host port to expose the server on (default: 3005).
 - `--password PW` + `--non-interactive` — for unattended installs.
 
 ### Where your data lives
 
-By default, everything sits under `./data/`:
+By default, everything sits under `./futo-notes-data/`:
 
-- `data/blobs/` — encrypted note content (opaque to the server)
-- `data/postgres/` — Postgres data directory (sync metadata)
+- `futo-notes-data/blobs/` — encrypted note content (opaque to the server)
+- `futo-notes-data/postgres/` — Postgres data directory (sync metadata)
 
 Move the directory anywhere by setting `FUTO_NOTES_DATA_DIR` in `.env` and restarting:
 

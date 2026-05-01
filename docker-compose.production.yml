@@ -12,7 +12,7 @@ services:
       AUTH_MODE: password
       FUTO_NOTES_PASSWORD_HASH: ${FUTO_NOTES_PASSWORD_HASH:?FUTO_NOTES_PASSWORD_HASH is required}
     volumes:
-      - ${FUTO_NOTES_DATA_DIR:-./data}/blobs:/data/blobs
+      - ${FUTO_NOTES_DATA_DIR:-./futo-notes-data}/blobs:/data/blobs
     depends_on:
       postgres:
         condition: service_healthy
@@ -27,7 +27,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       POSTGRES_DB: futo_notes
     volumes:
-      - ${FUTO_NOTES_DATA_DIR:-./data}/postgres:/var/lib/postgresql/data
+      - ${FUTO_NOTES_DATA_DIR:-./futo-notes-data}/postgres:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U futo_notes -d futo_notes"]
       interval: 5s
