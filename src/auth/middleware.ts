@@ -1,7 +1,7 @@
 import type { MiddlewareHandler } from 'hono'
-import { getCookie } from 'hono/cookie'
+import { getCookie, setCookie } from 'hono/cookie'
 import { env } from '../env.ts'
-import { validateSession } from './session.ts'
+import { SESSION_TTL_MS, validateSession } from './session.ts'
 
 /** Paths only public in dev auth mode. */
 const DEV_PUBLIC_PATHS = new Set<string>([
@@ -23,7 +23,8 @@ export const authMiddleware: MiddlewareHandler<{ Variables: AuthContext }> = asy
   if (env.AUTH_MODE === 'dev' && DEV_PUBLIC_PATHS.has(path)) return next()
   if (env.AUTH_MODE === 'password' && PASSWORD_PUBLIC_PATHS.has(path)) return next()
 
-  const token = getCookie(c, 'session')
+  const cookieToken = getCookie(c, 'session')
+  const token = cookieToken
     ?? c.req.header('Authorization')?.replace(/^Bearer\s+/i, '')
     ?? null
   if (!token) {
@@ -33,6 +34,15 @@ export const authMiddleware: MiddlewareHandler<{ Variables: AuthContext }> = asy
   const session = await validateSession(token)
   if (!session) {
     return c.json({ error: 'unauthorized' }, 401)
+  }
+
+  if (session.renewed && cookieToken) {
+    setCookie(c, 'session', cookieToken, {
+      httpOnly: true,
+      sameSite: 'Lax',
+      path: '/',
+      maxAge: Math.floor(SESSION_TTL_MS / 1000),
+    })
   }
 
   c.set('user', session.user)
