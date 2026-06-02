@@ -16,7 +16,7 @@ The first client is a notes app, but the server knows nothing about notes — se
 | Query builder | Kysely | Matches Yucca, type-safe, no ORM magic |
 | Blob storage | Cloudflare R2 (prod) | Stores encrypted blobs. Local dev uses an S3-compatible service (TBD — candidates: LocalStack, SeaweedFS, Garage) |
 | Auth | Password (v1) or OIDC (deferred) | Opaque session tokens in Postgres. Mode is per-deployment (`AUTH_MODE` env var) |
-| Real-time | WebSocket | Native WS, not Socket.IO |
+| Real-time | Server-Sent Events | One-way notifications are sufficient — all pushes already go over HTTP. Falls back to polling on disconnect |
 | Deployment | Hetzner + Kubernetes | Docker Compose is local-dev only |
 
 ## Objects and collections
@@ -244,7 +244,11 @@ Versioned sync with per-object conflict checks and a collection-global pull curs
 ### Pull (server → client)
 1. Client sends its last seen collection cursor
 2. Server sends deltas ordered by `change_seq`: all objects where `change_seq > client_cursor`
-3. Ongoing: server pushes updates over WS as they arrive
+3. Ongoing: client holds an SSE stream open at `/api/sync/events`; the server emits a lightweight `change` event (`{collectionId, currentVersion}`) on every successful mutation, prompting the client to repeat step 2 with its current cursor. The event carries no object content — clients pull through the existing endpoint so the E2EE invariant is preserved.
+
+### Why SSE, not WebSockets
+
+The connection is a **doorbell, not a pipe**: the server has nothing useful to push besides "something changed" — all real data lives in opaque blobs that the client still has to pull. That eliminates WebSockets' main advantage (bidirectional framing) and trades it for SSE's wins: it runs through the same Hono middleware as every other HTTP route (auth, CORS, request logging), the browser/EventSource ecosystem handles reconnect with `Last-Event-ID` for free, and long-lived plain-HTTP streams play nicely with K8s ingress, load balancers, and graceful drain. The transport is hidden behind a `Notifier` interface, so a future move to WS is a swap, not a rewrite.
 
 ### Conflict resolution
 
@@ -261,7 +265,7 @@ The server's only role is rejecting stale pushes with `409` and returning the cu
 The server holds no in-process state. Any instance can serve any request. This is a hard requirement for running under Kubernetes with horizontal pod autoscaling.
 
 - **Sessions, sync cursors, any transient coordination** — all in Postgres (sessions likely move to a KV store at Stage 2 below).
-- **WebSocket fan-out** — a naive in-memory subscriber map breaks horizontal scaling. Pub/sub is required: Postgres `LISTEN`/`NOTIFY` at small scale, a dedicated broker (Redis, NATS) later.
+- **Real-time fan-out** — a naive in-memory subscriber map breaks horizontal scaling. Pub/sub is required: Postgres `LISTEN`/`NOTIFY` at small scale (current implementation), a dedicated broker (Redis, NATS) later. The `Notifier` abstraction in `src/sync/` is what gets swapped at that point — the SSE route is unaware of the fan-out mechanism.
 
 ### Natural partitioning
 
@@ -345,7 +349,11 @@ DELETE /api/blobs/:key                            → delete blob
 
 ### Sync
 ```
-WS     /api/sync                                  → WebSocket for real-time sync
+GET    /api/sync/events                           → SSE stream of change events for the authenticated user.
+                                                    Events:
+                                                      event: ready  (sent once on connect)
+                                                      event: change data: {"collectionId":"...","currentVersion":N}
+                                                      event: ping   (heartbeat every 25s)
 ```
 
 ## Deployment
@@ -353,7 +361,7 @@ WS     /api/sync                                  → WebSocket for real-time sy
 **Production:** Hetzner, Kubernetes. Containers designed for horizontal scaling (see §Statelessness & scaling). This matches Immich's direction, which makes shared operational knowledge cheaper.
 
 Not targets:
-- **Cloudflare Workers** — native WebSockets there require Durable Objects, which reintroduce stateful components under a different name. Not worth the complexity.
+- **Cloudflare Workers** — the real-time fan-out path needs a long-lived Postgres `LISTEN` connection per process, which doesn't fit Workers' request-scoped execution model. Pushing that state into Durable Objects works but reintroduces the stateful components we're trying to avoid.
 - **DigitalOcean droplets.**
 
 **Local development:** Docker Compose, with services for Postgres, an S3-compatible blob store (choice TBD), and the OIDC provider.

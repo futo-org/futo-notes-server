@@ -8,6 +8,7 @@ import { migrateToLatest } from './db/migrate.ts'
 import { env, validateEnv } from './env.ts'
 import { log } from './logger.ts'
 import { startBlobGc, type BlobGcHandle } from './maintenance/blobGc.ts'
+import { notifier } from './sync/notifier.ts'
 
 /**
  * Runs CLI-only subcommands (hash, etc.) if argv matches one. Returns true if
@@ -46,6 +47,8 @@ export async function runServer(app: Hono<{ Variables: AuthContext }>, label = '
     blobGc = startBlobGc(new FsBlobStore(env.BLOB_DIR), intervalMs)
   }
 
+  await notifier.start()
+
   const server = serve({ fetch: app.fetch, port: env.PORT }, (info) => {
     log.info(`${label} listening on http://localhost:${info.port}`)
   })
@@ -61,6 +64,7 @@ export async function runServer(app: Hono<{ Variables: AuthContext }>, label = '
     server.close(() => {
       log.info('http server closed')
     })
+    await notifier.stop()
     await db.destroy()
     log.info('db pool drained')
     clearTimeout(timeout)

@@ -5,6 +5,7 @@ import type { AuthContext } from '../auth/middleware.ts'
 import type { BlobStore } from '../blob/interface.ts'
 import { db } from '../db/connection.ts'
 import type { Database } from '../db/types.ts'
+import { notifier } from '../sync/notifier.ts'
 
 export function createObjectsRoutes(
   store: BlobStore,
@@ -188,6 +189,7 @@ objectsRoutes.post('/:cid/objects', async (c) => {
       ])
       .executeTakeFirstOrThrow()
 
+    await notifier.publish(trx, { userId, collectionId: cid, currentVersion: Number(changeSeq) })
     return c.json({ object: row, collectionVersion: Number(changeSeq) }, 201)
   })
 })
@@ -270,6 +272,7 @@ objectsRoutes.put('/:cid/objects/:oid', async (c) => {
 
     if (updated) {
       await recordOrphanedBlob(trx, userId, current.blob_key, current.size_bytes)
+      await notifier.publish(trx, { userId, collectionId: cid, currentVersion: Number(changeSeq) })
       return c.json({ object: updated, collectionVersion: Number(changeSeq) })
     }
 
@@ -355,6 +358,7 @@ objectsRoutes.delete('/:cid/objects/:oid', async (c) => {
         .returning(['id', 'version', 'change_seq', 'deleted'])
         .executeTakeFirst()
       if (!updated) return { kind: 'missing' as const }
+      await notifier.publish(trx, { userId, collectionId: cid, currentVersion: Number(changeSeq) })
       return { kind: 'ok' as const, row: updated }
     })
 
@@ -418,6 +422,7 @@ objectsRoutes.delete('/:cid/objects/:oid', async (c) => {
         ])
         .executeTakeFirstOrThrow()
 
+      await notifier.publish(trx, { userId, collectionId: cid, currentVersion: Number(changeSeq) })
       return c.json({ object: row, collectionVersion: Number(changeSeq) }, 201)
     })
   })
@@ -502,6 +507,7 @@ objectsRoutes.delete('/:cid/objects/:oid', async (c) => {
 
       if (updated) {
         await recordOrphanedBlob(trx, userId, current.blob_key, current.size_bytes)
+        await notifier.publish(trx, { userId, collectionId: cid, currentVersion: Number(changeSeq) })
         return c.json({ object: updated, collectionVersion: Number(changeSeq) })
       }
 

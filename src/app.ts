@@ -10,6 +10,7 @@ import { collectionsRoutes } from './collections/routes.ts'
 import { pool } from './db/connection.ts'
 import { env } from './env.ts'
 import { createObjectsRoutes } from './objects/routes.ts'
+import { syncRoutes } from './sync/routes.ts'
 
 const VERSION: string = pkg.version
 
@@ -47,6 +48,7 @@ export function buildApp(): Hono<{ Variables: AuthContext }> {
   app.route('/api/collections', collectionsRoutes)
   app.route('/api/collections', createObjectsRoutes(blobStore))
   app.route('/api/blobs', createBlobRoutes(blobStore))
+  app.route('/api/sync', syncRoutes)
 
   return app
 }
