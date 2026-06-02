@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import { streamSSE } from 'hono/streaming'
 import type { AuthContext } from '../auth/middleware.ts'
 import { log } from '../logger.ts'
-import { notifier, type ChangeEvent } from './notifier.ts'
+import { notifier } from './notifier.ts'
 
 const HEARTBEAT_MS = 25_000
 
@@ -28,9 +28,24 @@ syncRoutes.get('/events', (c) => {
       wake?.()
     })
 
-    const queue: ChangeEvent[] = []
+    // These are doorbell events — the client reacts to any `change` by pulling
+    // from its own cursor, so only the latest version per collection matters.
+    // Coalesce into a map (collectionId → newest version) instead of an
+    // unbounded queue, bounding memory under a slow reader / fast writer.
+    const pending = new Map<string, number>()
     const unsubscribe = notifier.subscribe(userId, (event) => {
-      queue.push(event)
+      const prev = pending.get(event.collectionId)
+      if (prev === undefined || event.currentVersion > prev) {
+        pending.set(event.collectionId, event.currentVersion)
+      }
+      wake?.()
+    })
+
+    // The upstream LISTEN connection dropped — we can no longer guarantee
+    // delivery. End the stream so the client reconnects and re-pulls; sitting
+    // open while emitting only heartbeats would falsely look healthy.
+    const unsubscribeLost = notifier.onListenerLost(() => {
+      aborted = true
       wake?.()
     })
 
@@ -38,15 +53,18 @@ syncRoutes.get('/events', (c) => {
       await stream.writeSSE({ event: 'ready', data: '' })
 
       while (!aborted) {
-        while (!aborted && queue.length > 0) {
-          const event = queue.shift()!
-          await stream.writeSSE({
-            event: 'change',
-            data: JSON.stringify({
-              collectionId: event.collectionId,
-              currentVersion: event.currentVersion,
-            }),
-          })
+        while (!aborted && pending.size > 0) {
+          // Snapshot and clear so events arriving mid-write aren't lost; they
+          // land in a fresh map and flush on the next pass.
+          const batch = [...pending]
+          pending.clear()
+          for (const [collectionId, currentVersion] of batch) {
+            if (aborted) break
+            await stream.writeSSE({
+              event: 'change',
+              data: JSON.stringify({ collectionId, currentVersion }),
+            })
+          }
         }
         if (aborted) break
 
@@ -61,7 +79,7 @@ syncRoutes.get('/events', (c) => {
         wake = null
 
         if (aborted) break
-        if (queue.length === 0) {
+        if (pending.size === 0) {
           await stream.writeSSE({ event: 'ping', data: '' })
         }
       }
@@ -69,6 +87,7 @@ syncRoutes.get('/events', (c) => {
       log.debug('sync stream closed', { err: String(err) })
     } finally {
       unsubscribe()
+      unsubscribeLost()
     }
   })
 })

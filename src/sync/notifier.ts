@@ -5,6 +5,11 @@ import { env } from '../env.ts'
 import { log } from '../logger.ts'
 
 const CHANNEL = 'collection_changes'
+const APP_NAME = 'futo-notes-notifier'
+
+// Reconnect backoff bounds for the dedicated LISTEN connection.
+const INITIAL_RECONNECT_MS = 1_000
+const MAX_RECONNECT_MS = 30_000
 
 export interface ChangeEvent {
   userId: string
@@ -23,6 +28,13 @@ export interface Notifier {
   publish(trx: Transaction<Database>, event: ChangeEvent): Promise<void>
   /** Returns an unsubscribe function. Idempotent. */
   subscribe(userId: string, handler: ChangeHandler): () => void
+  /**
+   * Register a callback fired when the upstream LISTEN connection drops. While
+   * it is down no NOTIFYs are delivered, so open streams should treat this as
+   * "you are now stale" — close and let the client reconnect + re-pull. Returns
+   * an unsubscribe function.
+   */
+  onListenerLost(handler: () => void): () => void
   start(): Promise<void>
   stop(): Promise<void>
 }
@@ -37,51 +49,109 @@ interface NotifyPayload {
 export class PostgresNotifier implements Notifier {
   private client: pg.Client | null = null
   private handlers = new Map<string, Set<ChangeHandler>>()
+  private lostHandlers = new Set<() => void>()
+  private stopped = false
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  private reconnectDelayMs = INITIAL_RECONNECT_MS
 
   async start(): Promise<void> {
+    this.stopped = false
     if (this.client) return
+    await this.connect()
+  }
+
+  private dispatch(msg: pg.Notification): void {
+    if (msg.channel !== CHANNEL || !msg.payload) return
+    let parsed: NotifyPayload
+    try {
+      parsed = JSON.parse(msg.payload) as NotifyPayload
+    } catch {
+      log.warn('sync notifier: invalid payload', { payload: msg.payload })
+      return
+    }
+    const event: ChangeEvent = {
+      userId: parsed.u,
+      collectionId: parsed.c,
+      currentVersion: parsed.v,
+    }
+    const set = this.handlers.get(event.userId)
+    if (!set) return
+    for (const handler of set) {
+      try {
+        handler(event)
+      } catch (err) {
+        log.warn('sync notifier: handler threw', { err: String(err) })
+      }
+    }
+  }
+
+  private async connect(): Promise<void> {
     const client = new pg.Client({
       connectionString: env.DATABASE_URL,
       ssl: env.DB_SSL ? { rejectUnauthorized: false } : undefined,
+      application_name: APP_NAME,
     })
-    await client.connect()
-    client.on('notification', (msg) => {
-      if (msg.channel !== CHANNEL || !msg.payload) return
-      let parsed: NotifyPayload
-      try {
-        parsed = JSON.parse(msg.payload) as NotifyPayload
-      } catch {
-        log.warn('sync notifier: invalid payload', { payload: msg.payload })
-        return
-      }
-      const event: ChangeEvent = {
-        userId: parsed.u,
-        collectionId: parsed.c,
-        currentVersion: parsed.v,
-      }
-      const set = this.handlers.get(event.userId)
-      if (!set) return
-      for (const handler of set) {
-        try {
-          handler(event)
-        } catch (err) {
-          log.warn('sync notifier: handler threw', { err: String(err) })
-        }
-      }
-    })
+    client.on('notification', (msg) => this.dispatch(msg))
+    // 'error' and 'end' both signal a dead connection; handleLoss is made
+    // idempotent by removeAllListeners so whichever fires first wins.
     client.on('error', (err) => {
       log.error('sync notifier: listener error', { err: String(err) })
+      this.handleLoss(client)
     })
-    await client.query(`LISTEN ${CHANNEL}`)
+    client.on('end', () => this.handleLoss(client))
+
+    try {
+      await client.connect()
+      await client.query(`LISTEN ${CHANNEL}`)
+    } catch (err) {
+      log.error('sync notifier: connect failed', { err: String(err) })
+      this.handleLoss(client)
+      return
+    }
     this.client = client
+    this.reconnectDelayMs = INITIAL_RECONNECT_MS
     log.info('sync notifier listening', { channel: CHANNEL })
   }
 
+  /** Tear down a dead connection and schedule a reconnect. Idempotent. */
+  private handleLoss(client: pg.Client): void {
+    client.removeAllListeners()
+    client.end().catch(() => {})
+    if (this.client === client) this.client = null
+    for (const handler of this.lostHandlers) {
+      try {
+        handler()
+      } catch (err) {
+        log.warn('sync notifier: lost-handler threw', { err: String(err) })
+      }
+    }
+    this.scheduleReconnect()
+  }
+
+  private scheduleReconnect(): void {
+    if (this.stopped || this.reconnectTimer || this.client) return
+    const delay = this.reconnectDelayMs
+    this.reconnectDelayMs = Math.min(this.reconnectDelayMs * 2, MAX_RECONNECT_MS)
+    log.warn('sync notifier: scheduling reconnect', { delayMs: delay })
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null
+      if (this.stopped) return
+      void this.connect()
+    }, delay)
+  }
+
   async stop(): Promise<void> {
+    this.stopped = true
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
+    }
     this.handlers.clear()
+    this.lostHandlers.clear()
     const client = this.client
     this.client = null
     if (!client) return
+    client.removeAllListeners()
     try {
       await client.query(`UNLISTEN ${CHANNEL}`)
     } catch {}
@@ -110,6 +180,13 @@ export class PostgresNotifier implements Notifier {
       if (!current) return
       current.delete(handler)
       if (current.size === 0) this.handlers.delete(userId)
+    }
+  }
+
+  onListenerLost(handler: () => void): () => void {
+    this.lostHandlers.add(handler)
+    return () => {
+      this.lostHandlers.delete(handler)
     }
   }
 }
