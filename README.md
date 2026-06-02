@@ -2,7 +2,8 @@
 
 End-to-end encrypted sync server for the [FUTO Notes](https://gitlab.futo.org/futo-notes/futo-notes) notes app. Built with TypeScript + Hono + PostgreSQL. The server stores opaque encrypted blobs and never sees plaintext note content.
 
-See [DESIGN.md](./DESIGN.md) for the architecture and threat model.
+- [docs/API.md](./docs/API.md) — client integration guide (endpoints, auth, the sync protocol, SSE)
+- [DESIGN.md](./DESIGN.md) — architecture, threat model, and scaling plan
 
 ## Running from source
 

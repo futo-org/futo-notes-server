@@ -246,9 +246,11 @@ Versioned sync with per-object conflict checks and a collection-global pull curs
 2. Server sends deltas ordered by `change_seq`: all objects where `change_seq > client_cursor`
 3. Ongoing: client holds an SSE stream open at `/api/sync/events`; the server emits a lightweight `change` event (`{collectionId, currentVersion}`) on every successful mutation, prompting the client to repeat step 2 with its current cursor. The event carries no object content — clients pull through the existing endpoint so the E2EE invariant is preserved.
 
+The doorbell is **lossy across disconnects**: events fired while the stream is down (network blip, server-side listener reconnect) are not replayed — there is no event log and no `Last-Event-ID` recovery. Clients therefore recover by re-pulling, not by replay. The contract is: treat the `ready` event (sent on every connect) as a prompt to pull from the current cursor, and keep a low-frequency safety poll so a missed doorbell self-corrects within one poll interval.
+
 ### Why SSE, not WebSockets
 
-The connection is a **doorbell, not a pipe**: the server has nothing useful to push besides "something changed" — all real data lives in opaque blobs that the client still has to pull. That eliminates WebSockets' main advantage (bidirectional framing) and trades it for SSE's wins: it runs through the same Hono middleware as every other HTTP route (auth, CORS, request logging), the browser/EventSource ecosystem handles reconnect with `Last-Event-ID` for free, and long-lived plain-HTTP streams play nicely with K8s ingress, load balancers, and graceful drain. The transport is hidden behind a `Notifier` interface, so a future move to WS is a swap, not a rewrite.
+The connection is a **doorbell, not a pipe**: the server has nothing useful to push besides "something changed" — all real data lives in opaque blobs that the client still has to pull. That eliminates WebSockets' main advantage (bidirectional framing) and trades it for SSE's wins: it runs through the same Hono middleware as every other HTTP route (auth, CORS, request logging), the browser/EventSource ecosystem auto-reconnects for free, and long-lived plain-HTTP streams play nicely with K8s ingress, load balancers, and graceful drain. The transport is hidden behind a `Notifier` interface, so a future move to WS is a swap, not a rewrite.
 
 ### Conflict resolution
 
@@ -304,7 +306,7 @@ Clients receive a signed JWT carrying a `shard_id` claim. The stateless gateway 
 
 ## API surface
 
-All endpoints under `/api`.
+All endpoints under `/api`. This section is the design-level overview; for the full request/response shapes, auth flows, and the client sync contract, see the [client integration guide](./docs/API.md).
 
 ### Capability
 ```
