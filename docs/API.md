@@ -33,10 +33,11 @@ The server is a **generic E2EE sync backend**: it stores opaque encrypted blobs 
 | `401` | Missing or invalid session |
 | `404` | Not found, or not owned by you (we return 404 rather than 403 to avoid leaking existence) |
 | `409` | Version conflict — you tried to write a stale version (see [The sync model](#the-sync-model)) |
+| `413` | Blob upload body exceeds the server's size limit (default 100 MiB) |
 
 **Auth.** Every `/api/*` route except the login endpoints requires a session. Present it either way:
 
-- **Cookie** — login sets an `httpOnly` `session` cookie. Browsers send it automatically.
+- **Cookie** — login sets an `httpOnly` `session` cookie (also `Secure` by default in password mode; set `COOKIE_SECURE=false` for plain-HTTP deployments). Browsers send it automatically.
 - **Bearer token** — login also returns the raw token in the body; send `Authorization: Bearer <token>`. Use this for non-browser clients.
 
 Sessions last 7 days and renew automatically when more than half the lifetime has elapsed (the cookie is re-sent on a renewing request).
@@ -190,6 +191,17 @@ An object is a metadata row pointing at a blob. Shape:
 GET $BASE/api/collections/:cid/objects?sinceVersion=N   → { "objects": [ ... ] }
 GET $BASE/api/collections/:cid/objects/:oid             → { "object": { ... } } | 404
 ```
+
+**Optional paging.** Add `?limit=N` (positive integer, clamped to a max of `1000`) to cap how many objects a single pull returns — useful for a first sync of a large collection. When `limit` is present, the response gains two additive fields:
+```
+GET $BASE/api/collections/:cid/objects?sinceVersion=N&limit=500
+    → { "objects": [ ... ], "hasMore": true, "nextCursor": 542 }
+    → 400 invalid limit
+```
+- `hasMore` — `true` if more objects remain past this page.
+- `nextCursor` — the `change_seq` of the last returned object (a number), or your `sinceVersion` if the page is empty. Pass it as the next request's `sinceVersion` to fetch the remainder; repeat until `hasMore` is `false`.
+
+Omitting `limit` is fully backward compatible: the response is exactly `{ "objects": [ ... ] }` with no `hasMore`/`nextCursor` and no row cap, as before.
 
 ### Create
 ```

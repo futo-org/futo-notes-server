@@ -262,6 +262,12 @@ The client implements a two-tier strategy:
 
 The server's only role is rejecting stale pushes with `409` and returning the current version. All merge logic lives in the client — and since the server sees only opaque blobs, it could not resolve them even if it wanted to.
 
+### Blob retention on delete
+
+A soft delete sets `deleted=true` and bumps the version, but the object's blob is **retained**, not reclaimed: it stays fetchable so a client can still pull it as the common ancestor during three-way merge of a concurrent edit-vs-delete. The tombstone keeps the blobKey live. Replaced blobs (from an update) are likewise retained — recorded in `orphaned_blobs` at replacement time and reclaimed by the GC only after the retention window.
+
+A blob's reference is only severed when the **collection** is deleted. Deleting a collection cascades its object rows away (including soft-deleted tombstones), so the delete handler first records every referenced blob in `orphaned_blobs` inside the same transaction; the GC reclaims them on its next pass. `orphaned_blobs.user_id` FKs to `users`, not the collection, so those ledger rows survive the cascade.
+
 ## Statelessness & scaling
 
 The server holds no in-process state. Any instance can serve any request. This is a hard requirement for running under Kubernetes with horizontal pod autoscaling.

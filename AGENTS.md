@@ -59,7 +59,7 @@ Copy `.env.example` → `.env`. `DATABASE_URL` is always required. Set `AUTH_MOD
 
 Sequential files in `src/db/migrations/` (001_, 002_, ...). Each exports `up()` and `down()`.
 
-IMPORTANT: When adding a migration, you MUST also register it in `src/db/migration-registry.ts`. The production bundle cannot discover migrations from the filesystem.
+IMPORTANT: When adding a migration, you MUST also register it in `src/db/migration-registry.ts`. The production bundle cannot discover migrations from the filesystem. CI enforces this (`scripts/check-migration-registry.mjs` in the `test:build` job).
 
 ## CI/CD
 

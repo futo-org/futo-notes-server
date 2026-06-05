@@ -100,6 +100,37 @@ The server only speaks HTTP internally. To expose it to the internet, put a reve
 - Caddy — automatic Let's Encrypt certificates
 - nginx — classic, most flexibility
 
+### Rate-limit the auth path
+
+`POST /api/auth/password/login` runs scrypt (tens of ms, ~16 MB) on every unauthenticated request, and there is exactly one admin password to guess. The server does not throttle this itself — your reverse proxy MUST rate-limit `/api/auth/` to blunt online guessing and CPU-amplification.
+
+nginx — declare a zone and apply it to the auth location:
+
+```nginx
+limit_req_zone $binary_remote_addr zone=auth:10m rate=5r/m;
+
+location /api/auth/ {
+    limit_req zone=auth burst=5 nodelay;
+    proxy_pass http://localhost:3005;
+}
+```
+
+Caddy has no built-in rate limiter; install the [`caddy-ratelimit`](https://github.com/mholt/caddy-ratelimit) plugin (build with `xcaddy build --with github.com/mholt/caddy-ratelimit`), then:
+
+```caddy
+example.com {
+    rate_limit {
+        zone auth {
+            match path /api/auth/*
+            key {remote_host}
+            events 5
+            window 1m
+        }
+    }
+    reverse_proxy localhost:3005
+}
+```
+
 ## Repo layout
 
 ```

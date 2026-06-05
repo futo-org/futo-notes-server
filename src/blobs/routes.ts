@@ -1,15 +1,22 @@
 import { Hono } from 'hono'
+import { bodyLimit } from 'hono/body-limit'
 import { uuidv7 } from 'uuidv7'
 import type { AuthContext } from '../auth/middleware.ts'
 import type { BlobStore } from '../blob/interface.ts'
+import { env } from '../env.ts'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+const blobLimit = bodyLimit({
+  maxSize: env.MAX_BLOB_BYTES,
+  onError: (c) => c.json({ error: 'blob too large' }, 413),
+})
 
 export function createBlobRoutes(store: BlobStore): Hono<{ Variables: AuthContext }> {
   const app = new Hono<{ Variables: AuthContext }>()
 
   // Upload an opaque blob. Returns the storage key scoped to the authenticated user.
-  app.post('/', async (c) => {
+  app.post('/', blobLimit, async (c) => {
     const userId = c.var.user.id
     const body = await c.req.arrayBuffer()
     if (body.byteLength === 0) {

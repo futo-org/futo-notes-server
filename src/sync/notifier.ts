@@ -88,7 +88,7 @@ export class PostgresNotifier implements Notifier {
   private async connect(): Promise<void> {
     const client = new pg.Client({
       connectionString: env.DATABASE_URL,
-      ssl: env.DB_SSL ? { rejectUnauthorized: false } : undefined,
+      ssl: env.DB_SSL_OPTIONS,
       application_name: APP_NAME,
     })
     client.on('notification', (msg) => this.dispatch(msg))

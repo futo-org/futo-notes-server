@@ -30,6 +30,118 @@ async function devLogin(): Promise<{ token: string; user: { id: string } }> {
   return await response.json() as { token: string; user: { id: string } }
 }
 
+async function createCollection(token: string): Promise<string> {
+  const response = await app.fetch(new Request('http://test.local/api/collections', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+  }))
+  assert.equal(response.status, 201)
+  const { collection } = await response.json() as { collection: { id: string } }
+  return collection.id
+}
+
+async function createObjects(token: string, cid: string, count: number): Promise<void> {
+  const auth = { Authorization: `Bearer ${token}` }
+  for (let i = 0; i < count; i++) {
+    const blob = await app.fetch(new Request('http://test.local/api/blobs', {
+      method: 'POST',
+      headers: { ...auth, 'Content-Type': 'application/octet-stream' },
+      body: `ciphertext-${i}`,
+    }))
+    const { key: blobKey } = await blob.json() as { key: string }
+    const res = await app.fetch(new Request(`http://test.local/api/collections/${cid}/objects`, {
+      method: 'POST',
+      headers: { ...auth, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ blob_key: blobKey, size_bytes: 12 }),
+    }))
+    assert.equal(res.status, 201)
+  }
+}
+
+type PullPage = {
+  objects: Array<{ id: string; change_seq: string }>
+  hasMore?: boolean
+  nextCursor?: number
+}
+
+async function pull(token: string, cid: string, query: string): Promise<PullPage> {
+  const response = await app.fetch(new Request(
+    `http://test.local/api/collections/${cid}/objects${query}`,
+    { headers: { Authorization: `Bearer ${token}` } },
+  ))
+  assert.equal(response.status, 200)
+  return await response.json() as PullPage
+}
+
+test('pull without ?limit returns all objects and no paging fields', async () => {
+  const { token } = await devLogin()
+  const cid = await createCollection(token)
+  await createObjects(token, cid, 5)
+
+  const page = await pull(token, cid, '?sinceVersion=0')
+  assert.equal(page.objects.length, 5)
+  assert.equal(page.hasMore, undefined)
+  assert.equal(page.nextCursor, undefined)
+})
+
+test('pull with ?limit honors the cap and reports hasMore=true short of the end', async () => {
+  const { token } = await devLogin()
+  const cid = await createCollection(token)
+  await createObjects(token, cid, 5)
+
+  const page = await pull(token, cid, '?sinceVersion=0&limit=2')
+  assert.equal(page.objects.length, 2)
+  assert.equal(page.hasMore, true)
+  // change_seq runs 1..5; the second row's change_seq is 2.
+  assert.equal(page.nextCursor, 2)
+})
+
+test('pull with ?limit at the exact boundary reports hasMore=false', async () => {
+  const { token } = await devLogin()
+  const cid = await createCollection(token)
+  await createObjects(token, cid, 3)
+
+  const page = await pull(token, cid, '?sinceVersion=0&limit=3')
+  assert.equal(page.objects.length, 3)
+  assert.equal(page.hasMore, false)
+  assert.equal(page.nextCursor, 3)
+})
+
+test('resuming from nextCursor yields the remainder exactly once', async () => {
+  const { token } = await devLogin()
+  const cid = await createCollection(token)
+  await createObjects(token, cid, 5)
+
+  const seen: string[] = []
+  let cursor = 0
+  // Page through with limit=2 until exhausted.
+  for (let guard = 0; guard < 10; guard++) {
+    const page = await pull(token, cid, `?sinceVersion=${cursor}&limit=2`)
+    for (const obj of page.objects) seen.push(obj.id)
+    if (!page.hasMore) break
+    assert.ok(page.nextCursor !== undefined)
+    cursor = page.nextCursor
+  }
+
+  // Every object seen exactly once, in change_seq order, no duplicates/gaps.
+  const all = await pull(token, cid, '?sinceVersion=0')
+  assert.deepEqual(seen, all.objects.map((o) => o.id))
+  assert.equal(new Set(seen).size, seen.length)
+})
+
+test('pull rejects an invalid ?limit with 400', async () => {
+  const { token } = await devLogin()
+  const cid = await createCollection(token)
+
+  for (const bad of ['0', '-1', 'abc', '1.5']) {
+    const response = await app.fetch(new Request(
+      `http://test.local/api/collections/${cid}/objects?sinceVersion=0&limit=${bad}`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    ))
+    assert.equal(response.status, 400, `limit=${bad} should be rejected`)
+  }
+})
+
 test('GET /api/sync/events requires auth', async () => {
   const response = await app.fetch(new Request('http://test.local/api/sync/events'))
   assert.equal(response.status, 401)

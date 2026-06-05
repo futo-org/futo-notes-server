@@ -20,6 +20,7 @@ export const passwordRoutes = new Hono()
 function setSessionCookie(c: Context, rawToken: string): void {
   setCookie(c, 'session', rawToken, {
     httpOnly: true,
+    secure: env.COOKIE_SECURE,
     sameSite: 'Lax',
     path: '/',
     maxAge: SESSION_MAX_AGE_SECONDS,

@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
+import { HTTPException } from 'hono/http-exception'
 import pkg from '../package.json' with { type: 'json' }
 import { authMiddleware, type AuthContext } from './auth/middleware.ts'
 import { passwordRoutes } from './auth/password-routes.ts'
@@ -9,6 +10,7 @@ import { createBlobRoutes } from './blobs/routes.ts'
 import { collectionsRoutes } from './collections/routes.ts'
 import { pool } from './db/connection.ts'
 import { env } from './env.ts'
+import { log } from './logger.ts'
 import { createObjectsRoutes } from './objects/routes.ts'
 import { syncRoutes } from './sync/routes.ts'
 
@@ -16,6 +18,21 @@ const VERSION: string = pkg.version
 
 export function buildApp(): Hono<{ Variables: AuthContext }> {
   const app = new Hono<{ Variables: AuthContext }>()
+
+  // Chunked over-limit uploads surface as a BodyLimitError thrown mid-body-read
+  // (hono's bodyLimit errors the request stream; its route-level onError still
+  // produces the 413). Handle it here so the default handler doesn't log a stack
+  // trace for every oversized upload. The class isn't exported, so match by name.
+  app.onError((err, c) => {
+    if (err.name === 'BodyLimitError') {
+      return c.json({ error: 'blob too large' }, 413)
+    }
+    if (err instanceof HTTPException) {
+      return err.getResponse()
+    }
+    log.error('unhandled error', { error: String(err) })
+    return c.json({ error: 'internal server error' }, 500)
+  })
 
   app.use('*', cors({ origin: '*', allowHeaders: ['Content-Type', 'Authorization'], allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'] }))
 

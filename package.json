@@ -10,7 +10,7 @@
     "build:hosted": "node build.mjs --hosted",
     "migrate": "tsx src/db/migrate.ts",
     "test": "pnpm test:dev && pnpm test:password",
-    "test:dev": "AUTH_MODE=dev node --import tsx --test tests/e2ee-routes.test.ts tests/capability.test.ts tests/sync-routes.test.ts",
+    "test:dev": "AUTH_MODE=dev node --import tsx --test tests/e2ee-routes.test.ts tests/capability.test.ts tests/sync-routes.test.ts tests/isolation.test.ts tests/blob-limit.test.ts",
     "test:password": "AUTH_MODE=password node --import tsx --test tests/auth-password.test.ts"
   },
   "dependencies": {

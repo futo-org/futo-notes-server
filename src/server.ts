@@ -8,6 +8,7 @@ import { migrateToLatest } from './db/migrate.ts'
 import { env, validateEnv } from './env.ts'
 import { log } from './logger.ts'
 import { startBlobGc, type BlobGcHandle } from './maintenance/blobGc.ts'
+import { startSessionReaper, type SessionReaperHandle } from './maintenance/sessionReaper.ts'
 import { notifier } from './sync/notifier.ts'
 
 /**
@@ -47,6 +48,8 @@ export async function runServer(app: Hono<{ Variables: AuthContext }>, label = '
     blobGc = startBlobGc(new FsBlobStore(env.BLOB_DIR), intervalMs)
   }
 
+  const sessionReaper: SessionReaperHandle = startSessionReaper()
+
   await notifier.start()
 
   const server = serve({ fetch: app.fetch, port: env.PORT }, (info) => {
@@ -61,6 +64,7 @@ export async function runServer(app: Hono<{ Variables: AuthContext }>, label = '
     }, 10000)
 
     blobGc?.stop()
+    sessionReaper.stop()
     server.close(() => {
       log.info('http server closed')
     })

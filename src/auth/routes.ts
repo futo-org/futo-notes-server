@@ -41,6 +41,7 @@ if (env.AUTH_MODE === 'dev') {
 
     setCookie(c, 'session', rawToken, {
       httpOnly: true,
+      secure: env.COOKIE_SECURE,
       sameSite: 'Lax',
       path: '/',
       maxAge: SESSION_MAX_AGE_SECONDS,

@@ -34,6 +34,8 @@ test('login with correct password returns a usable session', async () => {
     body: JSON.stringify({ password: PASSWORD }),
   }))
   assert.equal(response.status, 200)
+  // Password mode defaults COOKIE_SECURE=true, so the cookie must carry Secure.
+  assert.match(response.headers.get('set-cookie') ?? '', /Secure/)
   const data = await response.json() as { user: { id: string; email: string; name: string }; token: string }
   assert.ok(data.token)
   assert.equal(data.user.email, 'local@futo-notes.local')

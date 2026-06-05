@@ -64,6 +64,9 @@ test:build:
     - pnpm install --frozen-lockfile
     # OSS code must never import from src/hosted/ (hosted code wraps OSS, not vice versa).
     - '! grep -rnE "from [''\"][^''\"]*hosted/" src --include=*.ts | grep -v "^src/hosted/"'
+    # Every migration file must be registered in migration-registry.ts — the bundle
+    # loads migrations from the static registry, not the filesystem.
+    - node --import tsx scripts/check-migration-registry.mjs
     - pnpm run build
     - pnpm run build:hosted
     - ls -la dist/index.js dist/hosted.js

@@ -124,13 +124,35 @@ collectionsRoutes.get('/:id', async (c) => {
 collectionsRoutes.delete('/:id', async (c) => {
   const userId = c.var.user.id
   const id = c.req.param('id')
-  const deleted = await db
-    .deleteFrom('collections')
-    .where('id', '=', id)
-    .where('user_id', '=', userId)
-    .returning('id')
-    .executeTakeFirst()
+  const deleted = await db.transaction().execute(async (trx) => {
+    // Record every blob the collection's objects still reference as orphaned
+    // BEFORE the object rows cascade away — otherwise the blobKeys are lost and
+    // the blob GC (src/maintenance/blobGc.ts) can never reclaim them.
+    await trx
+      .insertInto('orphaned_blobs')
+      .expression((eb) =>
+        eb
+          .selectFrom('objects')
+          .where('collection_id', '=', id)
+          .where('user_id', '=', userId)
+          .where('blob_key', 'is not', null)
+          .select((sb) => [
+            'blob_key',
+            'user_id',
+            sb.fn.coalesce('size_bytes', sql<string>`0`).as('size_bytes'),
+          ]),
+      )
+      .onConflict((oc) => oc.column('blob_key').doNothing())
+      .execute()
+
+    return await trx
+      .deleteFrom('collections')
+      .where('id', '=', id)
+      .where('user_id', '=', userId)
+      .returning('id')
+      .executeTakeFirst()
+  })
   if (!deleted) return c.json({ error: 'not found' }, 404)
-  // Objects cascade via FK. Blob cleanup is deferred (see DESIGN.md).
+  // Objects cascade via FK. Orphaned blobs are GC'd later (see DESIGN.md).
   return c.body(null, 204)
 })

@@ -8,7 +8,7 @@ export const pool = new pg.Pool({
   connectionString: env.DATABASE_URL,
   max: env.DB_POOL_MAX,
   idleTimeoutMillis: env.DB_POOL_IDLE_TIMEOUT_MS,
-  ssl: env.DB_SSL ? { rejectUnauthorized: false } : undefined,
+  ssl: env.DB_SSL_OPTIONS,
 })
 
 export const db = new Kysely<Database>({

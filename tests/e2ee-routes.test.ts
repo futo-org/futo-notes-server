@@ -224,6 +224,59 @@ test('blob-objects single-round-trip create, update, and conflict', async () => 
   assert.equal(missingVersionRes.status, 400)
 })
 
+test('deleting a collection orphans its objects blobs for GC', async () => {
+  const email = `coll-del-${Date.now()}-${Math.random().toString(16).slice(2)}@example.test`
+  const login = await json<{ token: string; user: { id: string } }>('/api/auth/dev/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, name: 'Collection Delete Test' }),
+  })
+  const auth = { Authorization: `Bearer ${login.token}` }
+  const created = await json<{ collection: { id: string } }>('/api/collections', {
+    method: 'POST',
+    headers: auth,
+  })
+  const cid = created.collection.id
+
+  // Two objects, each with its own blob.
+  const blobOne = await uploadBlob(login.token, 'coll-del-one')
+  const objOne = await json<{ object: { blob_key: string } }>(
+    `/api/collections/${cid}/objects`,
+    {
+      method: 'POST',
+      headers: { ...auth, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ blob_key: blobOne, size_bytes: 12 }),
+    },
+  )
+  const blobTwo = await uploadBlob(login.token, 'coll-del-two')
+  const objTwo = await json<{ object: { blob_key: string } }>(
+    `/api/collections/${cid}/objects`,
+    {
+      method: 'POST',
+      headers: { ...auth, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ blob_key: blobTwo, size_bytes: 12 }),
+    },
+  )
+
+  // Delete the collection — object rows cascade away.
+  const delRes = await app.fetch(new Request(`http://test.local/api/collections/${cid}`, {
+    method: 'DELETE',
+    headers: auth,
+  }))
+  assert.equal(delRes.status, 204)
+
+  // Each blob now has an orphaned_blobs row scoped to this user.
+  for (const blobKey of [objOne.object.blob_key, objTwo.object.blob_key]) {
+    const rows = await db
+      .selectFrom('orphaned_blobs')
+      .where('blob_key', '=', blobKey)
+      .selectAll()
+      .execute()
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].user_id, login.user.id)
+  }
+})
+
 test('orphaned blobs are retained and reclaimed after retention window', async () => {
   const email = `orphan-${Date.now()}-${Math.random().toString(16).slice(2)}@example.test`
   const login = await json<{ token: string }>('/api/auth/dev/login', {

@@ -39,6 +39,7 @@ export const authMiddleware: MiddlewareHandler<{ Variables: AuthContext }> = asy
   if (session.renewed && cookieToken) {
     setCookie(c, 'session', cookieToken, {
       httpOnly: true,
+      secure: env.COOKIE_SECURE,
       sameSite: 'Lax',
       path: '/',
       maxAge: Math.floor(SESSION_TTL_MS / 1000),

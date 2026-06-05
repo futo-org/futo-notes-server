@@ -1,11 +1,18 @@
 import { Hono } from 'hono'
+import { bodyLimit } from 'hono/body-limit'
 import { sql, type Transaction } from 'kysely'
 import { uuidv7 } from 'uuidv7'
 import type { AuthContext } from '../auth/middleware.ts'
 import type { BlobStore } from '../blob/interface.ts'
 import { db } from '../db/connection.ts'
 import type { Database } from '../db/types.ts'
+import { env } from '../env.ts'
 import { notifier } from '../sync/notifier.ts'
+
+const blobLimit = bodyLimit({
+  maxSize: env.MAX_BLOB_BYTES,
+  onError: (c) => c.json({ error: 'blob too large' }, 413),
+})
 
 export function createObjectsRoutes(
   store: BlobStore,
@@ -13,6 +20,9 @@ export function createObjectsRoutes(
   const objectsRoutes = new Hono<{ Variables: AuthContext }>()
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+// Upper bound for the opt-in ?limit on the objects pull endpoint.
+const MAX_PULL_LIMIT = 1000
 
 interface CreateBody {
   blob_key?: string
@@ -98,7 +108,18 @@ objectsRoutes.get('/:cid/objects', async (c) => {
     return c.json({ error: 'invalid sinceVersion' }, 400)
   }
 
-  const rows = await db
+  // Opt-in keyset paging. Absent ?limit → unbounded, original response shape.
+  const limitRaw = c.req.query('limit')
+  let limit: number | null = null
+  if (limitRaw !== undefined) {
+    const parsed = Number(limitRaw)
+    if (!Number.isSafeInteger(parsed) || parsed < 1) {
+      return c.json({ error: 'invalid limit' }, 400)
+    }
+    limit = Math.min(parsed, MAX_PULL_LIMIT)
+  }
+
+  const query = db
     .selectFrom('objects')
     .where('collection_id', '=', cid)
     .where('user_id', '=', userId)
@@ -115,8 +136,17 @@ objectsRoutes.get('/:cid/objects', async (c) => {
       'updated_at',
     ])
     .orderBy('change_seq', 'asc')
-    .execute()
 
+  if (limit !== null) {
+    // Fetch one extra row to detect whether more remain past this page.
+    const rows = await query.limit(limit + 1).execute()
+    const hasMore = rows.length > limit
+    const page = hasMore ? rows.slice(0, limit) : rows
+    const nextCursor = page.length > 0 ? Number(page[page.length - 1].change_seq) : sinceVersion
+    return c.json({ objects: page, hasMore, nextCursor })
+  }
+
+  const rows = await query.execute()
   return c.json({ objects: rows })
 })
 
@@ -382,7 +412,7 @@ objectsRoutes.delete('/:cid/objects/:oid', async (c) => {
   // matters a lot on first-sync of a large collection over high-latency
   // networks. Semantically equivalent to those two calls — same response
   // shape, same invariants.
-  objectsRoutes.post('/:cid/blob-objects', async (c) => {
+  objectsRoutes.post('/:cid/blob-objects', blobLimit, async (c) => {
     const userId = c.var.user.id
     const cid = c.req.param('cid')
     if (!(await ensureCollectionOwned(userId, cid))) {
@@ -430,7 +460,7 @@ objectsRoutes.delete('/:cid/objects/:oid', async (c) => {
   // Single-round-trip update: body is raw ciphertext, ?version=N is the
   // expected next version. Mirrors PUT /objects/:oid's version-check +
   // conflict semantics exactly so the client's merge path is unchanged.
-  objectsRoutes.put('/:cid/blob-objects/:oid', async (c) => {
+  objectsRoutes.put('/:cid/blob-objects/:oid', blobLimit, async (c) => {
     const userId = c.var.user.id
     const cid = c.req.param('cid')
     const oid = c.req.param('oid')
