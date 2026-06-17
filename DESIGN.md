@@ -68,6 +68,8 @@ Flow:
 
 Not implemented in v1. Will live in `src/hosted/` as middleware; `AUTH_MODE` gains `'oidc'` as a third value when it lands. Flow will be OIDC Authorization Code with PKCE (S256); required claims `sub`, `name`, `email`. The capability endpoint's `signup` field flips to `'open'` when this is enabled.
 
+Yucca now ships a concrete reference for this flow (see §Yucca migration path below): `packages/yucca-api` implements OIDC Authorization Code + PKCE with `/auth/oidc/login` and `/auth/oidc/callback`, opaque session tokens, and a 7-day httpOnly cookie — the same shape planned here. It also adds an SSE-based **device flow** (`/auth/oidc/device`) for headless clients, which is worth borrowing if FUTO Notes needs CLI/headless login.
+
 ### Session model (both modes)
 
 Server generates an opaque session token (32 random bytes, hex-encoded), stores its **SHA-256 hash** in the `sessions` table, and returns the raw token as an `httpOnly` cookie. Subsequent requests hash the cookie and look up the row. A `sessions` table leak therefore does not yield usable bearer credentials.
@@ -79,7 +81,9 @@ Session expiry: 7 days.
 `GET /` returns `{ name, version, auth_mode, signup, billing }`. Clients fetch it once at server-add time to render the right login UI per-server — one client build works against any deployment without per-server configuration.
 
 ### Yucca migration path
-When OIDC lands, point `OIDC_ISSUER` at whatever provider Yucca uses. Session model is already identical — no code changes needed.
+Yucca's auth is built — `packages/yucca-api` has a working OIDC Authorization Code + PKCE implementation (via the public `openid-client` library, generic issuer discovery) with opaque session tokens and a 7-day httpOnly cookie (a `mock-oidc-provider` package backs local dev). The session model is already identical to this design, so migration stays a config change: point `OIDC_ISSUER` at the shared IdP when OIDC lands here. No session-layer code changes needed.
+
+**The shared IdP is decided: Zitadel Cloud.** It is the FUTO org identity provider for both customer auth and internal FUTO auth — one "Log in with FUTO" account across every service (Notes, Immich, futopay). The cross-service identity key is the OIDC `sub` claim, which maps directly to this design's `users.sub UNIQUE` column. See [docs/MANAGED-LAUNCH.md](./docs/MANAGED-LAUNCH.md) for the integration plan, open questions (confirm public vs pairwise subjects), and the unresolved E2EE-vault-key-under-SSO decision.
 
 ## Storage architecture
 
@@ -107,11 +111,11 @@ interface BlobStore {
 ```
 
 Implementations:
-- `S3BlobStore` — talks to any S3-compatible endpoint (R2 in prod, local dev service in development)
-- `FsBlobStore` — local filesystem (testing)
+- `FsBlobStore` — local filesystem. **The only implementation that exists today.** Used in tests and currently wired into both the OSS and hosted entrypoints (`src/app.ts`, `src/server.ts`).
+- `S3BlobStore` — **not yet implemented.** Planned: talks to any S3-compatible endpoint (R2 in prod, local dev service in development). Needed for the horizontal-scaling story; until it exists, a managed launch runs on a host-volume `FsBlobStore`. See [docs/MANAGED-LAUNCH.md](./docs/MANAGED-LAUNCH.md).
 
 ### Yucca migration path
-Yucca uses a Ceph cluster in Hetzner, exposed via the S3 API. Migration is a config change — point the existing `S3BlobStore` at Yucca's endpoint. No new implementation needed.
+Yucca uses a Ceph cluster in Hetzner, exposed via the S3 API. Once `S3BlobStore` exists (it does not yet — see above), migration is a config change: point it at Yucca's endpoint, no further implementation needed.
 
 ### Bucket layout (open question)
 
@@ -366,7 +370,9 @@ GET    /api/sync/events                           → SSE stream of change event
 
 ## Deployment
 
-**Production:** Hetzner, Kubernetes. Containers designed for horizontal scaling (see §Statelessness & scaling). This matches Immich's direction, which makes shared operational knowledge cheaper.
+**Production (aspirational):** Hetzner, Kubernetes. Containers designed for horizontal scaling (see §Statelessness & scaling). This matches Immich's direction, which makes shared operational knowledge cheaper.
+
+**Production (actual, near-term launch):** FUTO deploys via **Manifest** (`gitlab.futo.org/devops/manifest`, driven by the `manifest-inventory` repo) — Docker containers on named bare-metal servers (e.g. `hv-lax2`) with **host volume mounts** for persistence and HAProxy load balancing, not Kubernetes and not object storage. Immich itself is deployed this way in FUTO infra. The near-term managed launch follows this model (host-volume `FsBlobStore`); K8s + object storage is the scaling path, not the launch path. See [docs/MANAGED-LAUNCH.md](./docs/MANAGED-LAUNCH.md).
 
 Not targets:
 - **Cloudflare Workers** — the real-time fan-out path needs a long-lived Postgres `LISTEN` connection per process, which doesn't fit Workers' request-scoped execution model. Pushing that state into Durable Objects works but reintroduces the stateful components we're trying to avoid.
@@ -384,7 +390,7 @@ Yucca uses Polar as well, but this project's billing is not coupled to Yucca's.
 
 | Layer | Migration effort |
 |-------|-----------------|
-| Auth (OIDC) | Config change — point `OIDC_ISSUER` at Yucca's IdP |
+| Auth (OIDC) | Config change — point `OIDC_ISSUER` at Yucca's IdP. Yucca's OIDC + opaque-session model is built and matches this design's session layer |
 | Storage (S3) | Config change — point `S3BlobStore` at Yucca's Ceph endpoint. No new implementation |
 | Sync protocol | None — Yucca has no sync, this stays |
 | Encryption | None — client-side, server-agnostic |
