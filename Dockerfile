@@ -29,7 +29,15 @@ RUN corepack enable && corepack prepare pnpm@10 --activate \
 
 ENV PORT=3000
 ENV BLOB_DIR=/data/blobs
+# AUTH_MODE selects the auth strategy ("password" vs "dev"); it is NOT a secret
+# value, so the DS-0031 "secret in env" finding here is a false positive.
+#trivy:ignore:DS-0031
 ENV AUTH_MODE=password
+
+# Drop privileges: run as the unprivileged `node` user (uid 1000) baked into
+# the base image instead of root. The blob directory must be writable by it.
+RUN mkdir -p /data/blobs && chown -R node:node /data
+USER node
 
 EXPOSE 3000
 
