@@ -11,9 +11,9 @@
     "build:hosted": "bun build.mjs --hosted",
     "migrate": "bun src/db/migrate.ts",
     "typecheck": "tsc --noEmit",
-    "test": "bun run test:dev && bun run test:password",
-    "test:dev": "AUTH_MODE=dev bun test tests/e2ee-routes.test.ts && AUTH_MODE=dev bun test tests/capability.test.ts && AUTH_MODE=dev bun test tests/sync-routes.test.ts && AUTH_MODE=dev bun test tests/isolation.test.ts && AUTH_MODE=dev bun test tests/blob-limit.test.ts",
-    "test:password": "AUTH_MODE=password bun test tests/auth-password.test.ts"
+    "test": "bun scripts/test.ts",
+    "test:dev": "bun scripts/test.ts dev",
+    "test:password": "bun scripts/test.ts password"
   },
   "dependencies": {
     "hono": "^4.6.14",

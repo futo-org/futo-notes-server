@@ -52,7 +52,7 @@ Copy `.env.example` → `.env`. `DATABASE_URL` is always required. Set `AUTH_MOD
 - Tests hit a real Postgres — no mocks for the database.
 - Tests call `buildApp().fetch()` directly (no HTTP server started).
 - Requires a valid `DATABASE_URL`.
-- Each test file runs as its OWN `bun test` invocation. `bun test` runs all listed files in one shared process, but tests depend on per-file isolation: the `db` pool is a module singleton that each file's `afterAll` calls `db.destroy()` on, and some files snapshot env (AUTH_MODE, MAX_BLOB_BYTES) at module load. Node's test runner forks a process per file; under Bun we get the same isolation by invoking `bun test <file>` once per file. `test:dev` chains the AUTH_MODE=dev files (incl. blob-limit) with `&&`; `test:password` runs the AUTH_MODE=password file. `bun run test` runs both groups in sequence.
+- Each test file runs as its OWN `bun test` invocation. `bun test` runs all listed files in one shared process, but tests depend on per-file isolation: the `db` pool is a module singleton that each file's `afterAll` calls `db.destroy()` on, and some files snapshot env (AUTH_MODE, MAX_BLOB_BYTES) at module load. Node's test runner forks a process per file; under Bun, `scripts/test.ts` reproduces that — it spawns one `bun test <file>` process per file, grouped by the AUTH_MODE each file needs. `bun run test` runs all groups; `bun run test:dev` / `bun run test:password` run a single group (the runner takes an optional group-name arg).
 - Password-mode tests set `FUTO_NOTES_PASSWORD_HASH` at the top of the file via top-level await, before dynamic-importing modules that snapshot env.
 
 ## Migrations

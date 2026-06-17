@@ -42,15 +42,15 @@ sync/SSE/auth/conflict semantics, blob bytes). Pinned Bun version: **1.3.14**.
   - `build:hosted`: `bun build.mjs --hosted`
   - `migrate`: `bun src/db/migrate.ts`
   - `typecheck`: `tsc --noEmit`
-  - `test`: `bun run test:dev && bun run test:password`
-  - `test:dev`: one `AUTH_MODE=dev bun test <file>` per dev-mode file, chained with `&&`
-    (e2ee-routes, capability, sync-routes, isolation, blob-limit)
-  - `test:password`: `AUTH_MODE=password bun test tests/auth-password.test.ts`
+  - `test`: `bun scripts/test.ts` (runs all groups)
+  - `test:dev`: `bun scripts/test.ts dev`
+  - `test:password`: `bun scripts/test.ts password`
 
-**One `bun test` invocation per file** (discovered during implementation): `bun test` runs
-all listed files in a single shared process, but the app's `db` pool is a module singleton
-that each file's `afterAll` destroys, and some files snapshot env at module load. Node forks
-a process per file; invoking `bun test <file>` once per file reproduces that isolation exactly.
+**One `bun test` process per file**, orchestrated by `scripts/test.ts` (discovered during
+implementation): `bun test` runs all listed files in a single shared process, but the app's
+`db` pool is a module singleton each file's `afterAll` destroys, and blob-limit/auth-password
+snapshot env at module load. Node forks a process per file; the runner reproduces that by
+spawning one `bun test <file>` per file, grouped by AUTH_MODE.
 
 ### `tsconfig.json`
 - `"types": ["node", "bun"]` (still using `node:` builtins; add Bun globals for `Bun.serve`).
