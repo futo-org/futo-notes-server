@@ -8,10 +8,10 @@ The first client is a notes app, but the server knows nothing about notes — se
 
 | Layer | Choice | Notes |
 |-------|--------|-------|
-| Runtime | Node.js | |
+| Runtime | Bun | Also the package manager, bundler driver, and test runner |
 | Language | TypeScript | |
-| HTTP framework | Hono | |
-| Package manager | pnpm | |
+| HTTP framework | Hono | Served via `Bun.serve` |
+| Package manager | Bun | |
 | Database | PostgreSQL | Metadata only — kept intentionally small (see §Database footprint) |
 | Query builder | Kysely | Matches Yucca, type-safe, no ORM magic |
 | Blob storage | Cloudflare R2 (prod) | Stores encrypted blobs. Local dev uses an S3-compatible service (TBD — candidates: LocalStack, SeaweedFS, Garage) |
@@ -57,7 +57,7 @@ Two modes, chosen per-deployment via `AUTH_MODE`. The server renders no auth UI 
 
 ### `AUTH_MODE=password` (v1 self-hosted)
 
-Single-user mode. The admin password is scrypt-hashed and passed in as the `FUTO_NOTES_PASSWORD_HASH` env var (produced by `node dist/index.js hash <pw>`). One singleton user row (`sub='local'`) is lazy-upserted on first successful login. There is no per-user password table and no reset endpoint — to change the password, regenerate the hash, update `.env`, and restart the server.
+Single-user mode. The admin password is scrypt-hashed and passed in as the `FUTO_NOTES_PASSWORD_HASH` env var (produced by `bun dist/index.js hash <pw>`). One singleton user row (`sub='local'`) is lazy-upserted on first successful login. There is no per-user password table and no reset endpoint — to change the password, regenerate the hash, update `.env`, and restart the server.
 
 Flow:
 1. Client POSTs `{ password }` to `/api/auth/password/login`
