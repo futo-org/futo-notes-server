@@ -7,18 +7,18 @@ End-to-end encrypted sync server for the [FUTO Notes](https://gitlab.futo.org/fu
 
 ## Running from source
 
-Requirements: Node 20+, pnpm 10, Docker (for Postgres).
+Requirements: Bun 1.3+, Docker (for Postgres).
 
 ```bash
-pnpm install
+bun install
 docker compose up -d            # Postgres on localhost:5433
 cp .env.example .env
 
 # Generate a password hash and paste it into .env as FUTO_NOTES_PASSWORD_HASH
-pnpm exec tsx src/index.ts hash <your-password>
+bun src/index.ts hash <your-password>
 
-pnpm migrate                    # apply DB migrations
-pnpm dev                        # http://localhost:3005
+bun run migrate                 # apply DB migrations
+bun dev                         # http://localhost:3005
 ```
 
 The default `.env.example` is set up for `AUTH_MODE=password`. For dev/test mode (passwordless `/api/auth/dev/login`), set `AUTH_MODE=dev` and clear `FUTO_NOTES_PASSWORD_HASH`.
@@ -26,9 +26,9 @@ The default `.env.example` is set up for `AUTH_MODE=password`. For dev/test mode
 ### Tests
 
 ```bash
-pnpm test                       # full suite (dev + password modes)
-pnpm test:dev                   # AUTH_MODE=dev only
-pnpm test:password              # AUTH_MODE=password only
+bun run test                    # full suite (dev + password modes)
+bun run test:dev                # AUTH_MODE=dev only
+bun run test:password           # AUTH_MODE=password only
 ```
 
 Tests need the Postgres container running (`docker compose up -d postgres`).
@@ -36,8 +36,8 @@ Tests need the Postgres container running (`docker compose up -d postgres`).
 ### Build
 
 ```bash
-pnpm build                      # esbuild → dist/index.js (OSS entrypoint)
-pnpm build:hosted               # → dist/hosted.js (hosted entrypoint)
+bun run build                   # esbuild → dist/index.js (OSS entrypoint)
+bun run build:hosted            # → dist/hosted.js (hosted entrypoint)
 ```
 
 ## Self-hosting with Docker
@@ -55,7 +55,7 @@ curl -sSL https://gitlab.futo.org/futo-notes/futo-notes-server/-/raw/main/.env.p
 # 3. Generate an admin password hash
 docker run --rm \
   gitlab.futo.org:5050/futo-notes/futo-notes-server/server:stable \
-  node dist/index.js hash 'your-admin-password'
+  bun dist/index.js hash 'your-admin-password'
 
 # 4. Edit .env: paste the hash from step 3 into FUTO_NOTES_PASSWORD_HASH,
 #    and set POSTGRES_PASSWORD to a strong random string (e.g. `openssl rand -hex 32`).
@@ -144,5 +144,5 @@ src/
   collections/  # collection API
   objects/      # per-object versioned sync API
   db/           # Kysely connection + migrations
-tests/          # integration tests (node:test)
+tests/          # integration tests (bun:test)
 ```

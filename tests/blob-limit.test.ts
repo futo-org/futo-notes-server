@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { after, before, test } from 'node:test'
+import { afterAll, beforeAll, test } from 'bun:test'
 
 // Set a tiny limit before importing anything that snapshots env. env.ts reads
 // MAX_BLOB_BYTES at import time, so this must precede the dynamic imports below
@@ -12,12 +12,12 @@ const { migrateToLatest } = await import('../src/db/migrate.ts')
 
 const app = buildApp()
 
-before(async () => {
+beforeAll(async () => {
   await waitForDb()
   await migrateToLatest()
 })
 
-after(async () => {
+afterAll(async () => {
   await db.destroy()
 })
 

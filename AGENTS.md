@@ -5,20 +5,20 @@ Generic E2EE sync server. Stores opaque encrypted blobs and metadata — the ser
 ## Commands
 
 ```bash
-pnpm dev              # Dev server with hot reload (tsx watch)
-pnpm build            # esbuild bundle → dist/index.js (OSS entrypoint)
-pnpm build:hosted     # esbuild bundle → dist/hosted.js (hosted entrypoint)
-pnpm test             # Integration tests (needs running Postgres)
-pnpm migrate          # Run DB migrations
+bun dev               # Dev server with hot reload (bun --watch)
+bun run build         # esbuild bundle → dist/index.js (OSS entrypoint)
+bun run build:hosted  # esbuild bundle → dist/hosted.js (hosted entrypoint)
+bun test              # Integration tests, aggregate (needs running Postgres); same as `bun run test`
+bun run migrate       # Run DB migrations
 docker compose up -d  # Local Postgres on port 5433
-tsc --noEmit          # Type-check only
+bunx tsc --noEmit     # Type-check only
 
-node dist/index.js hash <password>   # print a scrypt hash for FUTO_NOTES_PASSWORD_HASH
+bun dist/index.js hash <password>   # print a scrypt hash for FUTO_NOTES_PASSWORD_HASH
 ```
 
 ## Environment
 
-Copy `.env.example` → `.env`. `DATABASE_URL` is always required. Set `AUTH_MODE=dev` for development and tests (enables passwordless login at `/api/auth/dev/login`). Set `AUTH_MODE=password` + `FUTO_NOTES_PASSWORD_HASH` for single-user self-hosted mode. Validation happens at boot via `validateEnv()` in `src/env.ts`.
+Copy `.env.example` → `.env`. `DATABASE_URL` is always required. Set `AUTH_MODE=dev` for development and tests (enables passwordless login at `/api/auth/dev/login`). Set `AUTH_MODE=password` + `FUTO_NOTES_PASSWORD_HASH` for single-user self-hosted mode. The `.env` file is loaded by Bun's built-in `.env` support (no `dotenv`). Validation happens at boot via `validateEnv()` in `src/env.ts`.
 
 ## App structure: OSS vs hosted
 
@@ -48,11 +48,11 @@ Copy `.env.example` → `.env`. `DATABASE_URL` is always required. Set `AUTH_MOD
 
 ## Testing
 
-- Framework: `node:test` (native). No Jest, no Vitest.
+- Framework: `bun:test` (built into Bun). No external test framework — no Jest, no Vitest.
 - Tests hit a real Postgres — no mocks for the database.
 - Tests call `buildApp().fetch()` directly (no HTTP server started).
 - Requires a valid `DATABASE_URL`.
-- Two invocations because mode affects module-loaded env: `pnpm test:dev` (AUTH_MODE=dev) and `pnpm test:password` (AUTH_MODE=password). `pnpm test` runs both in sequence.
+- Each test file runs as its OWN `bun test` invocation. `bun test` runs all listed files in one shared process, but tests depend on per-file isolation: the `db` pool is a module singleton that each file's `afterAll` calls `db.destroy()` on, and some files snapshot env (AUTH_MODE, MAX_BLOB_BYTES) at module load. Node's test runner forks a process per file; under Bun we get the same isolation by invoking `bun test <file>` once per file. `test:dev` chains the AUTH_MODE=dev files (incl. blob-limit) with `&&`; `test:password` runs the AUTH_MODE=password file. `bun run test` runs both groups in sequence.
 - Password-mode tests set `FUTO_NOTES_PASSWORD_HASH` at the top of the file via top-level await, before dynamic-importing modules that snapshot env.
 
 ## Migrations

@@ -3,29 +3,29 @@
   "version": "0.4.1",
   "private": true,
   "type": "module",
+  "trustedDependencies": ["esbuild"],
   "scripts": {
-    "dev": "tsx watch src/index.ts",
-    "start": "tsx src/index.ts",
-    "build": "node build.mjs",
-    "build:hosted": "node build.mjs --hosted",
-    "migrate": "tsx src/db/migrate.ts",
-    "test": "pnpm test:dev && pnpm test:password",
-    "test:dev": "AUTH_MODE=dev node --import tsx --test tests/e2ee-routes.test.ts tests/capability.test.ts tests/sync-routes.test.ts tests/isolation.test.ts tests/blob-limit.test.ts",
-    "test:password": "AUTH_MODE=password node --import tsx --test tests/auth-password.test.ts"
+    "dev": "bun --watch src/index.ts",
+    "start": "bun src/index.ts",
+    "build": "bun build.mjs",
+    "build:hosted": "bun build.mjs --hosted",
+    "migrate": "bun src/db/migrate.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun run test:dev && bun run test:password",
+    "test:dev": "AUTH_MODE=dev bun test tests/e2ee-routes.test.ts && AUTH_MODE=dev bun test tests/capability.test.ts && AUTH_MODE=dev bun test tests/sync-routes.test.ts && AUTH_MODE=dev bun test tests/isolation.test.ts && AUTH_MODE=dev bun test tests/blob-limit.test.ts",
+    "test:password": "AUTH_MODE=password bun test tests/auth-password.test.ts"
   },
   "dependencies": {
-    "@hono/node-server": "^1.13.7",
-    "dotenv": "^16.4.7",
     "hono": "^4.6.14",
     "kysely": "^0.28.17",
     "pg": "^8.13.1",
     "uuidv7": "^1.0.2"
   },
   "devDependencies": {
+    "@types/bun": "latest",
     "@types/node": "^22.10.2",
     "@types/pg": "^8.11.10",
     "esbuild": "^0.28.0",
-    "tsx": "^4.19.2",
     "typescript": "^5.7.2"
   }
 }

@@ -11,7 +11,7 @@ await build({
   target: 'node24',
   format: 'esm',
   outfile,
-  external: ['pg', 'pg-native', 'dotenv'],
+  external: ['pg', 'pg-native'],
   // createRequire shim so bundled CommonJS deps can still call require() under ESM.
   banner: {
     js: `import { createRequire as __createRequire } from 'node:module';

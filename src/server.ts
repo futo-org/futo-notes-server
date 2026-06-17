@@ -1,4 +1,3 @@
-import { serve } from '@hono/node-server'
 import type { Hono } from 'hono'
 import type { AuthContext } from './auth/middleware.ts'
 import { hashPassword } from './auth/password.ts'
@@ -52,9 +51,8 @@ export async function runServer(app: Hono<{ Variables: AuthContext }>, label = '
 
   await notifier.start()
 
-  const server = serve({ fetch: app.fetch, port: env.PORT }, (info) => {
-    log.info(`${label} listening on http://localhost:${info.port}`)
-  })
+  const server = Bun.serve({ fetch: app.fetch, port: env.PORT, idleTimeout: 0 })
+  log.info(`${label} listening on http://localhost:${server.port}`)
 
   const shutdown = async (signal: string) => {
     log.info(`${signal} received, shutting down...`)
@@ -65,9 +63,8 @@ export async function runServer(app: Hono<{ Variables: AuthContext }>, label = '
 
     blobGc?.stop()
     sessionReaper.stop()
-    server.close(() => {
-      log.info('http server closed')
-    })
+    await server.stop(true)
+    log.info('http server closed')
     await notifier.stop()
     await db.destroy()
     log.info('db pool drained')

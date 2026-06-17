@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { after, before, test } from 'node:test'
+import { afterAll, beforeAll, test } from 'bun:test'
 // password.ts has no env.ts dependency, so importing it here does not cache
 // env.ts before we've set FUTO_NOTES_PASSWORD_HASH below.
 import { hashPassword } from '../src/auth/password.ts'
@@ -15,7 +15,7 @@ const { migrateToLatest } = await import('../src/db/migrate.ts')
 
 const app = buildApp()
 
-before(async () => {
+beforeAll(async () => {
   await waitForDb()
   await migrateToLatest()
   // Start clean — lazy-upsert will recreate the singleton.
@@ -23,7 +23,7 @@ before(async () => {
   await db.deleteFrom('users').where('sub', '=', 'local').execute()
 })
 
-after(async () => {
+afterAll(async () => {
   await db.destroy()
 })
 
@@ -61,8 +61,8 @@ test('login with wrong password returns 401', async () => {
 test('validateEnv rejects password mode without a hash', () => {
   // Run validateEnv in a subprocess with AUTH_MODE=password but no hash.
   const result = spawnSync(
-    'node',
-    ['--import', 'tsx', '-e', 'import("./src/env.ts").then(({ validateEnv }) => validateEnv())'],
+    'bun',
+    ['--no-env-file', '-e', 'import("./src/env.ts").then(({ validateEnv }) => validateEnv())'],
     {
       env: {
         ...process.env,

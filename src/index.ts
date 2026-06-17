@@ -2,7 +2,7 @@ import { buildApp } from './app.ts'
 import { log } from './logger.ts'
 import { runCliSubcommand, runServer } from './server.ts'
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (import.meta.main) {
   runCliSubcommand()
     .then(() => runServer(buildApp()))
     .catch((err) => {

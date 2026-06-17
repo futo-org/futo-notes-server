@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { after, before, test } from 'node:test'
+import { afterAll, beforeAll, test } from 'bun:test'
 import { sql } from 'kysely'
 import { buildApp } from '../src/app.ts'
 import { db, waitForDb } from '../src/db/connection.ts'
@@ -8,13 +8,13 @@ import { notifier, type ChangeEvent } from '../src/sync/notifier.ts'
 
 const app = buildApp()
 
-before(async () => {
+beforeAll(async () => {
   await waitForDb()
   await migrateToLatest()
   await notifier.start()
 })
 
-after(async () => {
+afterAll(async () => {
   await notifier.stop()
   await db.destroy()
 })

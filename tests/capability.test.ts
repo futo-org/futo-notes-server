@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { test } from 'node:test'
+import { test } from 'bun:test'
 import { buildApp } from '../src/app.ts'
 
 const app = buildApp()

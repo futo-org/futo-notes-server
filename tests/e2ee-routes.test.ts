@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { after, before, test } from 'node:test'
+import { afterAll, beforeAll, test } from 'bun:test'
 import { buildApp } from '../src/app.ts'
 import { FsBlobStore } from '../src/blob/fs.ts'
 import { db, waitForDb } from '../src/db/connection.ts'
@@ -9,12 +9,12 @@ import { runBlobGcOnce } from '../src/maintenance/blobGc.ts'
 
 const app = buildApp()
 
-before(async () => {
+beforeAll(async () => {
   await waitForDb()
   await migrateToLatest()
 })
 
-after(async () => {
+afterAll(async () => {
   await db.destroy()
 })
 

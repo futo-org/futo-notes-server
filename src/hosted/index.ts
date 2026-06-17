@@ -10,7 +10,7 @@ function buildHostedApp() {
   return app
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (import.meta.main) {
   runCliSubcommand()
     .then(() => runServer(buildHostedApp(), 'futo-notes (hosted)'))
     .catch((err) => {

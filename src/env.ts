@@ -1,4 +1,3 @@
-import 'dotenv/config'
 import { readFileSync } from 'node:fs'
 import type { ConnectionOptions } from 'node:tls'
 
