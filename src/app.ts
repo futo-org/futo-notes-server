@@ -4,6 +4,7 @@ import { HTTPException } from 'hono/http-exception'
 import pkg from '../package.json' with { type: 'json' }
 import { authMiddleware, type AuthContext } from './auth/middleware.ts'
 import { passwordRoutes } from './auth/password-routes.ts'
+import { authRateLimit } from './auth/rate-limit.ts'
 import { authRoutes } from './auth/routes.ts'
 import { FsBlobStore } from './blob/fs.ts'
 import { createBlobRoutes } from './blobs/routes.ts'
@@ -35,6 +36,14 @@ export function buildApp(): Hono<{ Variables: AuthContext }> {
   })
 
   app.use('*', cors({ origin: '*', allowHeaders: ['Content-Type', 'Authorization'], allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'] }))
+
+  // Rate-limit the scrypt-backed password login before the (public) auth
+  // middleware or the route handler run, so a flood can't amplify CPU. Only
+  // this path exists in password mode; dev-mode login is passwordless and
+  // runs no scrypt, so it is left unlimited.
+  if (env.AUTH_MODE === 'password') {
+    app.use('/api/auth/password/login', authRateLimit())
+  }
 
   app.get('/', (c) => c.json({
     name: 'futo-notes',

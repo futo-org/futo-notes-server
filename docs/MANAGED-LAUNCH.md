@@ -59,7 +59,12 @@ tied to the user's plan.
 - **Account lifecycle:** no account-deletion endpoint (GDPR), no password reset.
   Orphaned-blob GC and collection-cascade cleanup already exist, so the plumbing is
   there — just no user-facing account delete.
-- **Rate limiting / abuse controls:** none present.
+- **Rate limiting / abuse controls:** the password-login path is rate-limited
+  in-process (per-instance, in-memory; see `src/auth/rate-limit.ts`), which
+  covers the scrypt brute-force/CPU-amplification vector. No limits yet on the
+  authenticated API surface (sync/blob writes), and the in-memory limiter does
+  not coordinate across instances — a shared store (Redis/Valkey) is the
+  multi-instance follow-up.
 
 ### Not blockers (good shape)
 

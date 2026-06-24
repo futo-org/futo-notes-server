@@ -15,7 +15,7 @@ const groups = [
   {
     name: 'password',
     env: { AUTH_MODE: 'password' },
-    files: ['auth-password'],
+    files: ['auth-password', 'auth-rate-limit'],
   },
 ]
 

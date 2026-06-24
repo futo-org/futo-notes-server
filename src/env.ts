@@ -59,6 +59,14 @@ export const env = {
   BLOB_GC_ENABLED: process.env.BLOB_GC_ENABLED !== 'false',
   // Max accepted request body size for blob uploads, in bytes (default 100 MiB).
   MAX_BLOB_BYTES: Number(process.env.MAX_BLOB_BYTES ?? 104857600),
+  // Login rate limiting. Caps requests to the scrypt-backed password login per
+  // client per window, blunting brute force and CPU amplification. 0 disables.
+  AUTH_RATE_LIMIT: Number(process.env.AUTH_RATE_LIMIT ?? 10),
+  AUTH_RATE_LIMIT_WINDOW_MS: Number(process.env.AUTH_RATE_LIMIT_WINDOW_MS ?? 60000),
+  // Trust X-Forwarded-For for the client IP — enable only behind a reverse
+  // proxy you control that sets it (otherwise clients can spoof the header to
+  // dodge the limit). Off → the limiter keys on the socket peer address.
+  TRUST_PROXY: process.env.TRUST_PROXY === 'true',
 }
 
 export function validateEnv(): void {
@@ -76,5 +84,11 @@ export function validateEnv(): void {
   }
   if (!Number.isSafeInteger(env.MAX_BLOB_BYTES) || env.MAX_BLOB_BYTES < 1) {
     throw new Error('MAX_BLOB_BYTES must be a positive integer (bytes)')
+  }
+  if (!Number.isFinite(env.AUTH_RATE_LIMIT) || env.AUTH_RATE_LIMIT < 0) {
+    throw new Error('AUTH_RATE_LIMIT must be a non-negative number (0 disables rate limiting)')
+  }
+  if (!Number.isFinite(env.AUTH_RATE_LIMIT_WINDOW_MS) || env.AUTH_RATE_LIMIT_WINDOW_MS < 1) {
+    throw new Error('AUTH_RATE_LIMIT_WINDOW_MS must be a positive number of milliseconds')
   }
 }

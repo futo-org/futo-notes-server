@@ -1,48 +1,13 @@
 # FUTO Notes Sync Server
 
-End-to-end encrypted sync server for the [FUTO Notes](https://gitlab.futo.org/futo-notes/futo-notes) notes app. Built with TypeScript + Hono + PostgreSQL. The server stores opaque encrypted blobs and never sees plaintext note content.
+End-to-end encrypted sync server for the [FUTO Notes](https://gitlab.futo.org/futo-notes/futo-notes) notes app. The server stores opaque encrypted blobs and never sees plaintext note content.
 
 - [docs/API.md](./docs/API.md) — client integration guide (endpoints, auth, the sync protocol, SSE)
 - [DESIGN.md](./DESIGN.md) — architecture, threat model, and scaling plan
 
-## Running from source
+## Self-hosting
 
-Requirements: Bun 1.3+, Docker (for Postgres).
-
-```bash
-bun install
-docker compose up -d            # Postgres on localhost:5433
-cp .env.example .env
-
-# Generate a password hash and paste it into .env as FUTO_NOTES_PASSWORD_HASH
-bun src/index.ts hash <your-password>
-
-bun run migrate                 # apply DB migrations
-bun dev                         # http://localhost:3005
-```
-
-The default `.env.example` is set up for `AUTH_MODE=password`. For dev/test mode (passwordless `/api/auth/dev/login`), set `AUTH_MODE=dev` and clear `FUTO_NOTES_PASSWORD_HASH`.
-
-### Tests
-
-```bash
-bun run test                    # full suite (dev + password modes)
-bun run test:dev                # AUTH_MODE=dev only
-bun run test:password           # AUTH_MODE=password only
-```
-
-Tests need the Postgres container running (`docker compose up -d postgres`).
-
-### Build
-
-```bash
-bun run build                   # esbuild → dist/index.js (OSS entrypoint)
-bun run build:hosted            # → dist/hosted.js (hosted entrypoint)
-```
-
-## Self-hosting with Docker
-
-Requires Docker with the Compose v2 plugin.
+The only thing you need installed is **Docker** (with the Compose v2 plugin). You don't need to clone this repo or install any language toolchain — everything runs from a prebuilt image.
 
 ```bash
 # 1. Make a directory for your install
@@ -67,12 +32,19 @@ docker compose up -d
 
 The server listens on `http://localhost:3005` (override with `FUTO_NOTES_PORT` in `.env`).
 
+### Connect the app
+
+Open FUTO Notes, go to **Settings → Sync**, and enter:
+
+- Server URL: `http://localhost:3005` (or whatever address you exposed)
+- Password: the admin password you hashed above
+
 ### Day-to-day
 
 ```bash
-docker compose ps
-docker compose logs -f
-docker compose pull && docker compose up -d   # upgrade
+docker compose ps                              # status
+docker compose logs -f                         # tail logs
+docker compose pull && docker compose up -d    # upgrade to the latest image
 docker compose down                            # stop (data is preserved)
 ```
 
@@ -85,13 +57,6 @@ Encrypted blobs and Postgres data are bind-mounted from `./futo-notes-data/` nex
 
 A snapshot of `$FUTO_NOTES_DATA_DIR` plus `.env` is a complete backup.
 
-### Connect the app
-
-Open FUTO Notes, go to **Settings → Sync**, and enter:
-
-- Server URL: `http://localhost:3005` (or whatever port you exposed)
-- Password: the admin password you hashed above
-
 ### HTTPS for remote access
 
 The server only speaks HTTP internally. To expose it to the internet, put a reverse proxy in front that terminates TLS:
@@ -100,38 +65,40 @@ The server only speaks HTTP internally. To expose it to the internet, put a reve
 - Caddy — automatic Let's Encrypt certificates
 - nginx — classic, most flexibility
 
-### Rate-limit the auth path
+### Login rate limiting
 
-`POST /api/auth/password/login` runs scrypt (tens of ms, ~16 MB) on every unauthenticated request, and there is exactly one admin password to guess. The server does not throttle this itself — your reverse proxy MUST rate-limit `/api/auth/` to blunt online guessing and CPU-amplification.
+`POST /api/auth/password/login` runs scrypt (tens of ms, ~16 MB) on every request and guards a single guessable password, so it's both a brute-force target and a CPU-amplification vector. **The server rate-limits this path for you** — by default 10 attempts per minute per client, returning `429` with a `Retry-After` header past that. You don't need to add a proxy rule.
 
-nginx — declare a zone and apply it to the auth location:
+If you put the server behind a reverse proxy (which you do for HTTPS, above), set `TRUST_PROXY=true` in `.env` so the limit keys on the real client IP from `X-Forwarded-For` rather than the proxy's address — and make sure the proxy sets that header. Leave it off when the server is exposed directly, since an untrusted `X-Forwarded-For` can be spoofed to dodge the limit.
 
-```nginx
-limit_req_zone $binary_remote_addr zone=auth:10m rate=5r/m;
+Tune it with `AUTH_RATE_LIMIT` (attempts per window; `0` disables) and `AUTH_RATE_LIMIT_WINDOW_MS`. The limit is per-instance and in-memory, which is all the single-instance self-hosted setup needs; a proxy-level limit is still fine as defense-in-depth if you want one.
 
-location /api/auth/ {
-    limit_req zone=auth burst=5 nodelay;
-    proxy_pass http://localhost:3005;
-}
+## Development
+
+For working on the server itself. The toolchain is [Bun](https://bun.sh) (`curl -fsSL https://bun.sh/install | bash`) — it's the package manager, TypeScript runtime, and test runner. You also need Docker for Postgres. (Self-hosters don't need any of this — see [Self-hosting](#self-hosting) above.)
+
+```bash
+bun install
+docker compose up -d            # Postgres on localhost:5433
+cp .env.example .env
+
+# Generate a password hash and paste it into .env as FUTO_NOTES_PASSWORD_HASH
+bun src/index.ts hash <your-password>
+
+bun run migrate                 # apply DB migrations
+bun dev                         # http://localhost:3005
 ```
 
-Caddy has no built-in rate limiter; install the [`caddy-ratelimit`](https://github.com/mholt/caddy-ratelimit) plugin (build with `xcaddy build --with github.com/mholt/caddy-ratelimit`), then:
+The default `.env.example` is set up for `AUTH_MODE=password`. For dev/test mode (passwordless `/api/auth/dev/login`), set `AUTH_MODE=dev` and clear `FUTO_NOTES_PASSWORD_HASH`.
 
-```caddy
-example.com {
-    rate_limit {
-        zone auth {
-            match path /api/auth/*
-            key {remote_host}
-            events 5
-            window 1m
-        }
-    }
-    reverse_proxy localhost:3005
-}
+```bash
+bun run test                    # full suite (needs Postgres running)
+bun run build                   # esbuild → dist/index.js
 ```
 
-## Repo layout
+The stack is TypeScript + Hono + PostgreSQL (Kysely). See [DESIGN.md](./DESIGN.md) for the architecture and [AGENTS.md](./AGENTS.md) for conventions.
+
+### Repo layout
 
 ```
 src/
