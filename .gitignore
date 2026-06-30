@@ -7,3 +7,4 @@ cookies-*.txt
 dist/
 *.log
 .DS_Store
+futo-notes-data

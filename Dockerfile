@@ -17,6 +17,9 @@ WORKDIR /app
 LABEL org.opencontainers.image.title="FUTO Notes Server"
 LABEL org.opencontainers.image.description="Self-hosted E2EE sync server for FUTO Notes"
 
+RUN apt-get update && apt-get install -y --no-install-recommends gosu \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=builder /app/dist/ dist/
 COPY --from=builder /app/package.json ./
 COPY --from=builder /app/bun.lock ./
@@ -31,10 +34,12 @@ ENV BLOB_DIR=/data/blobs
 #trivy:ignore:DS-0031
 ENV AUTH_MODE=password
 
-# Drop privileges: run as the unprivileged `bun` user (uid 1000) baked into
-# the base image instead of root. The blob directory must be writable by it.
-RUN mkdir -p /data/blobs && chown -R bun:bun /data
-USER bun
+# Start as root to chown the (bind-mounted) blob dir — a bind mount is created
+# root-owned at runtime and masks this build-time chown — then drop to the
+# unprivileged `bun` user (uid 1000) via gosu. Non-recursive: bun owns the dir,
+# so blobs it writes underneath are bun-owned.
+RUN mkdir -p $BLOB_DIR && chown -R bun:bun /data
+ENTRYPOINT ["/bin/sh", "-c", "chown bun:bun /data $BLOB_DIR && exec gosu bun \"$@\"", "--"]
 
 EXPOSE 3000
 
