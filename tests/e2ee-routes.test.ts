@@ -277,6 +277,76 @@ test('deleting a collection orphans its objects blobs for GC', async () => {
   }
 })
 
+test('POST /collections is idempotent — one vault per account', async () => {
+  const email = `single-vault-${Date.now()}-${Math.random().toString(16).slice(2)}@example.test`
+  const login = await json<{ token: string }>('/api/auth/dev/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, name: 'Single Vault' }),
+  })
+  const auth = { Authorization: `Bearer ${login.token}` }
+
+  const first = await json<{ collection: { id: string } }>('/api/collections', {
+    method: 'POST',
+    headers: auth,
+  })
+  // A second create returns the SAME vault, not a fork.
+  const second = await json<{ collection: { id: string } }>('/api/collections', {
+    method: 'POST',
+    headers: auth,
+  })
+  assert.equal(second.collection.id, first.collection.id)
+
+  const list = await json<{ collections: Array<{ id: string }> }>('/api/collections', {
+    headers: auth,
+  })
+  assert.equal(list.collections.length, 1)
+})
+
+test('PUT /collections/:id/key is first-write-wins (never overwrites the vault key)', async () => {
+  const email = `key-fww-${Date.now()}-${Math.random().toString(16).slice(2)}@example.test`
+  const login = await json<{ token: string }>('/api/auth/dev/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, name: 'Key First Write Wins' }),
+  })
+  const auth = { Authorization: `Bearer ${login.token}` }
+  const created = await json<{ collection: { id: string } }>('/api/collections', {
+    method: 'POST',
+    headers: auth,
+  })
+  const cid = created.collection.id
+  const kdf = { kdf: 'pbkdf2-sha256', iterations: 100000, hash: 'SHA-256' }
+
+  const first = await json<{ key: { encrypted_vault_key: string } }>(
+    `/api/collections/${cid}/key`,
+    {
+      method: 'PUT',
+      headers: { ...auth, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key_salt: 'aaaa', key_kdf: kdf, encrypted_vault_key: 'first-key' }),
+    },
+  )
+  assert.equal(first.key.encrypted_vault_key, 'first-key')
+
+  // A racing second client's PUT must NOT overwrite — it gets the authoritative
+  // (first) key back so it adopts the one vault key.
+  const second = await json<{ key: { encrypted_vault_key: string } }>(
+    `/api/collections/${cid}/key`,
+    {
+      method: 'PUT',
+      headers: { ...auth, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key_salt: 'bbbb', key_kdf: kdf, encrypted_vault_key: 'second-key' }),
+    },
+  )
+  assert.equal(second.key.encrypted_vault_key, 'first-key')
+
+  const fetched = await json<{ key: { encrypted_vault_key: string } }>(
+    `/api/collections/${cid}/key`,
+    { headers: auth },
+  )
+  assert.equal(fetched.key.encrypted_vault_key, 'first-key')
+})
+
 test('orphaned blobs are retained and reclaimed after retention window', async () => {
   const email = `orphan-${Date.now()}-${Math.random().toString(16).slice(2)}@example.test`
   const login = await json<{ token: string }>('/api/auth/dev/login', {
