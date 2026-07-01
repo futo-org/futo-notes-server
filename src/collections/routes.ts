@@ -29,12 +29,22 @@ function isKeyMaterialBody(value: unknown): value is KeyMaterialRequest {
 
 collectionsRoutes.post('/', async (c) => {
   const userId = c.var.user.id
-  const row = await db
+  // One vault per account. Claim the single collection, or return the existing
+  // one — idempotent. The `UNIQUE(user_id)` constraint (migration 008) makes
+  // concurrent creates converge on one row instead of forking into two vaults.
+  const created = await db
     .insertInto('collections')
     .values({ id: uuidv7(), user_id: userId })
+    .onConflict((oc) => oc.column('user_id').doNothing())
     .returning(['id', 'user_id', 'current_version', 'created_at'])
+    .executeTakeFirst()
+  if (created) return c.json({ collection: created }, 201)
+  const existing = await db
+    .selectFrom('collections')
+    .where('user_id', '=', userId)
+    .select(['id', 'user_id', 'current_version', 'created_at'])
     .executeTakeFirstOrThrow()
-  return c.json({ collection: row }, 201)
+  return c.json({ collection: existing }, 200)
 })
 
 collectionsRoutes.get('/', async (c) => {
@@ -84,7 +94,14 @@ collectionsRoutes.put('/:id/key', async (c) => {
     return c.json({ error: 'valid key_salt, key_kdf, and encrypted_vault_key required' }, 400)
   }
 
-  const row = await db
+  // First-write-wins: only set the vault key while it is still unset (the
+  // `is null` guard). A racing second client on the same collection would
+  // otherwise overwrite the key and strand the winner's already-encrypted
+  // objects — a key-level split-brain. When the key is already present we return
+  // the AUTHORITATIVE material so the caller adopts it (one vault ⇒ one key).
+  // Postgres row locking makes the conditional UPDATE atomic, so concurrent PUTs
+  // converge on the first writer's key.
+  const claimed = await db
     .updateTable('collections')
     .set({
       key_salt: body.key_salt,
@@ -94,9 +111,19 @@ collectionsRoutes.put('/:id/key', async (c) => {
     })
     .where('id', '=', id)
     .where('user_id', '=', userId)
+    .where('encrypted_vault_key', 'is', null)
     .returning(['key_salt', 'key_kdf', 'encrypted_vault_key', 'key_updated_at'])
     .executeTakeFirst()
-  if (!row) return c.json({ error: 'not found' }, 404)
+
+  const row = claimed ?? await db
+    .selectFrom('collections')
+    .where('id', '=', id)
+    .where('user_id', '=', userId)
+    .select(['key_salt', 'key_kdf', 'encrypted_vault_key', 'key_updated_at'])
+    .executeTakeFirst()
+  if (!row || !row.key_salt || !row.key_kdf || !row.encrypted_vault_key) {
+    return c.json({ error: 'not found' }, 404)
+  }
 
   return c.json({
     key: {

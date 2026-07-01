@@ -5,6 +5,7 @@ import * as m004 from './migrations/004_server_config.ts'
 import * as m005 from './migrations/005_user_passwords.ts'
 import * as m006 from './migrations/006_drop_user_password_hash.ts'
 import * as m007 from './migrations/007_orphaned_blobs.ts'
+import * as m008 from './migrations/008_single_collection_per_user.ts'
 
 export const migrations: Record<string, { up: typeof m001.up; down?: typeof m001.down }> = {
   '001_initial': m001,
@@ -14,4 +15,5 @@ export const migrations: Record<string, { up: typeof m001.up; down?: typeof m001
   '005_user_passwords': m005,
   '006_drop_user_password_hash': m006,
   '007_orphaned_blobs': m007,
+  '008_single_collection_per_user': m008,
 }
