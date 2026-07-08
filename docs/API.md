@@ -255,6 +255,26 @@ DELETE $BASE/api/blobs/:userId/:blobId    → 204                               
 - Upload an empty body → `400`. A key you don't own → `404` on GET/DELETE (no existence leak).
 - The blob lifecycle is independent of objects: uploading a blob doesn't create an object, and replacing an object's blob leaves the old blob to be reclaimed later by server-side GC (clients rely on old blobs being available for a window to fetch the common ancestor during three-way merge).
 
+### Batch fetch
+
+```
+POST $BASE/api/blobs/batch    → 200 <binary frames>   // body: { "keys": ["<user-id>/<uuid>", ...] }
+```
+
+Fetches up to **200** blobs in one request — removes the per-request overhead that makes large pulls (first sync especially) latency-bound. The response is a stream of binary frames, one per requested key **in request order**, integers big-endian:
+
+```
+[u16 keyLen][key utf8][u8 status][u32 blobLen][blob bytes]
+```
+
+| Status | Meaning |
+|--------|---------|
+| `0` ok | `blobLen` bytes of blob follow |
+| `1` missing | Absent, malformed, or not owned by you (no existence leak — mirrors the single GET's `404`); `blobLen = 0` |
+| `2` omitted | Cumulative response payload hit the server cap (`MAX_BATCH_BYTES`, default 32 MiB) before this entry; re-request omitted keys in a fresh batch. `blobLen = 0` |
+
+The first blob of a response is always sent even if it alone exceeds the cap, so a client always makes progress. `> 200` keys, a key over 128 chars, an empty list, or a non-JSON body → `400`; a request body over 64 KiB → `413`.
+
 ---
 
 ## Real-time updates (SSE)

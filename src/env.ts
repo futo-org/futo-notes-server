@@ -59,6 +59,10 @@ export const env = {
   BLOB_GC_ENABLED: process.env.BLOB_GC_ENABLED !== 'false',
   // Max accepted request body size for blob uploads, in bytes (default 100 MiB).
   MAX_BLOB_BYTES: Number(process.env.MAX_BLOB_BYTES ?? 104857600),
+  // Cumulative payload cap for one POST /api/blobs/batch response, in bytes
+  // (default 32 MiB). Entries past the cap return status=omitted; the first
+  // blob of a response always ships so clients make progress.
+  MAX_BATCH_BYTES: Number(process.env.MAX_BATCH_BYTES ?? 33554432),
   // Login rate limiting. Caps requests to the scrypt-backed password login per
   // client per window, blunting brute force and CPU amplification. 0 disables.
   AUTH_RATE_LIMIT: Number(process.env.AUTH_RATE_LIMIT ?? 10),
@@ -84,6 +88,9 @@ export function validateEnv(): void {
   }
   if (!Number.isSafeInteger(env.MAX_BLOB_BYTES) || env.MAX_BLOB_BYTES < 1) {
     throw new Error('MAX_BLOB_BYTES must be a positive integer (bytes)')
+  }
+  if (!Number.isSafeInteger(env.MAX_BATCH_BYTES) || env.MAX_BATCH_BYTES < 1) {
+    throw new Error('MAX_BATCH_BYTES must be a positive integer (bytes)')
   }
   if (!Number.isFinite(env.AUTH_RATE_LIMIT) || env.AUTH_RATE_LIMIT < 0) {
     throw new Error('AUTH_RATE_LIMIT must be a non-negative number (0 disables rate limiting)')
