@@ -74,7 +74,11 @@ Yucca now ships a concrete reference for this flow (see §Yucca migration path b
 
 Server generates an opaque session token (32 random bytes, hex-encoded), stores its **SHA-256 hash** in the `sessions` table, and returns the raw token as an `httpOnly` cookie. Subsequent requests hash the cookie and look up the row. A `sessions` table leak therefore does not yield usable bearer credentials.
 
-Session expiry: 7 days.
+Session expiry: 7 days from issuance, with no sliding extension. An
+expired/invalid supplied session returns the standard Bearer `invalid_token`
+challenge plus the stable JSON code `invalid_session`, so clients can
+reauthenticate with securely retained login material, receive a new token, and
+retry without clearing their local vault cursor/object map.
 
 ### Capability discovery
 

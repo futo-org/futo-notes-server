@@ -25,7 +25,8 @@ The server is a **generic E2EE sync backend**: it stores opaque encrypted blobs 
 
 **Requests/responses are JSON** unless noted. Blob upload/download and the single-round-trip object endpoints use raw `application/octet-stream` bodies.
 
-**Errors** always have the shape `{ "error": string }` with an appropriate status code:
+**Errors** always include `{ "error": string }` with an appropriate status code.
+Some errors also carry a stable machine-readable `code`:
 
 | Status | Meaning |
 |--------|---------|
@@ -40,7 +41,7 @@ The server is a **generic E2EE sync backend**: it stores opaque encrypted blobs 
 - **Cookie** — login sets an `httpOnly` `session` cookie (also `Secure` by default in password mode; set `COOKIE_SECURE=false` for plain-HTTP deployments). Browsers send it automatically.
 - **Bearer token** — login also returns the raw token in the body; send `Authorization: Bearer <token>`. Use this for non-browser clients.
 
-Sessions last 7 days and renew automatically when more than half the lifetime has elapsed (the cookie is re-sent on a renewing request).
+Sessions expire 7 days after issuance; authenticated activity does not extend that fixed lifetime. If a supplied cookie or bearer token has expired or is otherwise invalid, the server returns `401`, a `WWW-Authenticate: Bearer … error="invalid_token"` challenge, and `{ "error": "session expired or invalid", "code": "invalid_session" }`. A client that securely retained its login material should log in again, receive a new session token, retry the request once, and preserve its local sync cursor/object map; session expiry is not a vault reset.
 
 **Value encoding — read this.** Postgres `bigint` columns are serialized as **strings** in responses. So `version`, `change_seq`, `size_bytes`, and `current_version` come back as strings (`"3"`), but you **send** numeric fields (`version`, `size_bytes`) as JSON **numbers** (`3`). The one exception: the `collectionVersion` field in mutation responses is a number, not a string. Parse defensively.
 

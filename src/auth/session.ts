@@ -4,14 +4,7 @@ import { db } from '../db/connection.ts'
 
 export const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000
 
-/**
- * Slide the expiry forward when less than half the TTL remains. An active
- * client causes at most one renewal per ~3.5 days; a fully idle session still
- * dies after 7 days.
- */
-const SESSION_RENEW_THRESHOLD_MS = SESSION_TTL_MS / 2
-
-/** 32 random bytes, hex-encoded. The raw token only lives in the client cookie. */
+/** 32 random bytes, hex-encoded. Only its SHA-256 hash is stored server-side. */
 export function generateToken(): string {
   return randomBytes(32).toString('hex')
 }
@@ -49,8 +42,6 @@ export async function createSession(userId: string): Promise<CreatedSession> {
 export interface ValidatedSession {
   sessionId: string
   user: { id: string; email: string; name: string }
-  /** True when this validation slid the expiry forward — caller should refresh the cookie. */
-  renewed: boolean
 }
 
 /**
@@ -80,20 +71,9 @@ export async function validateSession(rawToken: string): Promise<ValidatedSessio
     return null
   }
 
-  let renewed = false
-  if (expiresAt - now < SESSION_RENEW_THRESHOLD_MS) {
-    await db
-      .updateTable('sessions')
-      .set({ expires_at: new Date(now + SESSION_TTL_MS) })
-      .where('id', '=', row.session_id)
-      .execute()
-    renewed = true
-  }
-
   return {
     sessionId: row.session_id,
     user: { id: row.user_id, email: row.email, name: row.name },
-    renewed,
   }
 }
 

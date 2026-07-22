@@ -12,6 +12,7 @@ process.env.FUTO_NOTES_PASSWORD_HASH = await hashPassword(PASSWORD)
 const { buildApp } = await import('../src/app.ts')
 const { db, waitForDb } = await import('../src/db/connection.ts')
 const { migrateToLatest } = await import('../src/db/migrate.ts')
+const { hashToken } = await import('../src/auth/session.ts')
 
 const app = buildApp()
 
@@ -56,6 +57,64 @@ test('login with wrong password returns 401', async () => {
     body: JSON.stringify({ password: 'nope' }),
   }))
   assert.equal(response.status, 401)
+})
+
+test('expired bearer session returns a machine-readable reauthentication signal', async () => {
+  const login = await app.fetch(new Request('http://test.local/api/auth/password/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password: PASSWORD }),
+  }))
+  assert.equal(login.status, 200)
+  const { token } = await login.json() as { token: string }
+
+  await db
+    .updateTable('sessions')
+    .set({ expires_at: new Date(Date.now() - 1_000) })
+    .where('access_token_hash', '=', hashToken(token))
+    .execute()
+
+  const response = await app.fetch(new Request('http://test.local/api/auth', {
+    headers: { Authorization: `Bearer ${token}` },
+  }))
+  assert.equal(response.status, 401)
+  assert.equal(
+    response.headers.get('www-authenticate'),
+    'Bearer realm="futo-notes", error="invalid_token"',
+  )
+  assert.deepEqual(await response.json(), {
+    error: 'session expired or invalid',
+    code: 'invalid_session',
+  })
+})
+
+test('authenticated activity does not extend the session expiry', async () => {
+  const login = await app.fetch(new Request('http://test.local/api/auth/password/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password: PASSWORD }),
+  }))
+  assert.equal(login.status, 200)
+  const { token } = await login.json() as { token: string }
+  const fixedExpiry = new Date(Date.now() + 60_000)
+
+  await db
+    .updateTable('sessions')
+    .set({ expires_at: fixedExpiry })
+    .where('access_token_hash', '=', hashToken(token))
+    .execute()
+
+  const response = await app.fetch(new Request('http://test.local/api/auth', {
+    headers: { Authorization: `Bearer ${token}` },
+  }))
+  assert.equal(response.status, 200)
+
+  const session = await db
+    .selectFrom('sessions')
+    .select('expires_at')
+    .where('access_token_hash', '=', hashToken(token))
+    .executeTakeFirstOrThrow()
+  assert.equal(new Date(session.expires_at).getTime(), fixedExpiry.getTime())
 })
 
 test('validateEnv rejects password mode without a hash', () => {
