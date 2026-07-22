@@ -15,7 +15,7 @@ mkdir -p "$CHECK_DIR/data" "$CHECK_DIR/config"
 
 cat > "$CHECK_DIR/test.env" <<'EOF'
 POSTGRES_PASSWORD=local-db-secret
-FUTO_NOTES_PASSWORD="dollar$$ double\" single' backslash\\ combo\\' space "
+FUTO_NOTES_PASSWORD="dollar$$ double\" single' backslash\\ combo\\' inner space"
 FUTO_NOTES_PASSWORD_HASH=
 DATABASE_URL=postgres://remote:secret@db.example:5432/notes
 TRUST_PROXY=true
@@ -42,7 +42,7 @@ $COMPOSE config -q
 ACTUAL="$($COMPOSE run --rm --no-deps --entrypoint env server)"
 
 cat > "$CHECK_DIR/expected.env" <<'EOF'
-FUTO_NOTES_PASSWORD=dollar$ double" single' backslash\ combo\' space 
+FUTO_NOTES_PASSWORD=dollar$ double" single' backslash\ combo\' inner space
 DATABASE_URL=postgres://remote:secret@db.example:5432/notes
 TRUST_PROXY=true
 AUTH_RATE_LIMIT=17

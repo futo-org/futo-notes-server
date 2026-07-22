@@ -24,7 +24,7 @@ await writeFile(join(bin, 'curl'), curl)
 await chmod(join(bin, 'docker'), 0o755)
 await chmod(join(bin, 'curl'), 0o755)
 
-const password = `dollar$ double" single' backslash\\ combo\\' space `
+const password = `dollar$ double" single' backslash\\ combo\\' inner space`
 const result = Bun.spawnSync(['sh', 'install.sh'], {
   cwd: process.cwd(),
   env: {
@@ -45,7 +45,7 @@ if (!result.success) {
 
 const envPath = join(installDir, '.env')
 const contents = await readFile(envPath, 'utf8')
-const expected = String.raw`FUTO_NOTES_PASSWORD="dollar$$ double\" single' backslash\\ combo\\' space "`
+const expected = String.raw`FUTO_NOTES_PASSWORD="dollar$$ double\" single' backslash\\ combo\\' inner space"`
 if (!contents.split('\n').includes(expected)) {
   console.error(`Installer did not safely serialize the plaintext password.\nExpected: ${expected}\nActual:\n${contents}`)
   process.exit(1)
