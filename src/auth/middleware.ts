@@ -1,7 +1,7 @@
 import type { MiddlewareHandler } from 'hono'
-import { getCookie, setCookie } from 'hono/cookie'
+import { getCookie } from 'hono/cookie'
 import { env } from '../env.ts'
-import { SESSION_TTL_MS, validateSession } from './session.ts'
+import { validateSession } from './session.ts'
 
 /** Paths only public in dev auth mode. */
 const DEV_PUBLIC_PATHS = new Set<string>([
@@ -33,17 +33,12 @@ export const authMiddleware: MiddlewareHandler<{ Variables: AuthContext }> = asy
 
   const session = await validateSession(token)
   if (!session) {
-    return c.json({ error: 'unauthorized' }, 401)
-  }
-
-  if (session.renewed && cookieToken) {
-    setCookie(c, 'session', cookieToken, {
-      httpOnly: true,
-      secure: env.COOKIE_SECURE,
-      sameSite: 'Lax',
-      path: '/',
-      maxAge: Math.floor(SESSION_TTL_MS / 1000),
-    })
+    // Distinguish a dead bearer session from a request that supplied no
+    // credentials. Clients that securely retain login material can use this
+    // stable signal to obtain a fresh token without treating the account
+    // password as changed or wiping their sync cursor.
+    c.header('WWW-Authenticate', 'Bearer realm="futo-notes", error="invalid_token"')
+    return c.json({ error: 'session expired or invalid', code: 'invalid_session' }, 401)
   }
 
   c.set('user', session.user)
