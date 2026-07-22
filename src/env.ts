@@ -6,6 +6,10 @@ export type AuthMode = (typeof AUTH_MODES)[number]
 
 const rawAuthMode = process.env.AUTH_MODE ?? 'dev'
 
+function nonEmpty(value: string | undefined): string | undefined {
+  return value === undefined || value.length === 0 ? undefined : value
+}
+
 const dbSsl = process.env.DB_SSL === 'true'
 const dbSslInsecure = process.env.DB_SSL_INSECURE === 'true'
 const dbSslCaPath = process.env.DB_SSL_CA
@@ -43,7 +47,10 @@ export const env = {
   BLOB_DIR: process.env.BLOB_DIR ?? './blobs',
   LOG_LEVEL: (process.env.LOG_LEVEL ?? 'info') as 'debug' | 'info' | 'warn' | 'error',
   AUTH_MODE: rawAuthMode as AuthMode,
-  FUTO_NOTES_PASSWORD_HASH: process.env.FUTO_NOTES_PASSWORD_HASH,
+  // Compose forwards the unused password alternative as an empty string.
+  // Normalize blanks so an empty alternative cannot shadow the configured one.
+  FUTO_NOTES_PASSWORD: nonEmpty(process.env.FUTO_NOTES_PASSWORD),
+  FUTO_NOTES_PASSWORD_HASH: nonEmpty(process.env.FUTO_NOTES_PASSWORD_HASH),
   // Secure flag on the session cookie. Defaults true except in dev mode (so
   // localhost HTTP dev keeps working). Explicit true/false overrides the default.
   COOKIE_SECURE: process.env.COOKIE_SECURE !== undefined
@@ -63,8 +70,8 @@ export const env = {
   // (default 32 MiB). Entries past the cap return status=omitted; the first
   // blob of a response always ships so clients make progress.
   MAX_BATCH_BYTES: Number(process.env.MAX_BATCH_BYTES ?? 33554432),
-  // Login rate limiting. Caps requests to the scrypt-backed password login per
-  // client per window, blunting brute force and CPU amplification. 0 disables.
+  // Login rate limiting. Caps password attempts per client per window,
+  // blunting brute force and hash-mode CPU amplification. 0 disables.
   AUTH_RATE_LIMIT: Number(process.env.AUTH_RATE_LIMIT ?? 10),
   AUTH_RATE_LIMIT_WINDOW_MS: Number(process.env.AUTH_RATE_LIMIT_WINDOW_MS ?? 60000),
   // Trust X-Forwarded-For for the client IP — enable only behind a reverse
@@ -83,8 +90,11 @@ export function validateEnv(): void {
   if (!(AUTH_MODES as readonly string[]).includes(rawAuthMode)) {
     throw new Error(`Invalid AUTH_MODE=${rawAuthMode}. Valid: ${AUTH_MODES.join(', ')}`)
   }
-  if (env.AUTH_MODE === 'password' && !env.FUTO_NOTES_PASSWORD_HASH) {
-    throw new Error('FUTO_NOTES_PASSWORD_HASH is required when AUTH_MODE=password')
+  if (env.AUTH_MODE === 'password' && env.FUTO_NOTES_PASSWORD && env.FUTO_NOTES_PASSWORD_HASH) {
+    throw new Error('Set only one of FUTO_NOTES_PASSWORD or FUTO_NOTES_PASSWORD_HASH when AUTH_MODE=password')
+  }
+  if (env.AUTH_MODE === 'password' && !env.FUTO_NOTES_PASSWORD && !env.FUTO_NOTES_PASSWORD_HASH) {
+    throw new Error('FUTO_NOTES_PASSWORD or FUTO_NOTES_PASSWORD_HASH is required when AUTH_MODE=password')
   }
   if (!Number.isSafeInteger(env.MAX_BLOB_BYTES) || env.MAX_BLOB_BYTES < 1 || env.MAX_BLOB_BYTES > 0xffff_ffff) {
     throw new Error('MAX_BLOB_BYTES must be a positive integer no greater than 4294967295 (bytes)')

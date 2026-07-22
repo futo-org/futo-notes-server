@@ -37,10 +37,10 @@ export function buildApp(): Hono<{ Variables: AuthContext }> {
 
   app.use('*', cors({ origin: '*', allowHeaders: ['Content-Type', 'Authorization'], allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'] }))
 
-  // Rate-limit the scrypt-backed password login before the (public) auth
-  // middleware or the route handler run, so a flood can't amplify CPU. Only
+  // Rate-limit password login before the (public) auth middleware or the route
+  // handler run, so a flood can't brute-force credentials or amplify CPU. Only
   // this path exists in password mode; dev-mode login is passwordless and
-  // runs no scrypt, so it is left unlimited.
+  // has no credential to guess, so it is left unlimited.
   if (env.AUTH_MODE === 'password') {
     app.use('/api/auth/password/login', authRateLimit())
   }

@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import type { Context } from 'hono'
 import { setCookie } from 'hono/cookie'
+import { createHash, timingSafeEqual } from 'node:crypto'
 import { uuidv7 } from 'uuidv7'
 import { db } from '../db/connection.ts'
 import { env } from '../env.ts'
@@ -17,6 +18,15 @@ const SINGLETON_NAME = 'FUTO Notes'
 
 export const passwordRoutes = new Hono()
 
+function verifyPlaintextPassword(submitted: string, configured: string): boolean {
+  // Compare fixed-size digests so neither content nor length affects the
+  // comparison's timing. Plaintext mode intentionally avoids scrypt's setup
+  // cost; the login rate limiter remains the online brute-force defense.
+  const submittedDigest = createHash('sha256').update(submitted, 'utf8').digest()
+  const configuredDigest = createHash('sha256').update(configured, 'utf8').digest()
+  return timingSafeEqual(submittedDigest, configuredDigest)
+}
+
 function setSessionCookie(c: Context, rawToken: string): void {
   setCookie(c, 'session', rawToken, {
     httpOnly: true,
@@ -30,7 +40,7 @@ function setSessionCookie(c: Context, rawToken: string): void {
 /**
  * POST /api/auth/password/login
  *
- * Verifies the submitted password against FUTO_NOTES_PASSWORD_HASH, upserts
+ * Verifies the submitted password against the configured plaintext or hash, upserts
  * the singleton user on first login, and opens a session.
  */
 passwordRoutes.post('/login', async (c) => {
@@ -46,7 +56,9 @@ passwordRoutes.post('/login', async (c) => {
     return c.json({ error: 'password is required' }, 400)
   }
 
-  const valid = await verifyPassword(password, env.FUTO_NOTES_PASSWORD_HASH!)
+  const valid = env.FUTO_NOTES_PASSWORD !== undefined
+    ? verifyPlaintextPassword(password, env.FUTO_NOTES_PASSWORD)
+    : await verifyPassword(password, env.FUTO_NOTES_PASSWORD_HASH!)
   if (!valid) {
     return c.json({ error: 'invalid password' }, 401)
   }
