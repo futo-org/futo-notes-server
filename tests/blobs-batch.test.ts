@@ -171,7 +171,8 @@ test('cumulative byte cap: entries past the cap return status=omitted', async ()
 
   const response = await fetchBatch(token, [keyA, keyB, keyC])
   assert.equal(response.status, 200)
-  const frames = parseFrames(new Uint8Array(await response.arrayBuffer()))
+  const encoded = new Uint8Array(await response.arrayBuffer())
+  const frames = parseFrames(encoded)
 
   assert.equal(frames.length, 3)
   assert.equal(frames[0].status, BATCH_STATUS_OK)
@@ -180,6 +181,24 @@ test('cumulative byte cap: entries past the cap return status=omitted', async ()
   assert.equal(frames[1].status, BATCH_STATUS_OMITTED)
   assert.equal(frames[1].blob.length, 0)
   assert.equal(frames[2].status, BATCH_STATUS_OMITTED)
+  assert.ok(encoded.byteLength <= 1024)
+})
+
+test('batch byte cap includes binary frame overhead', async () => {
+  const { token } = await devLogin()
+  // The ciphertext bytes fit (900 < 1024), but both complete frames do not.
+  const blobA = new Uint8Array(450).fill(0x11)
+  const blobB = new Uint8Array(450).fill(0x22)
+  const keyA = await uploadBlob(token, blobA)
+  const keyB = await uploadBlob(token, blobB)
+
+  const response = await fetchBatch(token, [keyA, keyB])
+  const encoded = new Uint8Array(await response.arrayBuffer())
+  const frames = parseFrames(encoded)
+
+  assert.equal(frames[0].status, BATCH_STATUS_OK)
+  assert.equal(frames[1].status, BATCH_STATUS_OMITTED)
+  assert.ok(encoded.byteLength <= 1024)
 })
 
 test('first blob always ships even when it alone exceeds the cap', async () => {

@@ -59,7 +59,7 @@ export const env = {
   BLOB_GC_ENABLED: process.env.BLOB_GC_ENABLED !== 'false',
   // Max accepted request body size for blob uploads, in bytes (default 100 MiB).
   MAX_BLOB_BYTES: Number(process.env.MAX_BLOB_BYTES ?? 104857600),
-  // Cumulative payload cap for one POST /api/blobs/batch response, in bytes
+  // Complete encoded-response cap for one POST /api/blobs/batch response, in bytes
   // (default 32 MiB). Entries past the cap return status=omitted; the first
   // blob of a response always ships so clients make progress.
   MAX_BATCH_BYTES: Number(process.env.MAX_BATCH_BYTES ?? 33554432),
@@ -86,8 +86,8 @@ export function validateEnv(): void {
   if (env.AUTH_MODE === 'password' && !env.FUTO_NOTES_PASSWORD_HASH) {
     throw new Error('FUTO_NOTES_PASSWORD_HASH is required when AUTH_MODE=password')
   }
-  if (!Number.isSafeInteger(env.MAX_BLOB_BYTES) || env.MAX_BLOB_BYTES < 1) {
-    throw new Error('MAX_BLOB_BYTES must be a positive integer (bytes)')
+  if (!Number.isSafeInteger(env.MAX_BLOB_BYTES) || env.MAX_BLOB_BYTES < 1 || env.MAX_BLOB_BYTES > 0xffff_ffff) {
+    throw new Error('MAX_BLOB_BYTES must be a positive integer no greater than 4294967295 (bytes)')
   }
   if (!Number.isSafeInteger(env.MAX_BATCH_BYTES) || env.MAX_BATCH_BYTES < 1) {
     throw new Error('MAX_BATCH_BYTES must be a positive integer (bytes)')

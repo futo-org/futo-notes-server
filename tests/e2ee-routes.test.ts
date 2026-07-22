@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { afterAll, beforeAll, test } from 'bun:test'
+import { uuidv7 } from 'uuidv7'
 import { buildApp } from '../src/app.ts'
 import { FsBlobStore } from '../src/blob/fs.ts'
 import { db, waitForDb } from '../src/db/connection.ts'
@@ -303,7 +304,7 @@ test('POST /collections is idempotent — one vault per account', async () => {
   assert.equal(list.collections.length, 1)
 })
 
-test('PUT /collections/:id/key is first-write-wins (never overwrites the vault key)', async () => {
+test('PUT /collections/:id/key supports idempotent claims, conflicts, and guarded rotation', async () => {
   const email = `key-fww-${Date.now()}-${Math.random().toString(16).slice(2)}@example.test`
   const login = await json<{ token: string }>('/api/auth/dev/login', {
     method: 'POST',
@@ -318,7 +319,7 @@ test('PUT /collections/:id/key is first-write-wins (never overwrites the vault k
   const cid = created.collection.id
   const kdf = { kdf: 'pbkdf2-sha256', iterations: 100000, hash: 'SHA-256' }
 
-  const first = await json<{ key: { encrypted_vault_key: string } }>(
+  const first = await json<{ key: { encrypted_vault_key: string; key_updated_at: string } }>(
     `/api/collections/${cid}/key`,
     {
       method: 'PUT',
@@ -328,23 +329,105 @@ test('PUT /collections/:id/key is first-write-wins (never overwrites the vault k
   )
   assert.equal(first.key.encrypted_vault_key, 'first-key')
 
-  // A racing second client's PUT must NOT overwrite — it gets the authoritative
-  // (first) key back so it adopts the one vault key.
-  const second = await json<{ key: { encrypted_vault_key: string } }>(
+  // An exact retry is safe after a lost response and does not invent a new
+  // revision token.
+  const retry = await json<{ key: { encrypted_vault_key: string; key_updated_at: string } }>(
     `/api/collections/${cid}/key`,
     {
       method: 'PUT',
       headers: { ...auth, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ key_salt: 'bbbb', key_kdf: kdf, encrypted_vault_key: 'second-key' }),
+      body: JSON.stringify({ key_salt: 'aaaa', key_kdf: kdf, encrypted_vault_key: 'first-key' }),
     },
   )
-  assert.equal(second.key.encrypted_vault_key, 'first-key')
+  assert.deepEqual(retry.key, first.key)
+
+  // A racing second client must receive an explicit conflict and the
+  // authoritative key, rather than a misleading successful response.
+  const second = await app.fetch(new Request(`http://test.local/api/collections/${cid}/key`, {
+    method: 'PUT',
+    headers: { ...auth, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key_salt: 'bbbb', key_kdf: kdf, encrypted_vault_key: 'second-key' }),
+  }))
+  assert.equal(second.status, 409)
+  const conflict = await second.json() as {
+    error: string
+    currentKey: { encrypted_vault_key: string; key_updated_at: string }
+  }
+  assert.equal(conflict.error, 'key conflict')
+  assert.equal(conflict.currentKey.encrypted_vault_key, 'first-key')
+  assert.equal(conflict.currentKey.key_updated_at, first.key.key_updated_at)
+
+  // A client that names the exact revision it read may deliberately rotate.
+  const rotated = await json<{ key: { encrypted_vault_key: string; key_updated_at: string } }>(
+    `/api/collections/${cid}/key`,
+    {
+      method: 'PUT',
+      headers: { ...auth, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        key_salt: 'bbbb',
+        key_kdf: kdf,
+        encrypted_vault_key: 'second-key',
+        previous_key_updated_at: first.key.key_updated_at,
+      }),
+    },
+  )
+  assert.equal(rotated.key.encrypted_vault_key, 'second-key')
+  assert.notEqual(rotated.key.key_updated_at, first.key.key_updated_at)
+
+  const stale = await app.fetch(new Request(`http://test.local/api/collections/${cid}/key`, {
+    method: 'PUT',
+    headers: { ...auth, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      key_salt: 'cccc',
+      key_kdf: kdf,
+      encrypted_vault_key: 'stale-key',
+      previous_key_updated_at: first.key.key_updated_at,
+    }),
+  }))
+  assert.equal(stale.status, 409)
+  const staleConflict = await stale.json() as { currentKey: { encrypted_vault_key: string } }
+  assert.equal(staleConflict.currentKey.encrypted_vault_key, 'second-key')
 
   const fetched = await json<{ key: { encrypted_vault_key: string } }>(
     `/api/collections/${cid}/key`,
     { headers: auth },
   )
-  assert.equal(fetched.key.encrypted_vault_key, 'first-key')
+  assert.equal(fetched.key.encrypted_vault_key, 'second-key')
+})
+
+test('concurrent different vault-key claims produce one winner and one conflict', async () => {
+  const login = await json<{ token: string }>('/api/auth/dev/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: `key-race-${uuidv7()}@example.test`, name: 'Key Claim Race' }),
+  })
+  const auth = { Authorization: `Bearer ${login.token}` }
+  const created = await json<{ collection: { id: string } }>('/api/collections', {
+    method: 'POST',
+    headers: auth,
+  })
+  const request = (encryptedVaultKey: string) => app.fetch(new Request(
+    `http://test.local/api/collections/${created.collection.id}/key`,
+    {
+      method: 'PUT',
+      headers: { ...auth, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        key_salt: `salt-${encryptedVaultKey}`,
+        key_kdf: { kdf: 'pbkdf2-sha256', iterations: 100000 },
+        encrypted_vault_key: encryptedVaultKey,
+      }),
+    },
+  ))
+
+  const responses = await Promise.all([request('client-a'), request('client-b')])
+  assert.deepEqual(responses.map((response) => response.status).sort(), [200, 409])
+  const winner = await responses.find((response) => response.status === 200)!.json() as {
+    key: { encrypted_vault_key: string }
+  }
+  const loser = await responses.find((response) => response.status === 409)!.json() as {
+    currentKey: { encrypted_vault_key: string }
+  }
+  assert.equal(loser.currentKey.encrypted_vault_key, winner.key.encrypted_vault_key)
 })
 
 test('orphaned blobs are retained and reclaimed after retention window', async () => {

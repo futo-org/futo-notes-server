@@ -36,12 +36,17 @@ const batchLimit = bodyLimit({
 export const BATCH_STATUS_OK = 0
 export const BATCH_STATUS_MISSING = 1
 export const BATCH_STATUS_OMITTED = 2
+type BatchStatus =
+  | typeof BATCH_STATUS_OK
+  | typeof BATCH_STATUS_MISSING
+  | typeof BATCH_STATUS_OMITTED
 
 const textEncoder = new TextEncoder()
+const FRAME_FIXED_BYTES = 2 + 1 + 4
 
 // One response frame: [u16 keyLen][key utf8][u8 status][u32 blobLen][bytes],
 // integers big-endian. Missing/omitted frames carry blobLen=0 and no bytes.
-function encodeFrame(key: string, status: number, blob: Uint8Array | null): Uint8Array {
+function encodeFrame(key: string, status: BatchStatus, blob: Uint8Array | null): Uint8Array {
   const keyBytes = textEncoder.encode(key)
   const blobLen = blob?.byteLength ?? 0
   const frame = new Uint8Array(2 + keyBytes.length + 1 + 4 + blobLen)
@@ -77,9 +82,10 @@ export function createBlobRoutes(store: BlobStore): Hono<{ Variables: AuthContex
   // error — same no-existence-leak policy as the single GET's 404 — so one
   // bad key can't sink the other 199. Cumulative payload is capped at
   // env.MAX_BATCH_BYTES: once exceeded, remaining entries come back as
-  // status=omitted and the client re-requests them in a fresh batch. The
-  // first blob of a response is always sent even if it alone exceeds the
-  // cap, so a client that must fetch an over-cap blob still makes progress.
+  // status=omitted and the client re-requests them in a fresh batch. The cap
+  // includes complete frame overhead. The first blob of a response is always
+  // sent even if it alone exceeds the cap, so a client that must fetch an
+  // over-cap blob still makes progress.
   app.post('/batch', batchLimit, async (c) => {
     const userId = c.var.user.id
     let body: { keys?: unknown }
@@ -99,22 +105,34 @@ export function createBlobRoutes(store: BlobStore): Hono<{ Variables: AuthContex
       return c.json({ error: `too many keys (max ${MAX_BATCH_KEYS})` }, 400)
     }
 
+    const frameOverheads = keys.map((key) => FRAME_FIXED_BYTES + textEncoder.encode(key).byteLength)
+    const remainingOverheads = new Array<number>(keys.length).fill(0)
+    for (let i = keys.length - 2; i >= 0; i--) {
+      remainingOverheads[i] = remainingOverheads[i + 1] + frameOverheads[i + 1]
+    }
     let index = 0
     let sentBytes = 0
+    let sentBlob = false
+    let capReached = false
     const stream = new ReadableStream<Uint8Array>({
       async pull(controller) {
         if (index >= keys.length) {
           controller.close()
           return
         }
-        const key = keys[index++]
+        const frameIndex = index++
+        const key = keys[frameIndex]
         const [keyUserId, blobId, extra] = key.split('/')
         if (extra !== undefined || keyUserId !== userId || !UUID_RE.test(blobId ?? '')) {
-          controller.enqueue(encodeFrame(key, BATCH_STATUS_MISSING, null))
+          const frame = encodeFrame(key, BATCH_STATUS_MISSING, null)
+          sentBytes += frame.byteLength
+          controller.enqueue(frame)
           return
         }
-        if (sentBytes >= env.MAX_BATCH_BYTES) {
-          controller.enqueue(encodeFrame(key, BATCH_STATUS_OMITTED, null))
+        if (capReached) {
+          const frame = encodeFrame(key, BATCH_STATUS_OMITTED, null)
+          sentBytes += frame.byteLength
+          controller.enqueue(frame)
           return
         }
         // A store failure (non-ENOENT) aborts the stream: the 200 is already
@@ -130,16 +148,25 @@ export function createBlobRoutes(store: BlobStore): Hono<{ Variables: AuthContex
           return
         }
         if (!data) {
-          controller.enqueue(encodeFrame(key, BATCH_STATUS_MISSING, null))
+          const frame = encodeFrame(key, BATCH_STATUS_MISSING, null)
+          sentBytes += frame.byteLength
+          controller.enqueue(frame)
           return
         }
-        if (sentBytes > 0 && sentBytes + data.byteLength > env.MAX_BATCH_BYTES) {
-          controller.enqueue(encodeFrame(key, BATCH_STATUS_OMITTED, null))
-          sentBytes = env.MAX_BATCH_BYTES
+        const completeResponseBytes = sentBytes + frameOverheads[frameIndex] +
+          data.byteLength + remainingOverheads[frameIndex]
+        if (sentBlob && completeResponseBytes > env.MAX_BATCH_BYTES) {
+          const frame = encodeFrame(key, BATCH_STATUS_OMITTED, null)
+          sentBytes += frame.byteLength
+          capReached = true
+          controller.enqueue(frame)
           return
         }
-        sentBytes += data.byteLength
-        controller.enqueue(encodeFrame(key, BATCH_STATUS_OK, data))
+        const frame = encodeFrame(key, BATCH_STATUS_OK, data)
+        sentBytes += frame.byteLength
+        sentBlob = true
+        if (completeResponseBytes > env.MAX_BATCH_BYTES) capReached = true
+        controller.enqueue(frame)
       },
     })
     return new Response(stream, {

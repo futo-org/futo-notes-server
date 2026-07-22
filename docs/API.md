@@ -139,13 +139,23 @@ Content-Type: application/json
 {
   "key_salt": "<non-empty string>",
   "key_kdf": { "...": "..." },          // any JSON object — your KDF parameters
-  "encrypted_vault_key": "<non-empty string>"
+  "encrypted_vault_key": "<non-empty string>",
+  "previous_key_updated_at": "<opaque revision from GET/PUT>" // rotation only
 }
     → 200 { "key": { ... } }
+    → 409 { "error": "key conflict", "currentKey": { ... } }
     → 400 invalid body | 404 not found
 ```
 
-> Heads-up: rotating the key with `PUT .../key` does **not** currently emit a real-time `change` event, so peers learn about a rotation on their next poll, not instantly. Fine for single-vault use; note it if you depend on instant key propagation.
+The first client may claim an unset key without `previous_key_updated_at`. Retrying
+the exact same material is idempotent and returns `200` with the original
+`key_updated_at`. A different write must include the current `key_updated_at` from
+a prior `GET` or `PUT`; the server treats it as an opaque revision token and rotates
+the material only if it still matches. A missing or stale token returns `409` with
+the authoritative material in `currentKey`, allowing the client to resolve the
+conflict safely. Do not parse or synthesize the token.
+
+> Heads-up: a successful rotation does **not** currently emit a real-time `change` event, so peers learn about it on their next poll, not instantly. Note it if you depend on instant key propagation.
 
 ---
 
@@ -272,9 +282,13 @@ Fetches up to **200** blobs in one request — removes the per-request overhead 
 |--------|---------|
 | `0` ok | `blobLen` bytes of blob follow |
 | `1` missing | Absent, malformed, or not owned by you (no existence leak — mirrors the single GET's `404`); `blobLen = 0` |
-| `2` omitted | Cumulative response payload hit the server cap (`MAX_BATCH_BYTES`, default 32 MiB) before this entry; re-request omitted keys in a fresh batch. `blobLen = 0` |
+| `2` omitted | The complete encoded response would exceed the server cap (`MAX_BATCH_BYTES`, default 32 MiB) if this blob were included; re-request omitted keys in a fresh batch. `blobLen = 0` |
 
-The first blob of a response is always sent even if it alone exceeds the cap, so a client always makes progress. `> 200` keys, a key over 128 chars, an empty list, or a non-JSON body → `400`; a request body over 64 KiB → `413`.
+The cap counts every frame's 7 fixed bytes, UTF-8 key bytes, and blob bytes. The
+first available blob is always sent even if its frame alone exceeds the cap, so a
+client always makes progress. Mandatory missing/omitted frame metadata may also
+exceed an unusually small operator-configured cap. `> 200` keys, a key over 128
+chars, an empty list, or a non-JSON body → `400`; a request body over 64 KiB → `413`.
 
 ---
 
