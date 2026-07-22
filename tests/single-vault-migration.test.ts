@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict'
-import { afterAll, beforeAll, test } from 'bun:test'
-import { type Kysely } from 'kysely'
+import { afterAll, afterEach, beforeAll, test } from 'bun:test'
+import { sql } from 'kysely'
+import { uuidv7 } from 'uuidv7'
 import { db, waitForDb } from '../src/db/connection.ts'
 import { migrateToLatest } from '../src/db/migrate.ts'
-import * as m008 from '../src/db/migrations/008_single_collection_per_user.ts'
 
-// The migration up/down take `Kysely<unknown>` (as Kysely's Migrator passes
-// them); our typed `db` singleton needs a cast to call them directly.
-const rawDb = db as unknown as Kysely<unknown>
+const migration008 = '008_single_collection_per_user'
+const migration009 = '009_restore_plural_collections'
+const seededUserIds: string[] = []
 
 beforeAll(async () => {
   await waitForDb()
@@ -18,88 +18,259 @@ afterAll(async () => {
   await db.destroy()
 })
 
-/**
- * Migration 008 heals an already-split account: it keeps the EARLIEST vault per
- * user (the one the client's connect() picks) and deletes the rest, whose
- * objects cascade away. This drives the real migration code — roll back to the
- * pre-008 schema, seed a split, then re-apply.
- */
-test('migration 008 collapses duplicate vaults to the earliest, keeping its objects', async () => {
-  // A user to own the seeded split. Insert directly so we don't depend on the
-  // (now idempotent) collections route.
-  const userId = crypto.randomUUID()
+afterEach(async () => {
+  if (seededUserIds.length > 0) {
+    await db.deleteFrom('users').where('id', 'in', seededUserIds).execute()
+    seededUserIds.length = 0
+  }
+  await migrateToLatest()
+})
+
+async function restorePre008MigrationState(): Promise<void> {
+  await sql`alter table collections drop constraint if exists collections_user_id_unique`.execute(db)
+  await sql`create index if not exists idx_collections_user on collections (user_id)`.execute(db)
+  await sql`
+    delete from kysely_migration
+    where name in (${migration008}, ${migration009})
+  `.execute(db)
+}
+
+async function restoreAlreadyApplied008State(): Promise<void> {
+  await sql`drop index if exists idx_collections_user`.execute(db)
+  await sql`
+    do $$
+    begin
+      if not exists (
+        select 1
+        from pg_constraint
+        where conname = 'collections_user_id_unique'
+          and conrelid = 'collections'::regclass
+      ) then
+        alter table collections
+          add constraint collections_user_id_unique unique (user_id);
+      end if;
+    end
+    $$
+  `.execute(db)
+  await sql`delete from kysely_migration where name = ${migration009}`.execute(db)
+}
+
+test('stable upgrade preserves every collection and its opaque sync metadata', async () => {
+  await restorePre008MigrationState()
+
+  const userId = uuidv7()
+  seededUserIds.push(userId)
+  const firstCollectionId = uuidv7()
+  const secondCollectionId = uuidv7()
+  const firstObjectId = uuidv7()
+  const secondObjectId = uuidv7()
+  const firstBlobKey = `${userId}/${uuidv7()}`
+  const secondBlobKey = `${userId}/${uuidv7()}`
+  const existingOrphanKey = `${userId}/${uuidv7()}`
+
   await db
     .insertInto('users')
     .values({
       id: userId,
-      sub: `dev:collapse-${userId}@example.test`,
-      name: 'Collapse Test',
-      email: `collapse-${userId}@example.test`,
+      sub: `dev:migration-${userId}@example.test`,
+      name: 'Migration Test',
+      email: `migration-${userId}@example.test`,
+    })
+    .execute()
+  await db
+    .insertInto('collections')
+    .values([
+      {
+        id: firstCollectionId,
+        user_id: userId,
+        current_version: '17',
+        key_salt: 'first-salt',
+        key_kdf: { algorithm: 'argon2id', iterations: 3 },
+        encrypted_vault_key: 'first-encrypted-key',
+        key_updated_at: new Date('2025-01-01T00:00:00.000Z'),
+        created_at: new Date('2024-01-01T00:00:00.000Z'),
+      },
+      {
+        id: secondCollectionId,
+        user_id: userId,
+        current_version: '29',
+        key_salt: 'second-salt',
+        key_kdf: { algorithm: 'scrypt', cost: 32768 },
+        encrypted_vault_key: 'second-encrypted-key',
+        key_updated_at: new Date('2025-02-01T00:00:00.000Z'),
+        created_at: new Date('2024-02-01T00:00:00.000Z'),
+      },
+    ])
+    .execute()
+  await db
+    .insertInto('objects')
+    .values([
+      {
+        id: firstObjectId,
+        collection_id: firstCollectionId,
+        user_id: userId,
+        version: '5',
+        change_seq: '17',
+        deleted: false,
+        blob_key: firstBlobKey,
+        size_bytes: '111',
+        created_at: new Date('2024-03-01T00:00:00.000Z'),
+        updated_at: new Date('2025-03-01T00:00:00.000Z'),
+      },
+      {
+        id: secondObjectId,
+        collection_id: secondCollectionId,
+        user_id: userId,
+        version: '8',
+        change_seq: '29',
+        deleted: true,
+        blob_key: secondBlobKey,
+        size_bytes: '222',
+        created_at: new Date('2024-04-01T00:00:00.000Z'),
+        updated_at: new Date('2025-04-01T00:00:00.000Z'),
+      },
+    ])
+    .execute()
+  await db
+    .insertInto('orphaned_blobs')
+    .values({
+      blob_key: existingOrphanKey,
+      user_id: userId,
+      size_bytes: '333',
+      orphaned_at: new Date('2025-05-01T00:00:00.000Z'),
     })
     .execute()
 
-  const earliestId = crypto.randomUUID()
-  const loserId = crypto.randomUUID()
-  const earliestObj = crypto.randomUUID()
-  const loserObj = crypto.randomUUID()
-  const earliestBlob = `${userId}/${crypto.randomUUID()}`
-  const loserBlob = `${userId}/${crypto.randomUUID()}`
+  await migrateToLatest()
 
-  // Roll back the unique constraint so a split (two vaults / one user) can exist.
-  await m008.down(rawDb)
-  let upDone = false
-  try {
-    await db
-      .insertInto('collections')
-      .values([
-        { id: earliestId, user_id: userId, created_at: new Date('2020-01-01T00:00:00Z') },
-        { id: loserId, user_id: userId, created_at: new Date('2020-06-01T00:00:00Z') },
-      ])
-      .execute()
-    await db
-      .insertInto('objects')
-      .values([
-        { id: earliestObj, collection_id: earliestId, user_id: userId, blob_key: earliestBlob, size_bytes: '11' },
-        { id: loserObj, collection_id: loserId, user_id: userId, blob_key: loserBlob, size_bytes: '22' },
-      ])
-      .execute()
-
-    // The migration under test: collapse + re-add UNIQUE(user_id).
-    await m008.up(rawDb)
-    upDone = true
-  } finally {
-    if (!upDone) await m008.up(rawDb)
-  }
-
-  // Only the earliest vault survives.
-  const cols = await db
+  const collections = await db
     .selectFrom('collections')
     .where('user_id', '=', userId)
-    .select(['id'])
+    .select([
+      'id',
+      'user_id',
+      'current_version',
+      'key_salt',
+      'key_kdf',
+      'encrypted_vault_key',
+      'key_updated_at',
+      'created_at',
+    ])
+    .orderBy('created_at')
     .execute()
-  assert.deepEqual(cols.map((c) => c.id), [earliestId])
+  assert.deepEqual(collections, [
+    {
+      id: firstCollectionId,
+      user_id: userId,
+      current_version: '17',
+      key_salt: 'first-salt',
+      key_kdf: { algorithm: 'argon2id', iterations: 3 },
+      encrypted_vault_key: 'first-encrypted-key',
+      key_updated_at: new Date('2025-01-01T00:00:00.000Z'),
+      created_at: new Date('2024-01-01T00:00:00.000Z'),
+    },
+    {
+      id: secondCollectionId,
+      user_id: userId,
+      current_version: '29',
+      key_salt: 'second-salt',
+      key_kdf: { algorithm: 'scrypt', cost: 32768 },
+      encrypted_vault_key: 'second-encrypted-key',
+      key_updated_at: new Date('2025-02-01T00:00:00.000Z'),
+      created_at: new Date('2024-02-01T00:00:00.000Z'),
+    },
+  ])
 
-  // Its object is intact; the loser's cascaded away with its vault.
-  const objs = await db
+  const objects = await db
     .selectFrom('objects')
     .where('user_id', '=', userId)
-    .select(['id', 'collection_id'])
+    .select([
+      'id',
+      'collection_id',
+      'user_id',
+      'version',
+      'change_seq',
+      'deleted',
+      'blob_key',
+      'size_bytes',
+      'created_at',
+      'updated_at',
+    ])
+    .orderBy('created_at')
     .execute()
-  assert.deepEqual(objs, [{ id: earliestObj, collection_id: earliestId }])
+  assert.deepEqual(objects, [
+    {
+      id: firstObjectId,
+      collection_id: firstCollectionId,
+      user_id: userId,
+      version: '5',
+      change_seq: '17',
+      deleted: false,
+      blob_key: firstBlobKey,
+      size_bytes: '111',
+      created_at: new Date('2024-03-01T00:00:00.000Z'),
+      updated_at: new Date('2025-03-01T00:00:00.000Z'),
+    },
+    {
+      id: secondObjectId,
+      collection_id: secondCollectionId,
+      user_id: userId,
+      version: '8',
+      change_seq: '29',
+      deleted: true,
+      blob_key: secondBlobKey,
+      size_bytes: '222',
+      created_at: new Date('2024-04-01T00:00:00.000Z'),
+      updated_at: new Date('2025-04-01T00:00:00.000Z'),
+    },
+  ])
 
-  // The loser vault's blob is recorded as orphaned (so the GC can reclaim the
-  // file); the survivor's blob is NOT orphaned (its object is still live).
   const orphans = await db
     .selectFrom('orphaned_blobs')
     .where('user_id', '=', userId)
-    .select(['blob_key'])
+    .select(['blob_key', 'user_id', 'size_bytes', 'orphaned_at'])
     .execute()
-  const orphanKeys = orphans.map((o) => o.blob_key)
-  assert.ok(orphanKeys.includes(loserBlob), 'loser blob must be recorded as orphaned')
-  assert.ok(!orphanKeys.includes(earliestBlob), 'survivor blob must NOT be orphaned')
+  assert.deepEqual(orphans, [
+    {
+      blob_key: existingOrphanKey,
+      user_id: userId,
+      size_bytes: '333',
+      orphaned_at: new Date('2025-05-01T00:00:00.000Z'),
+    },
+  ])
 
-  // The unique constraint is back, so a second vault can never be created.
-  await assert.rejects(
-    db.insertInto('collections').values({ id: crypto.randomUUID(), user_id: userId }).execute(),
-  )
+})
+
+test('upgrade repairs databases that already recorded destructive migration 008', async () => {
+  await restoreAlreadyApplied008State()
+
+  const userId = uuidv7()
+  seededUserIds.push(userId)
+  await db
+    .insertInto('users')
+    .values({
+      id: userId,
+      sub: `dev:already-008-${userId}@example.test`,
+      name: 'Already 008 Test',
+      email: `already-008-${userId}@example.test`,
+    })
+    .execute()
+
+  await migrateToLatest()
+
+  await db
+    .insertInto('collections')
+    .values([
+      { id: uuidv7(), user_id: userId },
+      { id: uuidv7(), user_id: userId },
+    ])
+    .execute()
+
+  const collections = await db
+    .selectFrom('collections')
+    .where('user_id', '=', userId)
+    .select('id')
+    .execute()
+  assert.equal(collections.length, 2)
+
 })

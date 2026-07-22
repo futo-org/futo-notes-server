@@ -278,30 +278,39 @@ test('deleting a collection orphans its objects blobs for GC', async () => {
   }
 })
 
-test('POST /collections is idempotent — one vault per account', async () => {
-  const email = `single-vault-${Date.now()}-${Math.random().toString(16).slice(2)}@example.test`
-  const login = await json<{ token: string }>('/api/auth/dev/login', {
+test('POST /collections creates independent collections for an account', async () => {
+  const email = `plural-collections-${Date.now()}-${Math.random().toString(16).slice(2)}@example.test`
+  const login = await json<{ token: string; user: { id: string } }>('/api/auth/dev/login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, name: 'Single Vault' }),
+    body: JSON.stringify({ email, name: 'Plural Collections' }),
   })
   const auth = { Authorization: `Bearer ${login.token}` }
 
-  const first = await json<{ collection: { id: string } }>('/api/collections', {
+  const firstResponse = await app.fetch(new Request('http://test.local/api/collections', {
     method: 'POST',
     headers: auth,
-  })
-  // A second create returns the SAME vault, not a fork.
-  const second = await json<{ collection: { id: string } }>('/api/collections', {
+  }))
+  assert.equal(firstResponse.status, 201)
+  const first = await firstResponse.json() as { collection: { id: string } }
+
+  const secondResponse = await app.fetch(new Request('http://test.local/api/collections', {
     method: 'POST',
     headers: auth,
-  })
-  assert.equal(second.collection.id, first.collection.id)
+  }))
+  assert.equal(secondResponse.status, 201)
+  const second = await secondResponse.json() as { collection: { id: string } }
+  assert.notEqual(second.collection.id, first.collection.id)
 
   const list = await json<{ collections: Array<{ id: string }> }>('/api/collections', {
     headers: auth,
   })
-  assert.equal(list.collections.length, 1)
+  assert.deepEqual(
+    list.collections.map((collection) => collection.id),
+    [first.collection.id, second.collection.id],
+  )
+
+  await db.deleteFrom('users').where('id', '=', login.user.id).execute()
 })
 
 test('PUT /collections/:id/key supports idempotent claims, conflicts, and guarded rotation', async () => {

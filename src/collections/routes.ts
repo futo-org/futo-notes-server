@@ -33,22 +33,12 @@ function isKeyMaterialBody(value: unknown): value is KeyMaterialRequest {
 
 collectionsRoutes.post('/', async (c) => {
   const userId = c.var.user.id
-  // One vault per account. Claim the single collection, or return the existing
-  // one — idempotent. The `UNIQUE(user_id)` constraint (migration 008) makes
-  // concurrent creates converge on one row instead of forking into two vaults.
   const created = await db
     .insertInto('collections')
     .values({ id: uuidv7(), user_id: userId })
-    .onConflict((oc) => oc.column('user_id').doNothing())
     .returning(['id', 'user_id', 'current_version', 'created_at'])
-    .executeTakeFirst()
-  if (created) return c.json({ collection: created }, 201)
-  const existing = await db
-    .selectFrom('collections')
-    .where('user_id', '=', userId)
-    .select(['id', 'user_id', 'current_version', 'created_at'])
     .executeTakeFirstOrThrow()
-  return c.json({ collection: existing }, 200)
+  return c.json({ collection: created }, 201)
 })
 
 collectionsRoutes.get('/', async (c) => {
