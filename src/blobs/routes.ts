@@ -49,13 +49,16 @@ const FRAME_FIXED_BYTES = 2 + 1 + 4
 function encodeFrame(key: string, status: BatchStatus, blob: Uint8Array | null): Uint8Array {
   const keyBytes = textEncoder.encode(key)
   const blobLen = blob?.byteLength ?? 0
-  const frame = new Uint8Array(2 + keyBytes.length + 1 + 4 + blobLen)
+  const statusOffset = 2 + keyBytes.length
+  const blobLengthOffset = statusOffset + 1
+  const blobOffset = blobLengthOffset + 4
+  const frame = new Uint8Array(FRAME_FIXED_BYTES + keyBytes.length + blobLen)
   const view = new DataView(frame.buffer)
   view.setUint16(0, keyBytes.length)
   frame.set(keyBytes, 2)
-  frame[2 + keyBytes.length] = status
-  view.setUint32(2 + keyBytes.length + 1, blobLen)
-  if (blob) frame.set(blob, 2 + keyBytes.length + 1 + 4)
+  frame[statusOffset] = status
+  view.setUint32(blobLengthOffset, blobLen)
+  if (blob) frame.set(blob, blobOffset)
   return frame
 }
 
@@ -116,6 +119,12 @@ export function createBlobRoutes(store: BlobStore): Hono<{ Variables: AuthContex
     let capReached = false
     const stream = new ReadableStream<Uint8Array>({
       async pull(controller) {
+        const send = (key: string, status: BatchStatus, blob: Uint8Array | null) => {
+          const frame = encodeFrame(key, status, blob)
+          sentBytes += frame.byteLength
+          controller.enqueue(frame)
+        }
+
         if (index >= keys.length) {
           controller.close()
           return
@@ -124,15 +133,11 @@ export function createBlobRoutes(store: BlobStore): Hono<{ Variables: AuthContex
         const key = keys[frameIndex]
         const [keyUserId, blobId, extra] = key.split('/')
         if (extra !== undefined || keyUserId !== userId || !UUID_RE.test(blobId ?? '')) {
-          const frame = encodeFrame(key, BATCH_STATUS_MISSING, null)
-          sentBytes += frame.byteLength
-          controller.enqueue(frame)
+          send(key, BATCH_STATUS_MISSING, null)
           return
         }
         if (capReached) {
-          const frame = encodeFrame(key, BATCH_STATUS_OMITTED, null)
-          sentBytes += frame.byteLength
-          controller.enqueue(frame)
+          send(key, BATCH_STATUS_OMITTED, null)
           return
         }
         // A store failure (non-ENOENT) aborts the stream: the 200 is already
@@ -148,25 +153,19 @@ export function createBlobRoutes(store: BlobStore): Hono<{ Variables: AuthContex
           return
         }
         if (!data) {
-          const frame = encodeFrame(key, BATCH_STATUS_MISSING, null)
-          sentBytes += frame.byteLength
-          controller.enqueue(frame)
+          send(key, BATCH_STATUS_MISSING, null)
           return
         }
         const completeResponseBytes = sentBytes + frameOverheads[frameIndex] +
           data.byteLength + remainingOverheads[frameIndex]
         if (sentBlob && completeResponseBytes > env.MAX_BATCH_BYTES) {
-          const frame = encodeFrame(key, BATCH_STATUS_OMITTED, null)
-          sentBytes += frame.byteLength
+          send(key, BATCH_STATUS_OMITTED, null)
           capReached = true
-          controller.enqueue(frame)
           return
         }
-        const frame = encodeFrame(key, BATCH_STATUS_OK, data)
-        sentBytes += frame.byteLength
+        send(key, BATCH_STATUS_OK, data)
         sentBlob = true
         if (completeResponseBytes > env.MAX_BATCH_BYTES) capReached = true
-        controller.enqueue(frame)
       },
     })
     return new Response(stream, {

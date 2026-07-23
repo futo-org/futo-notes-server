@@ -18,11 +18,3 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     on collections (user_id)
   `.execute(db)
 }
-
-export async function down(db: Kysely<unknown>): Promise<void> {
-  await sql`drop index if exists idx_collections_user`.execute(db)
-  await sql`
-    alter table collections
-    add constraint collections_user_id_unique unique (user_id)
-  `.execute(db)
-}

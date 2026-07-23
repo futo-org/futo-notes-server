@@ -246,6 +246,12 @@ test('upgrade repairs databases that already recorded destructive migration 008'
 
   const userId = uuidv7()
   seededUserIds.push(userId)
+  const existingCollectionId = uuidv7()
+  const liveObjectId = uuidv7()
+  const tombstoneObjectId = uuidv7()
+  const liveBlobKey = `${userId}/${uuidv7()}`
+  const tombstoneBlobKey = `${userId}/${uuidv7()}`
+  const orphanBlobKey = `${userId}/${uuidv7()}`
   await db
     .insertInto('users')
     .values({
@@ -255,15 +261,147 @@ test('upgrade repairs databases that already recorded destructive migration 008'
       email: `already-008-${userId}@example.test`,
     })
     .execute()
+  await db
+    .insertInto('collections')
+    .values({
+      id: existingCollectionId,
+      user_id: userId,
+      current_version: '12',
+      key_salt: 'already-008-salt',
+      key_kdf: { algorithm: 'opaque-kdf', work: 42 },
+      encrypted_vault_key: 'already-008-encrypted-key',
+      key_updated_at: new Date('2025-06-01T00:00:00.000Z'),
+      created_at: new Date('2024-06-01T00:00:00.000Z'),
+    })
+    .execute()
+  await db
+    .insertInto('objects')
+    .values([
+      {
+        id: liveObjectId,
+        collection_id: existingCollectionId,
+        user_id: userId,
+        version: '3',
+        change_seq: '9',
+        deleted: false,
+        blob_key: liveBlobKey,
+        size_bytes: '444',
+        created_at: new Date('2024-07-01T00:00:00.000Z'),
+        updated_at: new Date('2025-07-01T00:00:00.000Z'),
+      },
+      {
+        id: tombstoneObjectId,
+        collection_id: existingCollectionId,
+        user_id: userId,
+        version: '5',
+        change_seq: '12',
+        deleted: true,
+        blob_key: tombstoneBlobKey,
+        size_bytes: '555',
+        created_at: new Date('2024-08-01T00:00:00.000Z'),
+        updated_at: new Date('2025-08-01T00:00:00.000Z'),
+      },
+    ])
+    .execute()
+  await db
+    .insertInto('orphaned_blobs')
+    .values({
+      blob_key: orphanBlobKey,
+      user_id: userId,
+      size_bytes: '666',
+      orphaned_at: new Date('2025-09-01T00:00:00.000Z'),
+    })
+    .execute()
 
   await migrateToLatest()
 
+  const existingCollection = await db
+    .selectFrom('collections')
+    .where('id', '=', existingCollectionId)
+    .where('user_id', '=', userId)
+    .select([
+      'id',
+      'user_id',
+      'current_version',
+      'key_salt',
+      'key_kdf',
+      'encrypted_vault_key',
+      'key_updated_at',
+      'created_at',
+    ])
+    .executeTakeFirstOrThrow()
+  assert.deepEqual(existingCollection, {
+    id: existingCollectionId,
+    user_id: userId,
+    current_version: '12',
+    key_salt: 'already-008-salt',
+    key_kdf: { algorithm: 'opaque-kdf', work: 42 },
+    encrypted_vault_key: 'already-008-encrypted-key',
+    key_updated_at: new Date('2025-06-01T00:00:00.000Z'),
+    created_at: new Date('2024-06-01T00:00:00.000Z'),
+  })
+
+  const existingObjects = await db
+    .selectFrom('objects')
+    .where('collection_id', '=', existingCollectionId)
+    .where('user_id', '=', userId)
+    .select([
+      'id',
+      'collection_id',
+      'user_id',
+      'version',
+      'change_seq',
+      'deleted',
+      'blob_key',
+      'size_bytes',
+      'created_at',
+      'updated_at',
+    ])
+    .orderBy('created_at')
+    .execute()
+  assert.deepEqual(existingObjects, [
+    {
+      id: liveObjectId,
+      collection_id: existingCollectionId,
+      user_id: userId,
+      version: '3',
+      change_seq: '9',
+      deleted: false,
+      blob_key: liveBlobKey,
+      size_bytes: '444',
+      created_at: new Date('2024-07-01T00:00:00.000Z'),
+      updated_at: new Date('2025-07-01T00:00:00.000Z'),
+    },
+    {
+      id: tombstoneObjectId,
+      collection_id: existingCollectionId,
+      user_id: userId,
+      version: '5',
+      change_seq: '12',
+      deleted: true,
+      blob_key: tombstoneBlobKey,
+      size_bytes: '555',
+      created_at: new Date('2024-08-01T00:00:00.000Z'),
+      updated_at: new Date('2025-08-01T00:00:00.000Z'),
+    },
+  ])
+
+  const existingOrphan = await db
+    .selectFrom('orphaned_blobs')
+    .where('blob_key', '=', orphanBlobKey)
+    .where('user_id', '=', userId)
+    .select(['blob_key', 'user_id', 'size_bytes', 'orphaned_at'])
+    .executeTakeFirstOrThrow()
+  assert.deepEqual(existingOrphan, {
+    blob_key: orphanBlobKey,
+    user_id: userId,
+    size_bytes: '666',
+    orphaned_at: new Date('2025-09-01T00:00:00.000Z'),
+  })
+
   await db
     .insertInto('collections')
-    .values([
-      { id: uuidv7(), user_id: userId },
-      { id: uuidv7(), user_id: userId },
-    ])
+    .values({ id: uuidv7(), user_id: userId })
     .execute()
 
   const collections = await db

@@ -4,30 +4,15 @@ services:
     ports:
       - "${FUTO_NOTES_PORT:-3005}:3000"
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgres://futo_notes:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/futo_notes}
+      DATABASE_URL: postgres://futo_notes:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/futo_notes
       PORT: "3000"
       BLOB_DIR: /data/blobs
       LOG_LEVEL: ${LOG_LEVEL:-info}
       AUTH_MODE: password
       FUTO_NOTES_PASSWORD: ${FUTO_NOTES_PASSWORD:-}
       FUTO_NOTES_PASSWORD_HASH: ${FUTO_NOTES_PASSWORD_HASH:-}
-      COOKIE_SECURE: ${COOKIE_SECURE:-true}
-      TRUST_PROXY: ${TRUST_PROXY:-false}
-      AUTH_RATE_LIMIT: ${AUTH_RATE_LIMIT:-10}
-      AUTH_RATE_LIMIT_WINDOW_MS: ${AUTH_RATE_LIMIT_WINDOW_MS:-60000}
-      MAX_BLOB_BYTES: ${MAX_BLOB_BYTES:-104857600}
-      MAX_BATCH_BYTES: ${MAX_BATCH_BYTES:-33554432}
-      BLOB_GC_ENABLED: ${BLOB_GC_ENABLED:-true}
-      BLOB_RETENTION_DAYS: ${BLOB_RETENTION_DAYS:-365}
-      BLOB_GC_INTERVAL_MS: ${BLOB_GC_INTERVAL_MS:-21600000}
-      DB_POOL_MAX: ${DB_POOL_MAX:-10}
-      DB_POOL_IDLE_TIMEOUT_MS: ${DB_POOL_IDLE_TIMEOUT_MS:-10000}
-      DB_SSL: ${DB_SSL:-false}
-      DB_SSL_CA: ${DB_SSL_CA:-}
-      DB_SSL_INSECURE: ${DB_SSL_INSECURE:-false}
     volumes:
       - ${FUTO_NOTES_DATA_DIR:-./futo-notes-data}/blobs:/data/blobs
-      - ${FUTO_NOTES_CONFIG_DIR:-./config}:/config:ro
     depends_on:
       postgres:
         condition: service_healthy

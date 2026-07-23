@@ -81,10 +81,6 @@ The server only speaks HTTP internally. To expose it to the internet, put a reve
 
 `POST /api/auth/password/login` guards the server's single password (and runs scrypt when the hash-based option is configured), so it is a brute-force target. **The server rate-limits this path for you** — by default 10 attempts per minute per client, returning `429` with a `Retry-After` header past that. You don't need to add a proxy rule.
 
-If you put the server behind a reverse proxy (which you do for HTTPS, above), set `TRUST_PROXY=true` in `.env` so the limit keys on the real client IP from `X-Forwarded-For` rather than the proxy's address — and make sure the proxy sets that header. Leave it off when the server is exposed directly, since an untrusted `X-Forwarded-For` can be spoofed to dodge the limit.
-
-Tune it with `AUTH_RATE_LIMIT` (attempts per window; `0` disables) and `AUTH_RATE_LIMIT_WINDOW_MS`. The limit is per-instance and in-memory, which is all the single-instance self-hosted setup needs; a proxy-level limit is still fine as defense-in-depth if you want one.
-
 ## Development
 
 For working on the server itself. The toolchain is [Bun](https://bun.sh) (`curl -fsSL https://bun.sh/install | bash`) — it's the package manager, TypeScript runtime, and test runner. You also need Docker for Postgres. (Self-hosters don't need any of this — see [Self-hosting](#self-hosting) above.)

@@ -228,6 +228,5 @@ info "    Lives in $DATA_DIR — back it up along with $INSTALL_DIR/.env"
 printf '\n'
 info "${BOLD}Before exposing this to the internet${OFF}"
 info "  • Put a TLS reverse proxy in front (Caddy, nginx, or Tailscale Funnel)."
-info "  • The server rate-limits password login. If you use a reverse proxy, set"
-info "    TRUST_PROXY=true so limits apply to each client's forwarded IP address."
+info "  • The server rate-limits password login automatically."
 printf '\n'
