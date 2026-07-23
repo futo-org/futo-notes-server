@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+import { isDeepStrictEqual } from 'node:util'
 import { sql } from 'kysely'
 import { uuidv7 } from 'uuidv7'
 import type { AuthContext } from '../auth/middleware.ts'
@@ -10,6 +11,7 @@ interface KeyMaterialRequest {
   key_salt: string
   key_kdf: Record<string, unknown>
   encrypted_vault_key: string
+  previous_key_updated_at?: string
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -23,28 +25,20 @@ function isKeyMaterialBody(value: unknown): value is KeyMaterialRequest {
     value.key_salt.length > 0 &&
     isRecord(value.key_kdf) &&
     typeof value.encrypted_vault_key === 'string' &&
-    value.encrypted_vault_key.length > 0
+    value.encrypted_vault_key.length > 0 &&
+    (value.previous_key_updated_at === undefined ||
+      (typeof value.previous_key_updated_at === 'string' && value.previous_key_updated_at.length > 0))
   )
 }
 
 collectionsRoutes.post('/', async (c) => {
   const userId = c.var.user.id
-  // One vault per account. Claim the single collection, or return the existing
-  // one — idempotent. The `UNIQUE(user_id)` constraint (migration 008) makes
-  // concurrent creates converge on one row instead of forking into two vaults.
   const created = await db
     .insertInto('collections')
     .values({ id: uuidv7(), user_id: userId })
-    .onConflict((oc) => oc.column('user_id').doNothing())
     .returning(['id', 'user_id', 'current_version', 'created_at'])
-    .executeTakeFirst()
-  if (created) return c.json({ collection: created }, 201)
-  const existing = await db
-    .selectFrom('collections')
-    .where('user_id', '=', userId)
-    .select(['id', 'user_id', 'current_version', 'created_at'])
     .executeTakeFirstOrThrow()
-  return c.json({ collection: existing }, 200)
+  return c.json({ collection: created }, 201)
 })
 
 collectionsRoutes.get('/', async (c) => {
@@ -94,45 +88,64 @@ collectionsRoutes.put('/:id/key', async (c) => {
     return c.json({ error: 'valid key_salt, key_kdf, and encrypted_vault_key required' }, 400)
   }
 
-  // First-write-wins: only set the vault key while it is still unset (the
-  // `is null` guard). A racing second client on the same collection would
-  // otherwise overwrite the key and strand the winner's already-encrypted
-  // objects — a key-level split-brain. When the key is already present we return
-  // the AUTHORITATIVE material so the caller adopts it (one vault ⇒ one key).
-  // Postgres row locking makes the conditional UPDATE atomic, so concurrent PUTs
-  // converge on the first writer's key.
-  const claimed = await db
-    .updateTable('collections')
-    .set({
-      key_salt: body.key_salt,
-      key_kdf: body.key_kdf,
-      encrypted_vault_key: body.encrypted_vault_key,
-      key_updated_at: sql`now()`,
-    })
-    .where('id', '=', id)
-    .where('user_id', '=', userId)
-    .where('encrypted_vault_key', 'is', null)
-    .returning(['key_salt', 'key_kdf', 'encrypted_vault_key', 'key_updated_at'])
-    .executeTakeFirst()
+  const outcome = await db.transaction().execute(async (trx) => {
+    // Serialize claims and rotations on this collection. This closes the gap
+    // between reading a revision token and applying its guarded replacement.
+    const current = await trx
+      .selectFrom('collections')
+      .where('id', '=', id)
+      .where('user_id', '=', userId)
+      .select(['key_salt', 'key_kdf', 'encrypted_vault_key', 'key_updated_at'])
+      .forUpdate()
+      .executeTakeFirst()
+    if (!current) return { kind: 'not-found' } as const
 
-  const row = claimed ?? await db
-    .selectFrom('collections')
-    .where('id', '=', id)
-    .where('user_id', '=', userId)
-    .select(['key_salt', 'key_kdf', 'encrypted_vault_key', 'key_updated_at'])
-    .executeTakeFirst()
-  if (!row || !row.key_salt || !row.key_kdf || !row.encrypted_vault_key) {
+    const save = async (rotation: boolean) => {
+      const row = await trx
+        .updateTable('collections')
+        .set({
+          key_salt: body.key_salt,
+          key_kdf: body.key_kdf,
+          encrypted_vault_key: body.encrypted_vault_key,
+          // Keep the serialized timestamp usable as an opaque revision token,
+          // even when two requests land in the same millisecond.
+          key_updated_at: rotation
+            ? sql`greatest(clock_timestamp(), key_updated_at + interval '1 millisecond')`
+            : sql`clock_timestamp()`,
+        })
+        .where('id', '=', id)
+        .where('user_id', '=', userId)
+        .returning(['key_salt', 'key_kdf', 'encrypted_vault_key', 'key_updated_at'])
+        .executeTakeFirstOrThrow()
+      return { kind: 'ok', key: row } as const
+    }
+
+    if (!current.key_salt || !current.key_kdf || !current.encrypted_vault_key || !current.key_updated_at) {
+      return save(false)
+    }
+    const key = {
+      key_salt: current.key_salt,
+      key_kdf: current.key_kdf,
+      encrypted_vault_key: current.encrypted_vault_key,
+      key_updated_at: current.key_updated_at,
+    }
+    const idempotent = body.key_salt === current.key_salt &&
+      isDeepStrictEqual(body.key_kdf, current.key_kdf) &&
+      body.encrypted_vault_key === current.encrypted_vault_key
+    if (idempotent) return { kind: 'ok', key } as const
+    if (body.previous_key_updated_at === current.key_updated_at.toISOString()) {
+      return save(true)
+    }
+    return { kind: 'conflict', key } as const
+  })
+
+  if (outcome.kind === 'not-found') {
     return c.json({ error: 'not found' }, 404)
   }
-
-  return c.json({
-    key: {
-      key_salt: row.key_salt,
-      key_kdf: row.key_kdf,
-      encrypted_vault_key: row.encrypted_vault_key,
-      key_updated_at: row.key_updated_at,
-    },
-  })
+  if (outcome.kind === 'conflict') {
+    return c.json({ error: 'key conflict', currentKey: outcome.key }, 409)
+  }
+  return c.json({ key: outcome.key })
 })
 
 collectionsRoutes.get('/:id', async (c) => {

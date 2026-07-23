@@ -6,6 +6,9 @@ import { afterAll, beforeAll, test } from 'bun:test'
 import { hashPassword } from '../src/auth/password.ts'
 
 const PASSWORD = 'hunter2-test'
+// Production Compose forwards the unused plaintext alternative as an empty
+// value; this must not shadow a configured hash.
+process.env.FUTO_NOTES_PASSWORD = ''
 process.env.FUTO_NOTES_PASSWORD_HASH = await hashPassword(PASSWORD)
 
 // Dynamic imports so env.ts sees the hash we just set.
@@ -117,8 +120,8 @@ test('authenticated activity does not extend the session expiry', async () => {
   assert.equal(new Date(session.expires_at).getTime(), fixedExpiry.getTime())
 })
 
-test('validateEnv rejects password mode without a hash', () => {
-  // Run validateEnv in a subprocess with AUTH_MODE=password but no hash.
+test('validateEnv rejects password mode without either password option', () => {
+  // Run validateEnv in a subprocess with AUTH_MODE=password but no credential.
   const result = spawnSync(
     'bun',
     ['--no-env-file', '-e', 'import("./src/env.ts").then(({ validateEnv }) => validateEnv())'],
@@ -133,5 +136,5 @@ test('validateEnv rejects password mode without a hash', () => {
     },
   )
   assert.notEqual(result.status, 0)
-  assert.match(result.stderr, /FUTO_NOTES_PASSWORD_HASH/)
+  assert.match(result.stderr, /FUTO_NOTES_PASSWORD or FUTO_NOTES_PASSWORD_HASH/)
 })

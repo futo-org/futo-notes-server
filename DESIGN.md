@@ -57,11 +57,16 @@ Two modes, chosen per-deployment via `AUTH_MODE`. The server renders no auth UI 
 
 ### `AUTH_MODE=password` (v1 self-hosted)
 
-Single-user mode. The admin password is scrypt-hashed and passed in as the `FUTO_NOTES_PASSWORD_HASH` env var (produced by `bun dist/index.js hash <pw>`). One singleton user row (`sub='local'`) is lazy-upserted on first successful login. There is no per-user password table and no reset endpoint — to change the password, regenerate the hash, update `.env`, and restart the server.
+Single-user mode. Configure exactly one credential:
+
+- `FUTO_NOTES_PASSWORD` stores the password directly for the simplest self-hosted setup. Protect the mode-0600 `.env` like any other credential.
+- `FUTO_NOTES_PASSWORD_HASH` stores a scrypt hash instead (produced by `bun dist/index.js hash <pw>`) when hash-at-rest is preferred.
+
+One singleton user row (`sub='local'`) is lazy-upserted on first successful login. There is no per-user password table or reset endpoint. To change the password, update the configured credential and restart the server.
 
 Flow:
 1. Client POSTs `{ password }` to `/api/auth/password/login`
-2. Server scrypt-verifies against `FUTO_NOTES_PASSWORD_HASH`
+2. Server verifies against the configured plaintext credential with a timing-safe fixed-size digest comparison, or scrypt-verifies against `FUTO_NOTES_PASSWORD_HASH`
 3. On success: upsert singleton user, open session, return `{ user, token }`
 
 ### `AUTH_MODE=oidc` (deferred)

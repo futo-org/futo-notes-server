@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import { afterAll, beforeAll, test } from 'bun:test'
 
 // Set a tiny limit before importing anything that snapshots env. env.ts reads
@@ -119,4 +120,22 @@ test('POST blob-objects accepts a body within the limit', async () => {
   assert.equal(response.status, 201)
   const data = await response.json() as { object: { id: string } }
   assert.ok(data.object.id)
+})
+
+test('validateEnv rejects blob limits that cannot fit the batch u32 length field', () => {
+  const result = spawnSync(
+    'bun',
+    ['--no-env-file', '-e', 'import("./src/env.ts").then(({ validateEnv }) => validateEnv())'],
+    {
+      env: {
+        ...process.env,
+        DATABASE_URL: 'postgres://x:y@z/x',
+        AUTH_MODE: 'dev',
+        MAX_BLOB_BYTES: String(0x1_0000_0000),
+      },
+      encoding: 'utf8',
+    },
+  )
+  assert.notEqual(result.status, 0)
+  assert.match(result.stderr, /MAX_BLOB_BYTES/)
 })

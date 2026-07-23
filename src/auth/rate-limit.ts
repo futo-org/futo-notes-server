@@ -5,15 +5,14 @@ import { log } from '../logger.ts'
 /**
  * In-memory fixed-window rate limiter for the unauthenticated login path.
  *
- * `POST /api/auth/password/login` runs scrypt (~tens of ms, ~16 MB) on every
- * request and guards a single guessable secret, so it is both a brute-force
- * target and a CPU-amplification vector. This caps attempts per client per
+ * `POST /api/auth/password/login` guards a single guessable secret, and
+ * hash-mode requests run scrypt. This caps attempts per client per
  * window so a self-hosted deployment is protected out of the box, without the
  * operator having to add a reverse-proxy rule.
  *
  * The state is per-instance and intentionally soft: a restart resets the
  * counters, and a multi-instance deployment limits per instance (each instance
- * still bounds its own scrypt load). A shared store (Redis/Valkey) is the
+ * still bounds its own hash-mode load). A shared store (Redis/Valkey) is the
  * scale-up path — the same trajectory sessions take in DESIGN.md — but is
  * unnecessary for the single-instance self-hosted target this protects.
  */

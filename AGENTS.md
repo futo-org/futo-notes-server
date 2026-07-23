@@ -18,7 +18,7 @@ bun dist/index.js hash <password>   # print a scrypt hash for FUTO_NOTES_PASSWOR
 
 ## Environment
 
-Copy `.env.example` → `.env`. `DATABASE_URL` is always required. Set `AUTH_MODE=dev` for development and tests (enables passwordless login at `/api/auth/dev/login`). Set `AUTH_MODE=password` + `FUTO_NOTES_PASSWORD_HASH` for single-user self-hosted mode. The `.env` file is loaded by Bun's built-in `.env` support (no `dotenv`). Validation happens at boot via `validateEnv()` in `src/env.ts`.
+Copy `.env.example` → `.env`. `DATABASE_URL` is always required. Set `AUTH_MODE=dev` for development and tests (enables passwordless login at `/api/auth/dev/login`). For single-user self-hosted mode, set `AUTH_MODE=password` plus exactly one of `FUTO_NOTES_PASSWORD` (simpler plaintext configuration) or `FUTO_NOTES_PASSWORD_HASH` (safer at rest). The `.env` file is loaded by Bun's built-in `.env` support (no `dotenv`). Validation happens at boot via `validateEnv()` in `src/env.ts`.
 
 ## App structure: OSS vs hosted
 
@@ -53,13 +53,15 @@ Copy `.env.example` → `.env`. `DATABASE_URL` is always required. Set `AUTH_MOD
 - Tests call `buildApp().fetch()` directly (no HTTP server started).
 - Requires a valid `DATABASE_URL`.
 - Each test file runs as its OWN `bun test` invocation. `bun test` runs all listed files in one shared process, but tests depend on per-file isolation: the `db` pool is a module singleton that each file's `afterAll` calls `db.destroy()` on, and some files snapshot env (AUTH_MODE, MAX_BLOB_BYTES) at module load. Node's test runner forks a process per file; under Bun, `scripts/test.ts` reproduces that — it spawns one `bun test <file>` process per file, grouped by the AUTH_MODE each file needs. `bun run test` runs all groups; `bun run test:dev` / `bun run test:password` run a single group (the runner takes an optional group-name arg).
-- Password-mode tests set `FUTO_NOTES_PASSWORD_HASH` at the top of the file via top-level await, before dynamic-importing modules that snapshot env.
+- Password-mode tests set their plaintext/hash credential at the top of the file before dynamic-importing modules that snapshot env.
 
 ## Migrations
 
 Sequential files in `src/db/migrations/` (001_, 002_, ...). Each exports `up()` and `down()`.
 
 IMPORTANT: When adding a migration, you MUST also register it in `src/db/migration-registry.ts`. The production bundle cannot discover migrations from the filesystem. CI enforces this (`scripts/check-migration-registry.mjs` in the `test:build` job).
+
+Every data-affecting migration MUST have a real-Postgres upgrade regression that drives `migrateToLatest()` from the prior recorded migration state. Assert that unrelated collections, objects, versions, tombstones, opaque key material, blob references, and orphan-ledger rows remain intact. Also cover repair behavior when a migration may already have shipped through a development image.
 
 ## CI/CD
 

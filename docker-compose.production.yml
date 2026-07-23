@@ -9,7 +9,8 @@ services:
       BLOB_DIR: /data/blobs
       LOG_LEVEL: ${LOG_LEVEL:-info}
       AUTH_MODE: password
-      FUTO_NOTES_PASSWORD_HASH: ${FUTO_NOTES_PASSWORD_HASH:?FUTO_NOTES_PASSWORD_HASH is required}
+      FUTO_NOTES_PASSWORD: ${FUTO_NOTES_PASSWORD:-}
+      FUTO_NOTES_PASSWORD_HASH: ${FUTO_NOTES_PASSWORD_HASH:-}
     volumes:
       - ${FUTO_NOTES_DATA_DIR:-./futo-notes-data}/blobs:/data/blobs
     depends_on:
