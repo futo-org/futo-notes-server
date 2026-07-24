@@ -3,6 +3,7 @@ import { type Kysely, sql } from 'kysely'
 export async function up(db: Kysely<unknown>): Promise<void> {
   await db.schema
     .createTable('mutation_results')
+    .ifNotExists()
     .addColumn('user_id', 'uuid', (c) =>
       c.notNull().references('users.id').onDelete('cascade'),
     )
@@ -26,6 +27,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
 
   await db.schema
     .createIndex('idx_mutation_results_created_at')
+    .ifNotExists()
     .on('mutation_results')
     .column('created_at')
     .execute()

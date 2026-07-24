@@ -3,6 +3,7 @@ import { type Kysely, sql } from 'kysely'
 export async function up(db: Kysely<unknown>): Promise<void> {
   await db.schema
     .createTable('blob_ledger')
+    .ifNotExists()
     .addColumn('blob_key', 'text', (c) => c.primaryKey())
     .addColumn('user_id', 'uuid', (c) =>
       c.notNull().references('users.id').onDelete('cascade'),
@@ -24,16 +25,19 @@ export async function up(db: Kysely<unknown>): Promise<void> {
 
   await db.schema
     .createIndex('idx_blob_ledger_user_state')
+    .ifNotExists()
     .on('blob_ledger')
     .columns(['user_id', 'state'])
     .execute()
   await db.schema
     .createIndex('idx_blob_ledger_cleanup')
+    .ifNotExists()
     .on('blob_ledger')
     .columns(['state', 'state_changed_at'])
     .execute()
   await db.schema
     .createIndex('idx_blob_ledger_object')
+    .ifNotExists()
     .on('blob_ledger')
     .column('object_id')
     .execute()
@@ -69,6 +73,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     from objects
     where blob_key is not null
     group by blob_key
+    on conflict (blob_key) do nothing
   `.execute(db)
 
   // A key still referenced by an object stays claimed/legacy_shared. Otherwise

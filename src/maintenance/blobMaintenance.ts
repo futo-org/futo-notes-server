@@ -6,9 +6,8 @@ export type BlobMaintenanceResult = Awaited<
 >
 
 export interface BlobMaintenanceOptions {
-  // Gates only the destructive half. Reconciliation always runs: it is a repair
-  // path, not garbage collection, and a blob uploaded before the ledger existed
-  // can never be claimed again unless it gets adopted into the ledger.
+  // Gates blob-byte/ledger garbage collection only. Reconciliation and the
+  // fixed Mutation-ID expiry policy always run.
   collectGarbage: boolean
 }
 
@@ -17,6 +16,7 @@ export async function runBlobMaintenanceOnce(
   options: BlobMaintenanceOptions = { collectGarbage: true },
 ): Promise<BlobMaintenanceResult> {
   const { reconciled } = await contents.reconcileStorage()
+  const mutationResultsDeleted = await contents.expireMutationResults()
   const result = {
     reconciled,
     ...(options.collectGarbage
@@ -25,8 +25,8 @@ export async function runBlobMaintenanceOnce(
         stagedDeleted: 0,
         retainedDeleted: 0,
         purgeableDeleted: 0,
-        mutationResultsDeleted: 0,
       }),
+    mutationResultsDeleted,
   }
   const deleted = result.stagedDeleted
     + result.retainedDeleted

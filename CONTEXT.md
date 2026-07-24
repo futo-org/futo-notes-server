@@ -43,7 +43,7 @@ A client-generated opaque identifier for one intended object mutation. Retries r
 _Avoid_: Operation key, idempotency key
 
 **Tombstone**:
-The retained object state produced by soft deletion at a specific object version and collection change. Repeated deletion returns the existing tombstone rather than creating another change.
+The retained object state produced by soft deletion at a specific object version and collection change.
 
 **Blob Lifetime**:
 The progression of a blob from current object content, through optional merge-ancestor retention, to eventual deletion.

@@ -78,6 +78,22 @@ function mutationResponse(
   }
 }
 
+function deleteMutationResponse(
+  c: AppContext,
+  result: ObjectMutationResult,
+): Response {
+  if (result.kind !== 'ok') return mutationResponse(c, result)
+  return c.json({
+    object: {
+      id: result.object.id,
+      version: result.object.version,
+      change_seq: result.object.change_seq,
+      deleted: result.object.deleted,
+    },
+    collectionVersion: result.collectionVersion,
+  })
+}
+
 export function createObjectsRoutes(
   contents: CollectionContents,
 ): Hono<{ Variables: AuthContext }> {
@@ -208,7 +224,7 @@ export function createObjectsRoutes(
       expectedVersion,
       mutationId: c.req.header('Mutation-Id'),
     })
-    return mutationResponse(c, result)
+    return deleteMutationResponse(c, result)
   })
 
   routes.post('/:cid/blob-objects', blobLimit, async (c) => {

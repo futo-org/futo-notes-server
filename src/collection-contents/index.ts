@@ -79,10 +79,13 @@ type StagedObjectMutationCommand =
   | (ObjectMutationCommandBase & UpdateObjectIntent & { stagedBlobKey: string })
   | DeleteObjectCommand
 
-export interface BlobCollectionResult {
+export interface BlobGarbageCollectionResult {
   stagedDeleted: number
   retainedDeleted: number
   purgeableDeleted: number
+}
+
+export interface BlobCollectionResult extends BlobGarbageCollectionResult {
   mutationResultsDeleted: number
 }
 
@@ -124,6 +127,17 @@ function decodeResult(value: Record<string, unknown>): ObjectMutationResult {
     }
   }
   return value as ObjectMutationResult
+}
+
+async function lockBlobKey(
+  trx: Transaction<Database>,
+  blobKey: string,
+): Promise<void> {
+  await sql`
+    select pg_advisory_xact_lock(
+      hashtextextended(${`blob:${blobKey}`}, 0)
+    )
+  `.execute(trx)
 }
 
 export class CollectionContents {
@@ -178,30 +192,34 @@ export class CollectionContents {
   }
 
   // The destructive half: everything here deletes storage bytes or rows.
-  async collectGarbage(): Promise<BlobCollectionResult> {
+  async collectGarbage(): Promise<BlobGarbageCollectionResult> {
     const stagedCutoff = new Date(this.now().getTime() - STAGED_BLOB_RETENTION_MS)
     const retainedCutoff = new Date(this.now().getTime() - RETAINED_BLOB_RETENTION_MS)
-    const mutationCutoff = new Date(this.now().getTime() - MUTATION_RESULT_RETENTION_MS)
     const stagedDeleted = await this.deleteEligibleBlobs('staged', stagedCutoff)
     const retainedDeleted = await this.deleteEligibleBlobs('retained', retainedCutoff)
     const purgeableDeleted = await this.deleteEligibleBlobs('purgeable', this.now())
-    const deletedMutationResults = await this.db
+    return { stagedDeleted, retainedDeleted, purgeableDeleted }
+  }
+
+  async expireMutationResults(): Promise<number> {
+    const mutationCutoff = new Date(this.now().getTime() - MUTATION_RESULT_RETENTION_MS)
+    const deleted = await this.db
       .deleteFrom('mutation_results')
       .where('created_at', '<=', mutationCutoff)
       .returning('mutation_id')
       .execute()
-    return {
-      stagedDeleted,
-      retainedDeleted,
-      purgeableDeleted,
-      mutationResultsDeleted: deletedMutationResults.length,
-    }
+    return deleted.length
   }
 
-  // Both halves, in order. Convenience for callers that want a full cycle.
+  // Full maintenance composition for tests and callers that want one cycle.
   async runMaintenance(): Promise<{ reconciled: number } & BlobCollectionResult> {
     const { reconciled } = await this.reconcileStorage()
-    return { reconciled, ...(await this.collectGarbage()) }
+    const mutationResultsDeleted = await this.expireMutationResults()
+    return {
+      reconciled,
+      ...(await this.collectGarbage()),
+      mutationResultsDeleted,
+    }
   }
 
   async deleteCollection(input: {
@@ -243,26 +261,85 @@ export class CollectionContents {
     userId: string
     blobKey: string
   }): Promise<{ kind: 'deleted' | 'missing' | 'in_use' }> {
-    return await this.db.transaction().execute(async (trx) => {
-      const blob = await trx
+    const prepared = await this.db.transaction().execute(async (trx) => {
+      await lockBlobKey(trx, input.blobKey)
+      let blob = await trx
         .selectFrom('blob_ledger')
         .where('blob_key', '=', input.blobKey)
         .where('user_id', '=', input.userId)
-        .select(['blob_key', 'state'])
+        .select(['blob_key', 'state', 'collection_id', 'object_id', 'object_version'])
         .forUpdate()
         .executeTakeFirst()
-      if (!blob) return { kind: 'missing' }
-      if (blob.state !== 'staged') return { kind: 'in_use' }
 
-      await this.store.delete(blob.blob_key)
-      await trx
-        .deleteFrom('blob_ledger')
-        .where('blob_key', '=', blob.blob_key)
-        .where('user_id', '=', input.userId)
-        .where('state', '=', 'staged')
-        .execute()
-      return { kind: 'deleted' }
+      if (!blob) {
+        const inserted = await trx
+          .insertInto('blob_ledger')
+          .values({
+            blob_key: input.blobKey,
+            user_id: input.userId,
+            size_bytes: '0',
+            state: 'purgeable',
+            collection_id: null,
+            object_id: null,
+            object_version: null,
+            created_at: this.now(),
+            state_changed_at: this.now(),
+          })
+          .onConflict((oc) => oc.column('blob_key').doNothing())
+          .returning('blob_key')
+          .executeTakeFirst()
+        if (inserted) return { kind: 'ready' } as const
+
+        // Reconciliation may have adopted the file between our first read and
+        // insert. The conflict wait has completed, so this statement sees and
+        // locks the committed row.
+        blob = await trx
+          .selectFrom('blob_ledger')
+          .where('blob_key', '=', input.blobKey)
+          .where('user_id', '=', input.userId)
+          .select(['blob_key', 'state', 'collection_id', 'object_id', 'object_version'])
+          .forUpdate()
+          .executeTakeFirst()
+      }
+
+      if (!blob) return { kind: 'missing' } as const
+      const directDeletionInProgress = blob.state === 'purgeable'
+        && blob.collection_id === null
+        && blob.object_id === null
+        && blob.object_version === null
+      if (blob.state !== 'staged' && !directDeletionInProgress) {
+        return { kind: 'in_use' } as const
+      }
+      if (blob.state === 'staged') {
+        await trx
+          .updateTable('blob_ledger')
+          .set({
+            state: 'purgeable',
+            state_changed_at: this.now(),
+          })
+          .where('blob_key', '=', input.blobKey)
+          .where('user_id', '=', input.userId)
+          .where('state', '=', 'staged')
+          .executeTakeFirstOrThrow()
+      }
+      return { kind: 'ready' } as const
     })
+
+    if (prepared.kind === 'missing' || prepared.kind === 'in_use') return prepared
+
+    // The purgeable marker prevents claims and reconciliation while storage I/O
+    // happens without holding a pooled DB connection or row lock.
+    await this.store.delete(input.blobKey)
+    await this.db
+      .deleteFrom('blob_ledger')
+      .where('blob_key', '=', input.blobKey)
+      .where('user_id', '=', input.userId)
+      .where('state', '=', 'purgeable')
+      .where('collection_id', 'is', null)
+      .where('object_id', 'is', null)
+      .where('object_version', 'is', null)
+      .execute()
+    return { kind: 'deleted' }
   }
 
   async mutateObject(
@@ -300,14 +377,24 @@ export class CollectionContents {
             'object_id',
             'requested_version',
             'result',
+            'created_at',
           ])
           .executeTakeFirst()
         if (existing) {
-          const matches = existing.kind === staged.kind
-            && existing.collection_id === staged.collectionId
-            && existing.object_id === intentObjectId(staged)
-            && existing.requested_version === intentVersion(staged)
-          return matches ? decodeResult(existing.result) : { kind: 'mutation_mismatch' }
+          const expiresAt = existing.created_at.getTime() + MUTATION_RESULT_RETENTION_MS
+          if (expiresAt <= this.now().getTime()) {
+            await trx
+              .deleteFrom('mutation_results')
+              .where('user_id', '=', staged.userId)
+              .where('mutation_id', '=', staged.mutationId)
+              .execute()
+          } else {
+            const matches = existing.kind === staged.kind
+              && existing.collection_id === staged.collectionId
+              && existing.object_id === intentObjectId(staged)
+              && existing.requested_version === intentVersion(staged)
+            return matches ? decodeResult(existing.result) : { kind: 'mutation_mismatch' }
+          }
         }
       }
 
@@ -378,15 +465,9 @@ export class CollectionContents {
         .forUpdate()
         .executeTakeFirst()
       if (!current) return { kind: 'not_found' }
-      if (current.deleted) {
-        return {
-          kind: 'ok',
-          object: current,
-          collectionVersion: Number(current.change_seq),
-        }
-      }
       if (
         command.expectedVersion !== undefined
+        && !current.deleted
         && Number(current.version) !== command.expectedVersion
       ) {
         return {
@@ -716,25 +797,35 @@ export class CollectionContents {
     let reconciled = 0
     for (const candidate of untracked) {
       if (!owners.has(candidate.userId)) continue
-      const data = await this.store.get(candidate.blobKey)
-      if (!data) continue
-      const now = this.now()
-      const inserted = await this.db
-        .insertInto('blob_ledger')
-        .values({
-          blob_key: candidate.blobKey,
-          user_id: candidate.userId,
-          size_bytes: String(data.byteLength),
-          state: 'staged',
-          collection_id: null,
-          object_id: null,
-          object_version: null,
-          created_at: now,
-          state_changed_at: now,
-        })
-        .onConflict((oc) => oc.column('blob_key').doNothing())
-        .returning('blob_key')
-        .executeTakeFirst()
+      const inserted = await this.db.transaction().execute(async (trx) => {
+        await lockBlobKey(trx, candidate.blobKey)
+        const known = await trx
+          .selectFrom('blob_ledger')
+          .where('blob_key', '=', candidate.blobKey)
+          .select('blob_key')
+          .executeTakeFirst()
+        if (known) return false
+
+        const data = await this.store.get(candidate.blobKey)
+        if (!data) return false
+        const now = this.now()
+        return !!(await trx
+          .insertInto('blob_ledger')
+          .values({
+            blob_key: candidate.blobKey,
+            user_id: candidate.userId,
+            size_bytes: String(data.byteLength),
+            state: 'staged',
+            collection_id: null,
+            object_id: null,
+            object_version: null,
+            created_at: now,
+            state_changed_at: now,
+          })
+          .onConflict((oc) => oc.column('blob_key').doNothing())
+          .returning('blob_key')
+          .executeTakeFirst())
+      })
       if (inserted) reconciled += 1
     }
     return reconciled

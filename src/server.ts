@@ -40,9 +40,9 @@ export async function runServer(app: Hono<{ Variables: AuthContext }>, label = '
   await waitForDb()
   await migrateToLatest()
 
-  // The loop always runs: storage reconciliation is a repair path that must not
-  // be switchable off, or a blob uploaded before the ledger existed becomes
-  // permanently unclaimable. BLOB_GC_ENABLED gates only the destructive half.
+  // The loop always runs: storage reconciliation and fixed Mutation-ID expiry
+  // must not be switchable off. BLOB_GC_ENABLED gates blob-byte/ledger garbage
+  // collection only.
   const intervalMs = env.BLOB_GC_INTERVAL_MS
     ? Number(env.BLOB_GC_INTERVAL_MS)
     : undefined

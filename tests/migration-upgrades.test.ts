@@ -606,6 +606,177 @@ test('Mutation ID upgrade preserves sync and blob-lifetime data', async () => {
   assert.equal(mutationCount.rows[0]?.count, '0')
 })
 
+test('migrations 010 and 011 repair already-shipped tables without changing data', async () => {
+  const userId = uuidv7()
+  seededUserIds.push(userId)
+  const collectionId = uuidv7()
+  const objectId = uuidv7()
+  const claimedBlobKey = `${userId}/${uuidv7()}`
+  const retainedBlobKey = `${userId}/${uuidv7()}`
+  const orphanBlobKey = `${userId}/${uuidv7()}`
+  const mutationId = uuidv7()
+
+  await db
+    .insertInto('users')
+    .values({
+      id: userId,
+      sub: `dev:already-010-011-${userId}@example.test`,
+      name: 'Already 010/011 Test',
+      email: `already-010-011-${userId}@example.test`,
+    })
+    .execute()
+  await db
+    .insertInto('collections')
+    .values({
+      id: collectionId,
+      user_id: userId,
+      current_version: '19',
+      key_salt: 'already-shipped-salt',
+      key_kdf: { algorithm: 'opaque-kdf', work: 99 },
+      encrypted_vault_key: 'already-shipped-encrypted-key',
+      key_updated_at: new Date('2025-04-01T00:00:00.000Z'),
+      created_at: new Date('2024-04-01T00:00:00.000Z'),
+    })
+    .execute()
+  await db
+    .insertInto('objects')
+    .values({
+      id: objectId,
+      collection_id: collectionId,
+      user_id: userId,
+      version: '7',
+      change_seq: '19',
+      deleted: true,
+      blob_key: claimedBlobKey,
+      size_bytes: '777',
+      created_at: new Date('2024-05-01T00:00:00.000Z'),
+      updated_at: new Date('2025-05-01T00:00:00.000Z'),
+    })
+    .execute()
+  await db
+    .insertInto('orphaned_blobs')
+    .values({
+      blob_key: orphanBlobKey,
+      user_id: userId,
+      size_bytes: '888',
+      orphaned_at: new Date('2025-06-01T00:00:00.000Z'),
+    })
+    .execute()
+  await db
+    .insertInto('blob_ledger')
+    .values([
+      {
+        blob_key: claimedBlobKey,
+        user_id: userId,
+        size_bytes: '777',
+        state: 'claimed',
+        collection_id: collectionId,
+        object_id: objectId,
+        object_version: '7',
+        created_at: new Date('2024-05-01T00:00:00.000Z'),
+        state_changed_at: new Date('2025-05-01T00:00:00.000Z'),
+      },
+      {
+        blob_key: retainedBlobKey,
+        user_id: userId,
+        size_bytes: '666',
+        state: 'retained',
+        collection_id: collectionId,
+        object_id: null,
+        object_version: null,
+        created_at: new Date('2024-03-01T00:00:00.000Z'),
+        state_changed_at: new Date('2025-03-01T00:00:00.000Z'),
+      },
+      {
+        blob_key: orphanBlobKey,
+        user_id: userId,
+        size_bytes: '888',
+        state: 'retained',
+        collection_id: null,
+        object_id: null,
+        object_version: null,
+        created_at: new Date('2025-06-01T00:00:00.000Z'),
+        state_changed_at: new Date('2025-06-01T00:00:00.000Z'),
+      },
+    ])
+    .execute()
+  await db
+    .insertInto('mutation_results')
+    .values({
+      user_id: userId,
+      mutation_id: mutationId,
+      kind: 'delete',
+      collection_id: collectionId,
+      object_id: objectId,
+      requested_version: '6',
+      result: { kind: 'not_found' },
+      created_at: new Date('2025-07-01T00:00:00.000Z'),
+    })
+    .execute()
+
+  const collectionsBefore = await db
+    .selectFrom('collections')
+    .where('user_id', '=', userId)
+    .selectAll()
+    .execute()
+  const objectsBefore = await db
+    .selectFrom('objects')
+    .where('user_id', '=', userId)
+    .selectAll()
+    .execute()
+  const ledgerBefore = await db
+    .selectFrom('blob_ledger')
+    .where('user_id', '=', userId)
+    .selectAll()
+    .orderBy('blob_key')
+    .execute()
+  const orphansBefore = await db
+    .selectFrom('orphaned_blobs')
+    .where('user_id', '=', userId)
+    .selectAll()
+    .execute()
+  const mutationsBefore = await db
+    .selectFrom('mutation_results')
+    .where('user_id', '=', userId)
+    .selectAll()
+    .execute()
+
+  // Development images may have created these tables before the corresponding
+  // migration records were retained. Replaying must repair bookkeeping without
+  // replacing any authoritative ledger or retry outcome.
+  await sql`
+    delete from kysely_migration
+    where name in (${migration010}, ${migration011})
+  `.execute(db)
+  await migrateToLatest()
+
+  assert.deepEqual(
+    await db.selectFrom('collections').where('user_id', '=', userId).selectAll().execute(),
+    collectionsBefore,
+  )
+  assert.deepEqual(
+    await db.selectFrom('objects').where('user_id', '=', userId).selectAll().execute(),
+    objectsBefore,
+  )
+  assert.deepEqual(
+    await db
+      .selectFrom('blob_ledger')
+      .where('user_id', '=', userId)
+      .selectAll()
+      .orderBy('blob_key')
+      .execute(),
+    ledgerBefore,
+  )
+  assert.deepEqual(
+    await db.selectFrom('orphaned_blobs').where('user_id', '=', userId).selectAll().execute(),
+    orphansBefore,
+  )
+  assert.deepEqual(
+    await db.selectFrom('mutation_results').where('user_id', '=', userId).selectAll().execute(),
+    mutationsBefore,
+  )
+})
+
 test('upgrade repairs databases that already recorded destructive migration 008', async () => {
   await restoreAlreadyApplied008State()
 

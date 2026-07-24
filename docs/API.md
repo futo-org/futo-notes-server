@@ -202,7 +202,8 @@ Apply the rows in order, then advance your cursor to the highest `change_seq` yo
 Send an opaque, client-generated `Mutation-Id` header on every create, update,
 or delete. Reuse that value only when retrying the same intended mutation.
 
-The first outcome is recorded for 30 days. A retry returns that exact outcome
+After syntax and field validation succeeds, the first mutation outcome is
+recorded for 30 days. A retry returns that exact outcome
 without advancing an object version or collection cursor again, or publishing
 another change notification—the retry body is ignored, and the object keeps
 the blob key from the original attempt. On the single-round-trip
@@ -220,15 +221,19 @@ collection, object, or requested version returns:
 with status `409`. IDs must contain 1–128 characters. They are currently
 optional so older clients continue to work, but clients should use them for
 every mutation—especially single-round-trip creates, whose success response may
-be lost after the server commits. A definitive 4xx is recorded just like a
-success, so reuse only replays that error—mint a **new** Mutation ID to
-actually retry, and reuse an ID only when you never received a response at all.
+be lost after the server commits. Definitive outcomes produced by the mutation
+coordinator, including `404` and `409`, are recorded just like success. Requests
+rejected before that point—invalid JSON or fields, empty or oversized bodies,
+or an invalid Mutation ID—are not recorded because they do not provide a valid
+mutation intent.
 
 ---
 
 ## Objects
 
-An object is a metadata row pointing at a blob. This is its canonical shape — every endpoint below that returns an `object` returns exactly this; their sketches just write `{ "object": { ... } }` and mean this:
+An object is a metadata row pointing at a blob. This is its canonical shape for
+reads, creates, and updates. Soft-delete responses retain their older compact
+projection `{ id, version, change_seq, deleted }` for wire compatibility.
 
 ```json
 {
@@ -312,8 +317,8 @@ DELETE $BASE/api/collections/:cid/objects/:oid[?version=N]
     → 404 not found
 ```
 Soft delete sets `deleted: true` and bumps the version so peers see the tombstone. Supplying `?version=N` makes the delete lose to a newer concurrent edit (edit-vs-delete race; edit wins). Omit it to delete unconditionally.
-
-Deleting an already-deleted object is idempotent: it returns the existing tombstone unchanged (same `version`, same `change_seq`) instead of bumping the version again, and does not advance the collection cursor. Its `collectionVersion` is therefore the tombstone's original `change_seq`, which may be **behind** the collection's current cursor—don't treat it as a new high-water mark (see the cursor rule in the end-to-end recipe below).
+Deleting an already-deleted object is another mutation: without a replayed
+Mutation ID it advances the tombstone version and collection cursor again.
 
 ### Single-round-trip variants
 
@@ -338,13 +343,15 @@ DELETE $BASE/api/blobs/:userId/:blobId    → 204 | 409 { "error": "blob is in u
 ```
 - Upload an empty body → `400`. A key you don't own → `404` on GET/DELETE (no existence leak).
 - Uploading stages a blob for a fixed 24 hours. Creating or updating an object
-  atomically claims it. DELETE is idempotent for staged or absent blobs, but
-  claimed and retained blobs are controlled by object/collection lifetime and
-  return `409`.
+  atomically claims it. DELETE is idempotent for staged or absent blobs,
+  including legacy files not yet adopted into the ledger. Any non-staged ledger
+  state—claimed, retained, purgeable, or legacy-shared—is controlled by
+  object/collection lifetime and returns `409`.
 - Replacing an object's blob retains the prior blob for 365 days so clients can
-  fetch a merge ancestor. Deleting a collection makes its blobs immediately
-  eligible for asynchronous removal. These lifetimes are fixed protocol policy,
-  not server configuration.
+  fetch a merge ancestor. Deleting a collection makes its claimed and retained
+  blobs immediately eligible for asynchronous removal; quarantined
+  legacy-shared blobs remain non-deletable. These lifetimes are fixed protocol
+  policy, not server configuration.
 
 ### Batch fetch
 
@@ -422,8 +429,8 @@ A minimal sync client, start to finish:
 4. If the response is lost, retry the same request with the same Mutation ID.
    On `200/201`: advance `cursor` to `collectionVersion` **only if** it equals
    `cursor + 1`—that's the only value proving no other device's change landed
-   in between, so anything else (a gap, or a repeat-delete's unchanged value)
-   means leave `cursor` alone and pull instead. On a version-conflict `409`:
+   in between, so a gap means leave `cursor` alone and pull instead. On a
+   version-conflict `409`:
    fetch `currentBlobKey`, merge, and use a new Mutation ID for the new intent
    at `currentVersion + 1`.
 

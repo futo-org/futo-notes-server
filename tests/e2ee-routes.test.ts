@@ -136,6 +136,21 @@ test('dev auth, collections, blobs, and global sync cursor round-trip', async ()
     { method: 'DELETE', headers: auth },
   ))
   assert.equal(deleteStaged.status, 204)
+
+  const deleteObject = await app.fetch(new Request(
+    `http://test.local/api/collections/${created.collection.id}/objects/${firstObject.object.id}?version=1`,
+    { method: 'DELETE', headers: auth },
+  ))
+  assert.equal(deleteObject.status, 200)
+  assert.deepEqual(await deleteObject.json(), {
+    object: {
+      id: firstObject.object.id,
+      version: '2',
+      change_seq: '3',
+      deleted: true,
+    },
+    collectionVersion: 3,
+  })
 })
 
 test('blob-objects single-round-trip create, update, and conflict', async () => {
@@ -250,6 +265,34 @@ test('Mutation-Id replays a one-call create without replacing its ciphertext', a
     method: 'POST',
     headers: auth,
   })
+
+  const validationMutationId = uuidv7()
+  const invalid = await app.fetch(new Request(
+    `http://test.local/api/collections/${created.collection.id}/blob-objects`,
+    {
+      method: 'POST',
+      headers: {
+        ...auth,
+        'Content-Type': 'application/octet-stream',
+        'Mutation-Id': validationMutationId,
+      },
+    },
+  ))
+  assert.equal(invalid.status, 400)
+  const corrected = await app.fetch(new Request(
+    `http://test.local/api/collections/${created.collection.id}/blob-objects`,
+    {
+      method: 'POST',
+      headers: {
+        ...auth,
+        'Content-Type': 'application/octet-stream',
+        'Mutation-Id': validationMutationId,
+      },
+      body: 'corrected-after-validation',
+    },
+  ))
+  assert.equal(corrected.status, 201)
+
   const mutationId = uuidv7()
   const firstResponse = await app.fetch(new Request(
     `http://test.local/api/collections/${created.collection.id}/blob-objects`,

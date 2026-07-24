@@ -316,7 +316,8 @@ The server's only role is rejecting stale pushes with `409` and returning the cu
 
 A separate upload is staged for a fixed 24 hours. An accepted create or update
 atomically claims it for exactly one object version; direct deletion is allowed
-only while staged. A claimed or retained blob returns `409 blob is in use`.
+only while staged. Any ledger state other than staged — claimed, retained,
+purgeable, or legacy-shared — returns `409 blob is in use`.
 
 A soft delete sets `deleted=true` and bumps the version, but its claimed blob
 stays fetchable because the tombstone may be a merge ancestor. Updating an

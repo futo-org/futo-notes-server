@@ -152,7 +152,7 @@ test('a version conflict leaves the blob staged and does not advance the collect
   assert.equal(retried.collectionVersion, 3)
 })
 
-test('repeating a soft delete returns the existing tombstone without another change', async () => {
+test('a new soft-delete request advances an existing tombstone again', async () => {
   const { userId, collectionId } = await createUserAndCollection()
   const staged = await contents.stageBlob({
     userId,
@@ -187,7 +187,13 @@ test('repeating a soft delete returns the existing tombstone without another cha
     objectId: created.object.id,
     expectedVersion: 1,
   })
-  assert.deepEqual(retried, deleted)
+  assert.equal(retried.kind, 'ok')
+  if (retried.kind !== 'ok') return
+  assert.equal(retried.object.deleted, true)
+  assert.equal(retried.object.version, '3')
+  assert.equal(retried.object.change_seq, '3')
+  assert.equal(retried.object.blob_key, deleted.object.blob_key)
+  assert.equal(retried.collectionVersion, 3)
 })
 
 test('a Mutation ID returns its original result and cannot identify a different intent', async () => {
@@ -348,7 +354,7 @@ test('an unclaimed staged blob is removed after the fixed 24-hour window', async
   )
 })
 
-test('direct deletion removes only staged blobs', async () => {
+test('direct deletion removes staged or untracked blobs, but not in-use blobs', async () => {
   const { userId, collectionId } = await createUserAndCollection()
   currentTime = new Date('2026-07-24T12:00:00.000Z')
   const unclaimed = await contents.stageBlob({
@@ -362,7 +368,7 @@ test('direct deletion removes only staged blobs', async () => {
   assert.equal(await store.get(unclaimed.blobKey), null)
   assert.deepEqual(
     await contents.deleteStagedBlob({ userId, blobKey: unclaimed.blobKey }),
-    { kind: 'missing' },
+    { kind: 'deleted' },
   )
 
   const claimed = await contents.stageBlob({
@@ -381,6 +387,49 @@ test('direct deletion removes only staged blobs', async () => {
     { kind: 'in_use' },
   )
   assert.ok(await store.get(claimed.blobKey))
+
+  // A file written before the authoritative ledger existed has no row yet.
+  // DELETE must still remove its bytes, and reconciliation must not resurrect it.
+  const untrackedKey = `${userId}/${uuidv7()}`
+  await store.put(untrackedKey, new TextEncoder().encode('pre-ledger'))
+  const reconciler = new CollectionContents({
+    db,
+    store,
+    notifier,
+    now: () => currentTime,
+  })
+  const deleteDuringReconciliation: BlobStore = {
+    put: (key, data) => store.put(key, data),
+    get: (key) => store.get(key),
+    list: (prefix) => store.list(prefix),
+    delete: async (key) => {
+      // Force reconciliation into the deletion window. A deletion marker must
+      // keep it from adopting the file just before its bytes disappear.
+      await reconciler.reconcileStorage()
+      await store.delete(key)
+    },
+  }
+  const deletingContents = new CollectionContents({
+    db,
+    store: deleteDuringReconciliation,
+    notifier,
+    now: () => currentTime,
+  })
+
+  assert.deepEqual(
+    await deletingContents.deleteStagedBlob({ userId, blobKey: untrackedKey }),
+    { kind: 'deleted' },
+  )
+  assert.equal(await store.get(untrackedKey), null)
+  await reconciler.reconcileStorage()
+  assert.equal(
+    await db
+      .selectFrom('blob_ledger')
+      .where('blob_key', '=', untrackedKey)
+      .select('blob_key')
+      .executeTakeFirst(),
+    undefined,
+  )
 })
 
 test('deleting a collection makes its claimed and retained blobs immediately purgeable', async () => {
@@ -493,7 +542,7 @@ test('a retained merge ancestor remains available for one year', async () => {
   assert.ok(await store.get(secondBlob.blobKey))
 })
 
-test('a Mutation ID result expires after the fixed 30-day window', async () => {
+test('a Mutation ID can identify a new intent at the fixed 30-day boundary', async () => {
   const { userId, collectionId } = await createUserAndCollection()
   currentTime = new Date('2026-07-24T12:00:00.000Z')
   const staged = await contents.stageBlob({
@@ -509,6 +558,7 @@ test('a Mutation ID result expires after the fixed 30-day window', async () => {
     mutationId,
   })
   assert.equal(created.kind, 'ok')
+  if (created.kind !== 'ok') return
 
   currentTime = new Date('2026-08-23T11:59:59.000Z')
   await contents.runMaintenance()
@@ -532,27 +582,22 @@ test('a Mutation ID result expires after the fixed 30-day window', async () => {
   )
 
   currentTime = new Date('2026-08-23T12:00:00.000Z')
-  const maintenance = await contents.runMaintenance()
-  assert.ok(maintenance.mutationResultsDeleted >= 1)
-  assert.equal(
-    await db
-      .selectFrom('mutation_results')
-      .where('user_id', '=', userId)
-      .where('mutation_id', '=', mutationId)
-      .select('mutation_id')
-      .executeTakeFirst(),
-    undefined,
-  )
-  assert.deepEqual(
-    await contents.mutateObject({
-      kind: 'create',
-      userId,
-      collectionId,
-      stagedBlobKey: staged.blobKey,
-      mutationId,
-    }),
-    { kind: 'blob_not_staged' },
-  )
+  // Expiry is part of Mutation-ID semantics, not a side effect of whether the
+  // maintenance loop happened to run at the boundary. A different intent must
+  // be free to reuse the expired identifier instead of seeing a stale mismatch.
+  const reused = await contents.mutateObject({
+    kind: 'delete',
+    userId,
+    collectionId,
+    objectId: created.object.id,
+    expectedVersion: 1,
+    mutationId,
+  })
+  assert.equal(reused.kind, 'ok')
+  if (reused.kind !== 'ok') return
+  assert.equal(reused.object.deleted, true)
+  assert.equal(reused.object.version, '2')
+  assert.equal(reused.collectionVersion, 2)
 })
 
 test('maintenance reconciles an untracked stored blob as freshly staged', async () => {
@@ -774,15 +819,36 @@ test('reconciliation still runs when garbage collection is disabled', async () =
     userId,
     data: new TextEncoder().encode('would-expire'),
   })
+  const mutationId = uuidv7()
+  const mutationBlob = await contents.stageBlob({
+    userId,
+    data: new TextEncoder().encode('expired-mutation-result'),
+  })
+  assert.equal((await contents.mutateObject({
+    kind: 'create',
+    userId,
+    collectionId,
+    stagedBlobKey: mutationBlob.blobKey,
+    mutationId,
+  })).kind, 'ok')
 
-  currentTime = new Date('2026-07-26T12:00:00.000Z')
+  currentTime = new Date('2026-08-24T12:00:00.000Z')
   const result = await runBlobMaintenanceOnce(contents, { collectGarbage: false })
   assert.ok(result.reconciled >= 1)
   assert.equal(result.stagedDeleted, 0)
   assert.equal(result.retainedDeleted, 0)
   assert.equal(result.purgeableDeleted, 0)
-  assert.equal(result.mutationResultsDeleted, 0)
+  assert.ok(result.mutationResultsDeleted >= 1)
   assert.ok(await store.get(expiring.blobKey))
+  assert.equal(
+    await db
+      .selectFrom('mutation_results')
+      .where('user_id', '=', userId)
+      .where('mutation_id', '=', mutationId)
+      .select('mutation_id')
+      .executeTakeFirst(),
+    undefined,
+  )
 
   // The pre-ledger blob is tracked now, so the legacy two-call API can still
   // claim it inside the fresh staging window reconciliation gave it.
