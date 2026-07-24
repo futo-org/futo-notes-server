@@ -61,7 +61,6 @@ export const env = {
   DB_SSL: dbSsl,
   // Shared SSL config for the pg pool and the LISTEN connection (see above).
   DB_SSL_OPTIONS: buildDbSslOptions(),
-  BLOB_RETENTION_DAYS: process.env.BLOB_RETENTION_DAYS,
   BLOB_GC_INTERVAL_MS: process.env.BLOB_GC_INTERVAL_MS,
   BLOB_GC_ENABLED: process.env.BLOB_GC_ENABLED !== 'false',
   // Max accepted request body size for blob uploads, in bytes (default 100 MiB).

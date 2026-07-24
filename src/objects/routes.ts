@@ -1,28 +1,20 @@
-import { Hono } from 'hono'
+import { Hono, type Context } from 'hono'
 import { bodyLimit } from 'hono/body-limit'
-import { sql, type Transaction } from 'kysely'
-import { uuidv7 } from 'uuidv7'
 import type { AuthContext } from '../auth/middleware.ts'
-import type { BlobStore } from '../blob/interface.ts'
+import type {
+  CollectionContents,
+  ObjectMutationResult,
+} from '../collection-contents/index.ts'
 import { db } from '../db/connection.ts'
-import type { Database } from '../db/types.ts'
 import { env } from '../env.ts'
-import { notifier } from '../sync/notifier.ts'
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const MAX_PULL_LIMIT = 1000
 
 const blobLimit = bodyLimit({
   maxSize: env.MAX_BLOB_BYTES,
   onError: (c) => c.json({ error: 'blob too large' }, 413),
 })
-
-export function createObjectsRoutes(
-  store: BlobStore,
-): Hono<{ Variables: AuthContext }> {
-  const objectsRoutes = new Hono<{ Variables: AuthContext }>()
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-
-// Upper bound for the opt-in ?limit on the objects pull endpoint.
-const MAX_PULL_LIMIT = 1000
 
 interface CreateBody {
   blob_key?: string
@@ -35,6 +27,8 @@ interface UpdateBody {
   size_bytes?: number
 }
 
+type AppContext = Context<{ Variables: AuthContext }>
+
 function isNonNegativeSafeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
 }
@@ -45,10 +39,7 @@ function isBlobKeyOwnedByUser(blobKey: unknown, userId: string): blobKey is stri
   return extra === undefined && keyUserId === userId && UUID_RE.test(blobId)
 }
 
-async function ensureCollectionOwned(
-  userId: string,
-  collectionId: string,
-): Promise<boolean> {
+async function ensureCollectionOwned(userId: string, collectionId: string): Promise<boolean> {
   const row = await db
     .selectFrom('collections')
     .where('id', '=', collectionId)
@@ -58,514 +49,222 @@ async function ensureCollectionOwned(
   return !!row
 }
 
-async function nextCollectionVersion(
-  trx: Transaction<Database>,
-  userId: string,
-  collectionId: string,
-): Promise<string> {
-  const row = await trx
-    .updateTable('collections')
-    .set({ current_version: sql`current_version + 1` })
-    .where('id', '=', collectionId)
-    .where('user_id', '=', userId)
-    .returning('current_version')
-    .executeTakeFirstOrThrow()
-  return row.current_version
-}
-
-// Record an old blob_key as orphaned at the moment it's replaced by a newer
-// version. The blob file itself stays in the blob store — the periodic GC
-// job (see src/maintenance/blobGc.ts) deletes rows (and their blobs) past the
-// retention window. Clients rely on these orphaned blobs to fetch the common
-// ancestor during three-way merge conflict resolution.
-async function recordOrphanedBlob(
-  trx: Transaction<Database>,
-  userId: string,
-  blobKey: string | null,
-  sizeBytes: string | null,
-): Promise<void> {
-  if (!blobKey) return
-  await trx
-    .insertInto('orphaned_blobs')
-    .values({
-      blob_key: blobKey,
-      user_id: userId,
-      size_bytes: sizeBytes ?? '0',
-    })
-    .onConflict((oc) => oc.column('blob_key').doNothing())
-    .execute()
-}
-
-// Pull sync + list.
-objectsRoutes.get('/:cid/objects', async (c) => {
-  const userId = c.var.user.id
-  const cid = c.req.param('cid')
-  if (!(await ensureCollectionOwned(userId, cid))) {
-    return c.json({ error: 'not found' }, 404)
-  }
-  const sinceVersion = Number(c.req.query('sinceVersion') ?? 0)
-  if (!isNonNegativeSafeInteger(sinceVersion)) {
-    return c.json({ error: 'invalid sinceVersion' }, 400)
-  }
-
-  // Opt-in keyset paging. Absent ?limit → unbounded, original response shape.
-  const limitRaw = c.req.query('limit')
-  let limit: number | null = null
-  if (limitRaw !== undefined) {
-    const parsed = Number(limitRaw)
-    if (!Number.isSafeInteger(parsed) || parsed < 1) {
-      return c.json({ error: 'invalid limit' }, 400)
-    }
-    limit = Math.min(parsed, MAX_PULL_LIMIT)
-  }
-
-  const query = db
-    .selectFrom('objects')
-    .where('collection_id', '=', cid)
-    .where('user_id', '=', userId)
-    .where('change_seq', '>', String(sinceVersion))
-    .select([
-      'id',
-      'collection_id',
-      'version',
-      'change_seq',
-      'deleted',
-      'blob_key',
-      'size_bytes',
-      'created_at',
-      'updated_at',
-    ])
-    .orderBy('change_seq', 'asc')
-
-  if (limit !== null) {
-    // Fetch one extra row to detect whether more remain past this page.
-    const rows = await query.limit(limit + 1).execute()
-    const hasMore = rows.length > limit
-    const page = hasMore ? rows.slice(0, limit) : rows
-    const nextCursor = page.length > 0 ? Number(page[page.length - 1].change_seq) : sinceVersion
-    return c.json({ objects: page, hasMore, nextCursor })
-  }
-
-  const rows = await query.execute()
-  return c.json({ objects: rows })
-})
-
-objectsRoutes.get('/:cid/objects/:oid', async (c) => {
-  const userId = c.var.user.id
-  const cid = c.req.param('cid')
-  const oid = c.req.param('oid')
-  const row = await db
-    .selectFrom('objects')
-    .where('id', '=', oid)
-    .where('collection_id', '=', cid)
-    .where('user_id', '=', userId)
-    .select([
-      'id',
-      'collection_id',
-      'version',
-      'change_seq',
-      'deleted',
-      'blob_key',
-      'size_bytes',
-      'created_at',
-      'updated_at',
-    ])
-    .executeTakeFirst()
-  if (!row) return c.json({ error: 'not found' }, 404)
-  return c.json({ object: row })
-})
-
-objectsRoutes.post('/:cid/objects', async (c) => {
-  const userId = c.var.user.id
-  const cid = c.req.param('cid')
-  if (!(await ensureCollectionOwned(userId, cid))) {
-    return c.json({ error: 'not found' }, 404)
-  }
-
-  let body: CreateBody
-  try {
-    body = await c.req.json()
-  } catch {
-    return c.json({ error: 'invalid json' }, 400)
-  }
-  const blob_key = body.blob_key
-  const size_bytes = body.size_bytes
-  if (!isBlobKeyOwnedByUser(blob_key, userId) || !isNonNegativeSafeInteger(size_bytes)) {
-    return c.json({ error: 'valid blob_key and size_bytes required' }, 400)
-  }
-
-  return await db.transaction().execute(async (trx) => {
-    const changeSeq = await nextCollectionVersion(trx, userId, cid)
-    const row = await trx
-      .insertInto('objects')
-      .values({
-        id: uuidv7(),
-        collection_id: cid,
-        user_id: userId,
-        blob_key,
-        size_bytes: String(size_bytes),
-        change_seq: changeSeq,
-      })
-      .returning([
-        'id',
-        'collection_id',
-        'version',
-        'change_seq',
-        'deleted',
-        'blob_key',
-        'size_bytes',
-        'created_at',
-        'updated_at',
-      ])
-      .executeTakeFirstOrThrow()
-
-    await notifier.publish(trx, { userId, collectionId: cid, currentVersion: Number(changeSeq) })
-    return c.json({ object: row, collectionVersion: Number(changeSeq) }, 201)
-  })
-})
-
-// Atomic version-check update. On stale version, returns 409 with current state.
-objectsRoutes.put('/:cid/objects/:oid', async (c) => {
-  const userId = c.var.user.id
-  const cid = c.req.param('cid')
-  const oid = c.req.param('oid')
-
-  let body: UpdateBody
-  try {
-    body = await c.req.json()
-  } catch {
-    return c.json({ error: 'invalid json' }, 400)
-  }
-  const version = body.version
-  const blob_key = body.blob_key
-  const size_bytes = body.size_bytes
-  if (
-    typeof version !== 'number' ||
-    !Number.isSafeInteger(version) ||
-    version < 1 ||
-    !isBlobKeyOwnedByUser(blob_key, userId) ||
-    !isNonNegativeSafeInteger(size_bytes)
-  ) {
-    return c.json({ error: 'valid version, blob_key, size_bytes required' }, 400)
-  }
-
-  return await db.transaction().execute(async (trx) => {
-    const current = await trx
-      .selectFrom('objects')
-      .where('id', '=', oid)
-      .where('collection_id', '=', cid)
-      .where('user_id', '=', userId)
-      .select(['version', 'blob_key', 'size_bytes'])
-      .executeTakeFirst()
-
-    if (!current) {
-      return c.json({ error: 'not found' }, 404)
-    }
-
-    if (Number(current.version) !== version - 1) {
+function mutationResponse(
+  c: AppContext,
+  result: ObjectMutationResult,
+  successStatus: 200 | 201 = 200,
+): Response {
+  switch (result.kind) {
+    case 'ok':
       return c.json(
-        {
-          error: 'version conflict',
-          currentVersion: Number(current.version),
-          currentBlobKey: current.blob_key,
-        },
-        409,
+        { object: result.object, collectionVersion: result.collectionVersion },
+        successStatus,
       )
-    }
-
-    const changeSeq = await nextCollectionVersion(trx, userId, cid)
-    const updated = await trx
-      .updateTable('objects')
-      .set({
-        version: String(version),
-        change_seq: changeSeq,
-        blob_key,
-        size_bytes: String(size_bytes),
-        updated_at: sql`now()`,
-      })
-      .where('id', '=', oid)
-      .where('collection_id', '=', cid)
-      .where('user_id', '=', userId)
-      .where('version', '=', String(version - 1))
-      .returning([
-        'id',
-        'collection_id',
-        'version',
-        'change_seq',
-        'deleted',
-        'blob_key',
-        'size_bytes',
-        'created_at',
-        'updated_at',
-      ])
-      .executeTakeFirst()
-
-    if (updated) {
-      await recordOrphanedBlob(trx, userId, current.blob_key, current.size_bytes)
-      await notifier.publish(trx, { userId, collectionId: cid, currentVersion: Number(changeSeq) })
-      return c.json({ object: updated, collectionVersion: Number(changeSeq) })
-    }
-
-    // A concurrent writer won between the read above and the guarded update.
-    const latest = await trx
-      .selectFrom('objects')
-      .where('id', '=', oid)
-      .where('collection_id', '=', cid)
-      .where('user_id', '=', userId)
-      .select(['version', 'blob_key'])
-      .executeTakeFirst()
-
-    if (!latest) {
+    case 'not_found':
       return c.json({ error: 'not found' }, 404)
-    }
-
-    return c.json(
-      {
-        error: 'version conflict',
-        currentVersion: Number(latest.version),
-        currentBlobKey: latest.blob_key,
-      },
-      409,
-    )
-  })
-})
-
-// Soft delete: set deleted=true, bump version so peers see the tombstone.
-// Optional ?version=N query rejects the delete with 409 if the caller's
-// expected version is stale — preventing a delete from clobbering a
-// newer edit from a peer (delete-vs-edit race; edit wins).
-objectsRoutes.delete('/:cid/objects/:oid', async (c) => {
-  const userId = c.var.user.id
-  const cid = c.req.param('cid')
-  const oid = c.req.param('oid')
-
-  const expectedRaw = c.req.query('version')
-  let expectedVersion: number | null = null
-  if (expectedRaw !== undefined) {
-    const parsed = Number(expectedRaw)
-    if (!Number.isSafeInteger(parsed) || parsed < 1) {
-      return c.json({ error: 'invalid version' }, 400)
-    }
-    expectedVersion = parsed
-  }
-
-  const result = await db
-    .transaction()
-    .execute(async (trx) => {
-      const existing = await trx
-        .selectFrom('objects')
-        .where('id', '=', oid)
-        .where('collection_id', '=', cid)
-        .where('user_id', '=', userId)
-        .select(['id', 'version', 'blob_key', 'deleted'])
-        .executeTakeFirst()
-      if (!existing) return { kind: 'missing' as const }
-
-      if (
-        expectedVersion !== null
-        && !existing.deleted
-        && Number(existing.version) !== expectedVersion
-      ) {
-        return {
-          kind: 'conflict' as const,
-          currentVersion: Number(existing.version),
-          currentBlobKey: existing.blob_key,
-        }
-      }
-
-      const changeSeq = await nextCollectionVersion(trx, userId, cid)
-      const updated = await trx
-        .updateTable('objects')
-        .set({
-          deleted: true,
-          version: sql`version + 1`,
-          change_seq: changeSeq,
-          updated_at: sql`now()`,
-        })
-        .where('id', '=', oid)
-        .where('collection_id', '=', cid)
-        .where('user_id', '=', userId)
-        .returning(['id', 'version', 'change_seq', 'deleted'])
-        .executeTakeFirst()
-      if (!updated) return { kind: 'missing' as const }
-      await notifier.publish(trx, { userId, collectionId: cid, currentVersion: Number(changeSeq) })
-      return { kind: 'ok' as const, row: updated }
-    })
-
-  if (result.kind === 'missing') return c.json({ error: 'not found' }, 404)
-  if (result.kind === 'conflict') {
-    return c.json(
-      {
+    case 'blob_not_staged':
+      return c.json({ error: 'blob is not staged' }, 409)
+    case 'conflict':
+      return c.json({
         error: 'version conflict',
         currentVersion: result.currentVersion,
         currentBlobKey: result.currentBlobKey,
-      },
-      409,
-    )
+      }, 409)
+    case 'invalid_mutation_id':
+      return c.json({ error: 'invalid Mutation-Id' }, 400)
+    case 'mutation_mismatch':
+      return c.json({ error: 'Mutation-Id reused for different intent' }, 409)
   }
-  return c.json({ object: result.row, collectionVersion: Number(result.row.change_seq) })
-})
+}
 
-  // Single-round-trip create: body is raw ciphertext. Server mints the
-  // blob key, writes the blob, then inserts the object row. Halves the
-  // RTT cost of the original POST /blobs + POST /objects pair, which
-  // matters a lot on first-sync of a large collection over high-latency
-  // networks. Semantically equivalent to those two calls — same response
-  // shape, same invariants.
-  objectsRoutes.post('/:cid/blob-objects', blobLimit, async (c) => {
+export function createObjectsRoutes(
+  contents: CollectionContents,
+): Hono<{ Variables: AuthContext }> {
+  const routes = new Hono<{ Variables: AuthContext }>()
+
+  routes.get('/:cid/objects', async (c) => {
     const userId = c.var.user.id
     const cid = c.req.param('cid')
     if (!(await ensureCollectionOwned(userId, cid))) {
       return c.json({ error: 'not found' }, 404)
     }
+    const sinceVersion = Number(c.req.query('sinceVersion') ?? 0)
+    if (!isNonNegativeSafeInteger(sinceVersion)) {
+      return c.json({ error: 'invalid sinceVersion' }, 400)
+    }
 
-    const body = await c.req.arrayBuffer()
+    const limitRaw = c.req.query('limit')
+    let limit: number | null = null
+    if (limitRaw !== undefined) {
+      const parsed = Number(limitRaw)
+      if (!Number.isSafeInteger(parsed) || parsed < 1) {
+        return c.json({ error: 'invalid limit' }, 400)
+      }
+      limit = Math.min(parsed, MAX_PULL_LIMIT)
+    }
+
+    const query = db
+      .selectFrom('objects')
+      .where('collection_id', '=', cid)
+      .where('user_id', '=', userId)
+      .where('change_seq', '>', String(sinceVersion))
+      .select([
+        'id',
+        'collection_id',
+        'version',
+        'change_seq',
+        'deleted',
+        'blob_key',
+        'size_bytes',
+        'created_at',
+        'updated_at',
+      ])
+      .orderBy('change_seq', 'asc')
+
+    if (limit !== null) {
+      const rows = await query.limit(limit + 1).execute()
+      const hasMore = rows.length > limit
+      const page = hasMore ? rows.slice(0, limit) : rows
+      const nextCursor = page.length > 0
+        ? Number(page[page.length - 1].change_seq)
+        : sinceVersion
+      return c.json({ objects: page, hasMore, nextCursor })
+    }
+
+    return c.json({ objects: await query.execute() })
+  })
+
+  routes.get('/:cid/objects/:oid', async (c) => {
+    const row = await db
+      .selectFrom('objects')
+      .where('id', '=', c.req.param('oid'))
+      .where('collection_id', '=', c.req.param('cid'))
+      .where('user_id', '=', c.var.user.id)
+      .select([
+        'id',
+        'collection_id',
+        'version',
+        'change_seq',
+        'deleted',
+        'blob_key',
+        'size_bytes',
+        'created_at',
+        'updated_at',
+      ])
+      .executeTakeFirst()
+    if (!row) return c.json({ error: 'not found' }, 404)
+    return c.json({ object: row })
+  })
+
+  routes.post('/:cid/objects', async (c) => {
+    const userId = c.var.user.id
+    let body: CreateBody
+    try {
+      body = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid json' }, 400)
+    }
+    if (
+      !isBlobKeyOwnedByUser(body.blob_key, userId)
+      || !isNonNegativeSafeInteger(body.size_bytes)
+    ) {
+      return c.json({ error: 'valid blob_key and size_bytes required' }, 400)
+    }
+    const result = await contents.mutateObject({
+      kind: 'create',
+      userId,
+      collectionId: c.req.param('cid'),
+      stagedBlobKey: body.blob_key,
+      mutationId: c.req.header('Mutation-Id'),
+    })
+    return mutationResponse(c, result, 201)
+  })
+
+  routes.put('/:cid/objects/:oid', async (c) => {
+    const userId = c.var.user.id
+    let body: UpdateBody
+    try {
+      body = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid json' }, 400)
+    }
+    if (
+      typeof body.version !== 'number'
+      || !Number.isSafeInteger(body.version)
+      || body.version < 1
+      || !isBlobKeyOwnedByUser(body.blob_key, userId)
+      || !isNonNegativeSafeInteger(body.size_bytes)
+    ) {
+      return c.json({ error: 'valid version, blob_key, size_bytes required' }, 400)
+    }
+    const result = await contents.mutateObject({
+      kind: 'update',
+      userId,
+      collectionId: c.req.param('cid'),
+      objectId: c.req.param('oid'),
+      version: body.version,
+      stagedBlobKey: body.blob_key,
+      mutationId: c.req.header('Mutation-Id'),
+    })
+    return mutationResponse(c, result)
+  })
+
+  routes.delete('/:cid/objects/:oid', async (c) => {
+    const expectedRaw = c.req.query('version')
+    let expectedVersion: number | undefined
+    if (expectedRaw !== undefined) {
+      const parsed = Number(expectedRaw)
+      if (!Number.isSafeInteger(parsed) || parsed < 1) {
+        return c.json({ error: 'invalid version' }, 400)
+      }
+      expectedVersion = parsed
+    }
+    const result = await contents.mutateObject({
+      kind: 'delete',
+      userId: c.var.user.id,
+      collectionId: c.req.param('cid'),
+      objectId: c.req.param('oid'),
+      expectedVersion,
+      mutationId: c.req.header('Mutation-Id'),
+    })
+    return mutationResponse(c, result)
+  })
+
+  routes.post('/:cid/blob-objects', blobLimit, async (c) => {
+    const body = new Uint8Array(await c.req.arrayBuffer())
     if (body.byteLength === 0) {
       return c.json({ error: 'empty body' }, 400)
     }
-
-    const blobKey = `${userId}/${uuidv7()}`
-    await store.put(blobKey, new Uint8Array(body))
-
-    return await db.transaction().execute(async (trx) => {
-      const changeSeq = await nextCollectionVersion(trx, userId, cid)
-      const row = await trx
-        .insertInto('objects')
-        .values({
-          id: uuidv7(),
-          collection_id: cid,
-          user_id: userId,
-          blob_key: blobKey,
-          size_bytes: String(body.byteLength),
-          change_seq: changeSeq,
-        })
-        .returning([
-          'id',
-          'collection_id',
-          'version',
-          'change_seq',
-          'deleted',
-          'blob_key',
-          'size_bytes',
-          'created_at',
-          'updated_at',
-        ])
-        .executeTakeFirstOrThrow()
-
-      await notifier.publish(trx, { userId, collectionId: cid, currentVersion: Number(changeSeq) })
-      return c.json({ object: row, collectionVersion: Number(changeSeq) }, 201)
+    const result = await contents.mutateObject({
+      kind: 'create',
+      userId: c.var.user.id,
+      collectionId: c.req.param('cid'),
+      blobData: body,
+      mutationId: c.req.header('Mutation-Id'),
     })
+    return mutationResponse(c, result, 201)
   })
 
-  // Single-round-trip update: body is raw ciphertext, ?version=N is the
-  // expected next version. Mirrors PUT /objects/:oid's version-check +
-  // conflict semantics exactly so the client's merge path is unchanged.
-  objectsRoutes.put('/:cid/blob-objects/:oid', blobLimit, async (c) => {
-    const userId = c.var.user.id
-    const cid = c.req.param('cid')
-    const oid = c.req.param('oid')
-
-    const versionRaw = c.req.query('version')
-    const version = Number(versionRaw)
+  routes.put('/:cid/blob-objects/:oid', blobLimit, async (c) => {
+    const version = Number(c.req.query('version'))
     if (!Number.isSafeInteger(version) || version < 1) {
       return c.json({ error: 'valid ?version query required' }, 400)
     }
-
-    const body = await c.req.arrayBuffer()
+    const body = new Uint8Array(await c.req.arrayBuffer())
     if (body.byteLength === 0) {
       return c.json({ error: 'empty body' }, 400)
     }
-
-    const blobKey = `${userId}/${uuidv7()}`
-    await store.put(blobKey, new Uint8Array(body))
-    const sizeBytes = body.byteLength
-
-    return await db.transaction().execute(async (trx) => {
-      const current = await trx
-        .selectFrom('objects')
-        .where('id', '=', oid)
-        .where('collection_id', '=', cid)
-        .where('user_id', '=', userId)
-        .select(['version', 'blob_key', 'size_bytes'])
-        .executeTakeFirst()
-
-      if (!current) {
-        // Our freshly-uploaded blob will never be referenced; orphan it
-        // so the retention GC can reclaim it.
-        await recordOrphanedBlob(trx, userId, blobKey, String(sizeBytes))
-        return c.json({ error: 'not found' }, 404)
-      }
-
-      if (Number(current.version) !== version - 1) {
-        await recordOrphanedBlob(trx, userId, blobKey, String(sizeBytes))
-        return c.json(
-          {
-            error: 'version conflict',
-            currentVersion: Number(current.version),
-            currentBlobKey: current.blob_key,
-          },
-          409,
-        )
-      }
-
-      const changeSeq = await nextCollectionVersion(trx, userId, cid)
-      const updated = await trx
-        .updateTable('objects')
-        .set({
-          version: String(version),
-          change_seq: changeSeq,
-          blob_key: blobKey,
-          size_bytes: String(sizeBytes),
-          updated_at: sql`now()`,
-        })
-        .where('id', '=', oid)
-        .where('collection_id', '=', cid)
-        .where('user_id', '=', userId)
-        .where('version', '=', String(version - 1))
-        .returning([
-          'id',
-          'collection_id',
-          'version',
-          'change_seq',
-          'deleted',
-          'blob_key',
-          'size_bytes',
-          'created_at',
-          'updated_at',
-        ])
-        .executeTakeFirst()
-
-      if (updated) {
-        await recordOrphanedBlob(trx, userId, current.blob_key, current.size_bytes)
-        await notifier.publish(trx, { userId, collectionId: cid, currentVersion: Number(changeSeq) })
-        return c.json({ object: updated, collectionVersion: Number(changeSeq) })
-      }
-
-      // Concurrent writer won the race; orphan our uploaded blob.
-      await recordOrphanedBlob(trx, userId, blobKey, String(sizeBytes))
-
-      const latest = await trx
-        .selectFrom('objects')
-        .where('id', '=', oid)
-        .where('collection_id', '=', cid)
-        .where('user_id', '=', userId)
-        .select(['version', 'blob_key'])
-        .executeTakeFirst()
-
-      if (!latest) {
-        return c.json({ error: 'not found' }, 404)
-      }
-
-      return c.json(
-        {
-          error: 'version conflict',
-          currentVersion: Number(latest.version),
-          currentBlobKey: latest.blob_key,
-        },
-        409,
-      )
+    const result = await contents.mutateObject({
+      kind: 'update',
+      userId: c.var.user.id,
+      collectionId: c.req.param('cid'),
+      objectId: c.req.param('oid'),
+      version,
+      blobData: body,
+      mutationId: c.req.header('Mutation-Id'),
     })
+    return mutationResponse(c, result)
   })
 
-  return objectsRoutes
+  return routes
 }

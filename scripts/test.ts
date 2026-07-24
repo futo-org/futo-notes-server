@@ -10,7 +10,16 @@ const groups = [
   {
     name: 'dev',
     env: { AUTH_MODE: 'dev' },
-    files: ['e2ee-routes', 'migration-upgrades', 'capability', 'sync-routes', 'isolation', 'blob-limit', 'blobs-batch'],
+    files: [
+      'collection-contents',
+      'e2ee-routes',
+      'migration-upgrades',
+      'capability',
+      'sync-routes',
+      'isolation',
+      'blob-limit',
+      'blobs-batch',
+    ],
   },
   {
     name: 'password',

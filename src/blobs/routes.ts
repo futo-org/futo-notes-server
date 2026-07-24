@@ -1,8 +1,8 @@
 import { Hono } from 'hono'
 import { bodyLimit } from 'hono/body-limit'
-import { uuidv7 } from 'uuidv7'
 import type { AuthContext } from '../auth/middleware.ts'
 import type { BlobStore } from '../blob/interface.ts'
+import type { CollectionContents } from '../collection-contents/index.ts'
 import { env } from '../env.ts'
 import { log } from '../logger.ts'
 
@@ -62,7 +62,10 @@ function encodeFrame(key: string, status: BatchStatus, blob: Uint8Array | null):
   return frame
 }
 
-export function createBlobRoutes(store: BlobStore): Hono<{ Variables: AuthContext }> {
+export function createBlobRoutes(
+  store: BlobStore,
+  contents: CollectionContents,
+): Hono<{ Variables: AuthContext }> {
   const app = new Hono<{ Variables: AuthContext }>()
 
   // Upload an opaque blob. Returns the storage key scoped to the authenticated user.
@@ -73,10 +76,11 @@ export function createBlobRoutes(store: BlobStore): Hono<{ Variables: AuthContex
       return c.json({ error: 'empty body' }, 400)
     }
 
-    const blobId = uuidv7()
-    const key = `${userId}/${blobId}`
-    await store.put(key, new Uint8Array(body))
-    return c.json({ key }, 201)
+    const staged = await contents.stageBlob({
+      userId,
+      data: new Uint8Array(body),
+    })
+    return c.json({ key: staged.blobKey }, 201)
   })
 
   // Batch download: body {keys: [...]}, response is a stream of binary
@@ -206,7 +210,10 @@ export function createBlobRoutes(store: BlobStore): Hono<{ Variables: AuthContex
     }
 
     const key = `${paramUserId}/${paramBlobId}`
-    await store.delete(key)
+    const result = await contents.deleteStagedBlob({ userId, blobKey: key })
+    if (result.kind === 'in_use') {
+      return c.json({ error: 'blob is in use' }, 409)
+    }
     return c.body(null, 204)
   })
 

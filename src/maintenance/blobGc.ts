@@ -1,83 +1,34 @@
-import { sql } from 'kysely'
-import type { BlobStore } from '../blob/interface.ts'
-import { db } from '../db/connection.ts'
-import { env } from '../env.ts'
+import type { CollectionContents } from '../collection-contents/index.ts'
 import { log } from '../logger.ts'
 
-// Orphaned blobs are retained for this many days so that a client performing
-// a three-way merge can still fetch the common ancestor by its blobKey. One
-// year is plenty — conflict resolution happens during sync, and any device
-// that hasn't synced in a year has bigger problems than a merge ancestor.
-const DEFAULT_RETENTION_DAYS = 365
-
-const BATCH_SIZE = 500
-
-export function getRetentionDays(): number {
-  const raw = Number(env.BLOB_RETENTION_DAYS)
-  if (!Number.isFinite(raw) || raw <= 0) return DEFAULT_RETENTION_DAYS
-  return raw
-}
+export type BlobMaintenanceResult = Awaited<
+  ReturnType<CollectionContents['runMaintenance']>
+>
 
 export async function runBlobGcOnce(
-  store: BlobStore,
-  retentionDays: number = getRetentionDays(),
-): Promise<{ deleted: number; bytes: number }> {
-  const cutoff = sql<Date>`now() - ${sql.lit(`${retentionDays} days`)}::interval`
-
-  let totalDeleted = 0
-  let totalBytes = 0
-
-  // Page through expired rows so one oversized run can't hold a big result
-  // set in memory or a long transaction open.
-  while (true) {
-    const batch = await db
-      .selectFrom('orphaned_blobs')
-      .where('orphaned_at', '<', cutoff)
-      .select(['blob_key', 'size_bytes'])
-      .limit(BATCH_SIZE)
-      .execute()
-
-    if (batch.length === 0) break
-
-    for (const row of batch) {
-      try {
-        await store.delete(row.blob_key)
-      } catch (err) {
-        log.warn('blob-gc: store.delete failed', {
-          blobKey: row.blob_key,
-          error: String(err),
-        })
-        // Leave the ledger row in place; we'll retry next cycle.
-        continue
-      }
-      await db
-        .deleteFrom('orphaned_blobs')
-        .where('blob_key', '=', row.blob_key)
-        .execute()
-      totalDeleted += 1
-      totalBytes += Number(row.size_bytes ?? 0)
-    }
-  }
-
-  if (totalDeleted > 0) {
-    log.info('blob-gc: deleted orphaned blobs', {
-      count: totalDeleted,
-      bytes: totalBytes,
-      retentionDays,
+  contents: CollectionContents,
+): Promise<BlobMaintenanceResult> {
+  const result = await contents.runMaintenance()
+  const deleted = result.stagedDeleted
+    + result.retainedDeleted
+    + result.purgeableDeleted
+  if (deleted > 0 || result.reconciled > 0 || result.mutationResultsDeleted > 0) {
+    log.info('blob-maintenance: cycle completed', {
+      ...result,
+      deleted,
     })
   }
-
-  return { deleted: totalDeleted, bytes: totalBytes }
+  return result
 }
 
 export interface BlobGcHandle {
   stop(): void
 }
 
-// Start a background loop that runs the GC once immediately (after a short
-// delay so it doesn't compete with server startup), then every intervalMs.
+// Start a background loop that runs once after startup, then periodically.
+// Lifetime policy belongs to CollectionContents; this file only schedules it.
 export function startBlobGc(
-  store: BlobStore,
+  contents: CollectionContents,
   intervalMs: number = 6 * 60 * 60 * 1000,
 ): BlobGcHandle {
   let stopped = false
@@ -86,9 +37,9 @@ export function startBlobGc(
   const tick = async () => {
     if (stopped) return
     try {
-      await runBlobGcOnce(store)
+      await runBlobGcOnce(contents)
     } catch (err) {
-      log.error('blob-gc: cycle failed', { error: String(err) })
+      log.error('blob-maintenance: cycle failed', { error: String(err) })
     }
     if (!stopped) timer = setTimeout(tick, intervalMs)
   }

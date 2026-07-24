@@ -33,7 +33,7 @@ Some errors also carry a stable machine-readable `code`:
 | `400` | Invalid JSON or failed validation |
 | `401` | Missing or invalid session |
 | `404` | Not found, or not owned by you (we return 404 rather than 403 to avoid leaking existence) |
-| `409` | Version conflict — you tried to write a stale version (see [The sync model](#the-sync-model)) |
+| `409` | Version conflict, Mutation ID intent mismatch, or direct deletion of an in-use blob |
 | `413` | Blob upload body exceeds the server's size limit (default 100 MiB) |
 
 **Auth.** Every `/api/*` route except the login endpoints requires a session. Present it either way:
@@ -55,11 +55,25 @@ Call this once when a user adds a server, to learn how to drive login. One clien
 GET $BASE/
 ```
 ```json
-{ "name": "futo-notes", "version": "0.4.1", "auth_mode": "password", "signup": "closed", "billing": false }
+{
+  "name": "futo-notes",
+  "version": "0.5.1",
+  "auth_mode": "password",
+  "signup": "closed",
+  "billing": false,
+  "mutation_ids": {
+    "supported": true,
+    "required": false,
+    "retention_days": 30
+  }
+}
 ```
 
 - `auth_mode` is `"dev"` or `"password"` (`"oidc"` is reserved for later). It tells you which login endpoint to use.
 - `signup` is `"closed"` in v1.
+- `mutation_ids` advertises retry-safe object mutations. They are supported but
+  optional for backward compatibility, and recorded outcomes are retained for a
+  fixed 30 days.
 
 Health check (no auth):
 ```
@@ -183,6 +197,26 @@ Apply the rows in order, then advance your cursor to the highest `change_seq` yo
 
 **Conflict resolution is entirely yours.** The server only rejects stale writes and hands back the current version + blob key. The expected client strategy (see DESIGN.md): fetch the server's blob, three-way merge against your common ancestor, and if that fails, save a conflict copy. The server sees only opaque blobs, so it could not merge even if it wanted to.
 
+### Retry safety with Mutation IDs
+
+Send an opaque, client-generated `Mutation-Id` header on every create, update,
+or delete. Reuse that value only when retrying the same intended mutation.
+
+The first outcome is recorded for 30 days. A retry returns that exact outcome
+without advancing an object version or collection cursor again, uploading
+another one-call ciphertext blob, or publishing another change notification.
+The retry body is ignored. Reusing the ID for a different mutation kind,
+collection, object, or requested version returns:
+
+```json
+{ "error": "Mutation-Id reused for different intent" }
+```
+
+with status `409`. IDs must contain 1–128 characters. They are currently
+optional so older clients continue to work, but clients should use them for
+every mutation—especially single-round-trip creates, whose success response may
+be lost after the server commits.
+
 ---
 
 ## Objects
@@ -221,7 +255,9 @@ POST $BASE/api/collections/:cid/objects
     → 201 { "object": { ... }, "collectionVersion": 1 }
     → 400 invalid blob_key/size_bytes | 404 collection not found
 ```
-`blob_key` must be a blob you own — i.e. `"<your-user-id>/<blob-uuid>"`, exactly the key returned by `POST /api/blobs`.
+`blob_key` must be your still-staged blob—i.e.
+`"<your-user-id>/<blob-uuid>"`, exactly the key returned by `POST /api/blobs`.
+A successful mutation claims it; a second claim returns `409`.
 
 ### Update (version-guarded)
 ```
@@ -261,10 +297,17 @@ Opaque encrypted bytes. Keys have the form `<user-id>/<blob-uuid>` and are alway
 ```
 POST   $BASE/api/blobs                    → 201 { "key": "<user-id>/<uuid>" }   // body: raw bytes
 GET    $BASE/api/blobs/:userId/:blobId    → 200 <raw bytes>  (application/octet-stream) | 404
-DELETE $BASE/api/blobs/:userId/:blobId    → 204                                  // idempotent
+DELETE $BASE/api/blobs/:userId/:blobId    → 204 | 409 { "error": "blob is in use" }
 ```
 - Upload an empty body → `400`. A key you don't own → `404` on GET/DELETE (no existence leak).
-- The blob lifecycle is independent of objects: uploading a blob doesn't create an object, and replacing an object's blob leaves the old blob to be reclaimed later by server-side GC (clients rely on old blobs being available for a window to fetch the common ancestor during three-way merge).
+- Uploading stages a blob for a fixed 24 hours. Creating or updating an object
+  atomically claims it. DELETE is idempotent for staged or absent blobs, but
+  claimed and retained blobs are controlled by object/collection lifetime and
+  return `409`.
+- Replacing an object's blob retains the prior blob for 365 days so clients can
+  fetch a merge ancestor. Deleting a collection makes its blobs immediately
+  eligible for asynchronous removal. These lifetimes are fixed protocol policy,
+  not server configuration.
 
 ### Batch fetch
 
@@ -336,9 +379,13 @@ A minimal sync client, start to finish:
 5. Full pull: `GET /api/collections/:id/objects?sinceVersion=0`. For each row, download its blob (`GET /api/blobs/:userId/:blobId`), decrypt, apply. Set `cursor` to the highest `change_seq`.
 
 **Saving a change**
-1. Encrypt locally. Upload the blob (`POST /api/blobs`) or use `POST/PUT .../blob-objects` to do it in one call.
-2. Create (`POST .../objects`) or update (`PUT .../objects/:oid` with `version = lastSeen + 1`).
-3. On `200/201`: advance `cursor` to `collectionVersion`. On `409`: fetch `currentBlobKey`, merge, retry with `currentVersion + 1`.
+1. Generate one Mutation ID for the intended change and encrypt locally.
+2. Upload the blob (`POST /api/blobs`) or use `POST/PUT .../blob-objects` to do it in one call.
+3. Create (`POST .../objects`) or update (`PUT .../objects/:oid` with `version = lastSeen + 1`), sending `Mutation-Id`.
+4. If the response is lost, retry the same request with the same Mutation ID.
+   On `200/201`: advance `cursor` to `collectionVersion`. On a version-conflict
+   `409`: fetch `currentBlobKey`, merge, and use a new Mutation ID for the new
+   intent at `currentVersion + 1`.
 
 **Staying in sync**
 1. Open `GET /api/sync/events`. On `ready` and on every `change`, pull `GET .../objects?sinceVersion=<cursor>` and apply.

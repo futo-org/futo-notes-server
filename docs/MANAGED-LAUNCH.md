@@ -57,7 +57,7 @@ tied to the user's plan.
 ### Need-soon, not day-one
 
 - **Account lifecycle:** no account-deletion endpoint (GDPR), no password reset.
-  Orphaned-blob GC and collection-cascade cleanup already exist, so the plumbing is
+  Authoritative blob-ledger maintenance and collection-cascade cleanup already exist, so the plumbing is
   there — just no user-facing account delete.
 - **Rate limiting / abuse controls:** the password-login path is rate-limited
   in-process (per-instance, in-memory; see `src/auth/rate-limit.ts`), which

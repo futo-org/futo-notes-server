@@ -2,6 +2,7 @@ import type { Hono } from 'hono'
 import type { AuthContext } from './auth/middleware.ts'
 import { hashPassword } from './auth/password.ts'
 import { FsBlobStore } from './blob/fs.ts'
+import { CollectionContents } from './collection-contents/index.ts'
 import { db, waitForDb } from './db/connection.ts'
 import { migrateToLatest } from './db/migrate.ts'
 import { env, validateEnv } from './env.ts'
@@ -44,7 +45,12 @@ export async function runServer(app: Hono<{ Variables: AuthContext }>, label = '
     const intervalMs = env.BLOB_GC_INTERVAL_MS
       ? Number(env.BLOB_GC_INTERVAL_MS)
       : undefined
-    blobGc = startBlobGc(new FsBlobStore(env.BLOB_DIR), intervalMs)
+    const contents = new CollectionContents({
+      db,
+      store: new FsBlobStore(env.BLOB_DIR),
+      notifier,
+    })
+    blobGc = startBlobGc(contents, intervalMs)
   }
 
   const sessionReaper: SessionReaperHandle = startSessionReaper()

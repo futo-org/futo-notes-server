@@ -116,6 +116,7 @@ src/
   server.ts     # shared lifecycle (runServer, CLI subcommands like `hash`)
   auth/         # session + password-mode login
   blob/         # blob storage abstraction (filesystem for now)
+  collection-contents/ # atomic object mutations + blob lifetime policy
   collections/  # collection API
   objects/      # per-object versioned sync API
   db/           # Kysely connection + migrations

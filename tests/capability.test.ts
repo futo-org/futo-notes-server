@@ -14,10 +14,20 @@ test('GET / returns capability JSON', async () => {
     auth_mode: string
     signup: string
     billing: boolean
+    mutation_ids: {
+      supported: boolean
+      required: boolean
+      retention_days: number
+    }
   }
   assert.equal(data.name, 'futo-notes')
   assert.match(data.version, /^\d+\.\d+\.\d+$/)
   assert.equal(data.auth_mode, 'dev')
   assert.equal(data.signup, 'closed')
   assert.equal(data.billing, false)
+  assert.deepEqual(data.mutation_ids, {
+    supported: true,
+    required: false,
+    retention_days: 30,
+  })
 })

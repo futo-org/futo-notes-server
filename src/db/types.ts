@@ -5,6 +5,8 @@ export interface Database {
   sessions: SessionsTable
   collections: CollectionsTable
   objects: ObjectsTable
+  blob_ledger: BlobLedgerTable
+  mutation_results: MutationResultsTable
   orphaned_blobs: OrphanedBlobsTable
   server_config: ServerConfigTable
 }
@@ -45,6 +47,36 @@ export interface ObjectsTable {
   size_bytes: string | null // bigint
   created_at: Generated<Date>
   updated_at: Generated<Date>
+}
+
+export type BlobLedgerState =
+  | 'staged'
+  | 'claimed'
+  | 'retained'
+  | 'purgeable'
+  | 'legacy_shared'
+
+export interface BlobLedgerTable {
+  blob_key: string
+  user_id: string
+  size_bytes: string
+  state: BlobLedgerState
+  collection_id: string | null
+  object_id: string | null
+  object_version: string | null
+  created_at: ColumnType<Date, Date | string | undefined, Date | string>
+  state_changed_at: ColumnType<Date, Date | string | undefined, Date | string>
+}
+
+export interface MutationResultsTable {
+  user_id: string
+  mutation_id: string
+  kind: 'create' | 'update' | 'delete'
+  collection_id: string
+  object_id: string | null
+  requested_version: string | null
+  result: Record<string, unknown>
+  created_at: ColumnType<Date, Date | string | undefined, Date | string>
 }
 
 export interface OrphanedBlobsTable {
