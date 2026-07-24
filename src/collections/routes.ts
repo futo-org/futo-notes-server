@@ -37,12 +37,37 @@ export function createCollectionsRoutes(
 
   collectionsRoutes.post('/', async (c) => {
     const userId = c.var.user.id
-    const created = await db
-      .insertInto('collections')
-      .values({ id: uuidv7(), user_id: userId })
-      .returning(['id', 'user_id', 'current_version', 'created_at'])
-      .executeTakeFirstOrThrow()
-    return c.json({ collection: created }, 201)
+    // One vault per account: claim it, or return the one already there.
+    // Enforced here rather than by a UNIQUE(user_id) constraint — see
+    // DESIGN.md §One vault per account for why, and for what lifting it takes.
+    const claimed = await db.transaction().execute(async (trx) => {
+      // Serialize concurrent creates for this account on its user row, so the
+      // check below cannot race another request's insert.
+      await trx
+        .selectFrom('users')
+        .where('id', '=', userId)
+        .select('id')
+        .forUpdate()
+        .executeTakeFirstOrThrow()
+      const existing = await trx
+        .selectFrom('collections')
+        .where('user_id', '=', userId)
+        .select(['id', 'user_id', 'current_version', 'created_at'])
+        // The earliest is the one the client's connect() picks. Same ordering as
+        // the list route below, tiebreak included, so the two never disagree
+        // about which vault is first.
+        .orderBy('created_at', 'asc')
+        .orderBy('id', 'asc')
+        .executeTakeFirst()
+      if (existing) return { created: false, collection: existing } as const
+      const collection = await trx
+        .insertInto('collections')
+        .values({ id: uuidv7(), user_id: userId })
+        .returning(['id', 'user_id', 'current_version', 'created_at'])
+        .executeTakeFirstOrThrow()
+      return { created: true, collection } as const
+    })
+    return c.json({ collection: claimed.collection }, claimed.created ? 201 : 200)
   })
 
   collectionsRoutes.get('/', async (c) => {
@@ -52,6 +77,7 @@ export function createCollectionsRoutes(
       .where('user_id', '=', userId)
       .select(['id', 'user_id', 'current_version', 'created_at'])
       .orderBy('created_at', 'asc')
+      .orderBy('id', 'asc')
       .execute()
     return c.json({ collections: rows })
   })

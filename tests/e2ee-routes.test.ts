@@ -393,39 +393,125 @@ test('deleting a collection removes its objects and leaves blobs for maintenance
   }
 })
 
-test('POST /collections creates independent collections for an account', async () => {
-  const email = `plural-collections-${Date.now()}-${Math.random().toString(16).slice(2)}@example.test`
+test('POST /collections is idempotent — one vault per account', async () => {
+  const email = `single-vault-${Date.now()}-${Math.random().toString(16).slice(2)}@example.test`
   const login = await json<{ token: string; user: { id: string } }>('/api/auth/dev/login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, name: 'Plural Collections' }),
+    body: JSON.stringify({ email, name: 'Single Vault' }),
   })
   const auth = { Authorization: `Bearer ${login.token}` }
 
-  const firstResponse = await app.fetch(new Request('http://test.local/api/collections', {
-    method: 'POST',
-    headers: auth,
-  }))
-  assert.equal(firstResponse.status, 201)
-  const first = await firstResponse.json() as { collection: { id: string } }
+  // Unconditional cleanup: leaked duplicate vaults break the legacy
+  // UNIQUE(user_id) that migration-upgrades simulates later in the run.
+  try {
+    const firstResponse = await app.fetch(new Request('http://test.local/api/collections', {
+      method: 'POST',
+      headers: auth,
+    }))
+    assert.equal(firstResponse.status, 201)
+    const first = await firstResponse.json() as { collection: { id: string } }
 
-  const secondResponse = await app.fetch(new Request('http://test.local/api/collections', {
-    method: 'POST',
-    headers: auth,
-  }))
-  assert.equal(secondResponse.status, 201)
-  const second = await secondResponse.json() as { collection: { id: string } }
-  assert.notEqual(second.collection.id, first.collection.id)
+    // A second create returns the SAME vault, not a fork. 200 rather than 201
+    // because nothing was created.
+    const secondResponse = await app.fetch(new Request('http://test.local/api/collections', {
+      method: 'POST',
+      headers: auth,
+    }))
+    assert.equal(secondResponse.status, 200)
+    const second = await secondResponse.json() as { collection: { id: string } }
+    assert.equal(second.collection.id, first.collection.id)
 
-  const list = await json<{ collections: Array<{ id: string }> }>('/api/collections', {
-    headers: auth,
+    const list = await json<{ collections: Array<{ id: string }> }>('/api/collections', {
+      headers: auth,
+    })
+    assert.deepEqual(list.collections.map((collection) => collection.id), [first.collection.id])
+  } finally {
+    await db.deleteFrom('users').where('id', '=', login.user.id).execute()
+  }
+})
+
+test('concurrent collection creates converge on one vault', async () => {
+  const email = `vault-race-${Date.now()}-${Math.random().toString(16).slice(2)}@example.test`
+  const login = await json<{ token: string; user: { id: string } }>('/api/auth/dev/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, name: 'Vault Race' }),
   })
-  assert.deepEqual(
-    list.collections.map((collection) => collection.id),
-    [first.collection.id, second.collection.id],
-  )
+  const auth = { Authorization: `Bearer ${login.token}` }
 
-  await db.deleteFrom('users').where('id', '=', login.user.id).execute()
+  // Two devices setting up sync at the same time must not each mint their own
+  // vault and then never see each other's notes.
+  //
+  // Unconditional cleanup: leaked duplicate vaults break the legacy
+  // UNIQUE(user_id) that migration-upgrades simulates later in the run.
+  try {
+    const responses = await Promise.all([
+      app.fetch(new Request('http://test.local/api/collections', { method: 'POST', headers: auth })),
+      app.fetch(new Request('http://test.local/api/collections', { method: 'POST', headers: auth })),
+    ])
+    const bodies = await Promise.all(responses.map((response) => response.json())) as Array<{
+      collection: { id: string }
+    }>
+    assert.equal(bodies[0].collection.id, bodies[1].collection.id)
+    assert.deepEqual(responses.map((response) => response.status).sort(), [200, 201])
+
+    const list = await json<{ collections: Array<{ id: string }> }>('/api/collections', {
+      headers: auth,
+    })
+    assert.equal(list.collections.length, 1)
+  } finally {
+    await db.deleteFrom('users').where('id', '=', login.user.id).execute()
+  }
+})
+
+test('an account that already holds several collections keeps all of them', async () => {
+  const email = `pre-split-${Date.now()}-${Math.random().toString(16).slice(2)}@example.test`
+  const login = await json<{ token: string; user: { id: string } }>('/api/auth/dev/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, name: 'Pre Split' }),
+  })
+  const auth = { Authorization: `Bearer ${login.token}` }
+
+  // A database that forked before the cap existed. The cap is applied going
+  // forward only — it must never delete or hide a vault the client may hold
+  // notes in. (Migration 008 once collapsed these; migration 009 undid that.)
+  //
+  // Unconditional cleanup: leaked duplicate vaults break the legacy
+  // UNIQUE(user_id) that migration-upgrades simulates later in the run.
+  try {
+    // Identical timestamps, so ordering falls to the id tiebreak — rows written
+    // in one transaction really do tie on the default `created_at` clock.
+    // Inserted in DESCENDING id order on purpose: without the tiebreak Postgres
+    // hands back physical order, which then contradicts the id order and makes
+    // POST and GET disagree about which vault is first.
+    const createdAt = new Date()
+    const [earliest, later] = [uuidv7(), uuidv7()].sort()
+    for (const id of [later, earliest]) {
+      await db
+        .insertInto('collections')
+        .values({ id, user_id: login.user.id, created_at: createdAt })
+        .execute()
+    }
+
+    const response = await app.fetch(new Request('http://test.local/api/collections', {
+      method: 'POST',
+      headers: auth,
+    }))
+    assert.equal(response.status, 200)
+    const body = await response.json() as { collection: { id: string } }
+    // The earliest is the one the client's connect() picks.
+    assert.equal(body.collection.id, earliest)
+
+    const list = await json<{ collections: Array<{ id: string }> }>('/api/collections', {
+      headers: auth,
+    })
+    // GET agrees with POST: same order, same first entry.
+    assert.deepEqual(list.collections.map((collection) => collection.id), [earliest, later])
+  } finally {
+    await db.deleteFrom('users').where('id', '=', login.user.id).execute()
+  }
 })
 
 test('PUT /collections/:id/key supports idempotent claims, conflicts, and guarded rotation', async () => {
