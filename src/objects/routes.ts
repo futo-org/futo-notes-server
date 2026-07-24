@@ -1,9 +1,10 @@
 import { Hono, type Context } from 'hono'
 import { bodyLimit } from 'hono/body-limit'
 import type { AuthContext } from '../auth/middleware.ts'
-import type {
-  CollectionContents,
-  ObjectMutationResult,
+import {
+  OBJECT_COLUMNS,
+  type CollectionContents,
+  type ObjectMutationResult,
 } from '../collection-contents/index.ts'
 import { db } from '../db/connection.ts'
 import { env } from '../env.ts'
@@ -108,17 +109,7 @@ export function createObjectsRoutes(
       .where('collection_id', '=', cid)
       .where('user_id', '=', userId)
       .where('change_seq', '>', String(sinceVersion))
-      .select([
-        'id',
-        'collection_id',
-        'version',
-        'change_seq',
-        'deleted',
-        'blob_key',
-        'size_bytes',
-        'created_at',
-        'updated_at',
-      ])
+      .select(OBJECT_COLUMNS)
       .orderBy('change_seq', 'asc')
 
     if (limit !== null) {
@@ -140,17 +131,7 @@ export function createObjectsRoutes(
       .where('id', '=', c.req.param('oid'))
       .where('collection_id', '=', c.req.param('cid'))
       .where('user_id', '=', c.var.user.id)
-      .select([
-        'id',
-        'collection_id',
-        'version',
-        'change_seq',
-        'deleted',
-        'blob_key',
-        'size_bytes',
-        'created_at',
-        'updated_at',
-      ])
+      .select(OBJECT_COLUMNS)
       .executeTakeFirst()
     if (!row) return c.json({ error: 'not found' }, 404)
     return c.json({ object: row })

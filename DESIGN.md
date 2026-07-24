@@ -185,7 +185,9 @@ True zero-knowledge — hiding even collection/object IDs and activity shape —
 
 ### Multi-tenant isolation
 
-Postgres is a single shared instance. All users' rows live in the same tables, separated by `user_id` / `collection_id` foreign keys. Every query must be scoped by the authenticated user's ID. A missing scope is a cross-tenant leak — testing and review should treat this as a top-priority invariant.
+Postgres is a single shared instance. All users' rows live in the same tables, separated by `user_id` / `collection_id` foreign keys. Every query serving an authenticated request must be scoped by the authenticated user's ID. A missing scope is a cross-tenant leak — testing and review should treat this as a top-priority invariant.
+
+**Exception: scheduled background maintenance.** The invariant above exists to stop cross-tenant leaks from reaching a *request* and to keep shard routing trivial; it applies without exception to anything serving an authenticated request. Background maintenance jobs have no auth context and are deliberately global instead: the session reaper (`src/maintenance/sessionReaper.ts`) deletes expired sessions by `expires_at` across all users, and blob ledger/storage reconciliation and the mutation-result sweep (`src/collection-contents/index.ts`) reclaim rows by `state`/`state_changed_at`/`created_at` across all users. These sweeps never return data to any user and select purely on timestamp and lifecycle state, never on tenant. This is a real cost, not a free pass — see §Statelessness & scaling for what it means at Stage 3.
 
 ## Data model
 
@@ -345,7 +347,7 @@ When shared collections land (§Sync model scope → Future direction), the inva
 
 Cheap now, expensive to retrofit. Every one of these is a prerequisite for the sharding story, and all of them survive the shared-collections extension:
 
-1. **Every query scoped by `user_id`** (by owner, post-sharing). No exceptions.
+1. **Every query serving an authenticated request scoped by `user_id`** (by owner, post-sharing). No exceptions. The sole carve-out is scheduled background maintenance (session reaping, blob ledger/storage reconciliation, mutation-result expiry — see §Multi-tenant isolation), which has no auth context and is deliberately global. At Stage 3 (sharded), that carve-out has a real cost: these sweepers can no longer assume one database and must iterate per shard instead.
 2. **No cross-user foreign keys in v1.** When shared collections land, the lone exception will be `collection_members`, keyed by collection → owner.
 3. **`user_id` present on every leaf row**, not just reachable via join. Makes shard routing trivial.
 4. **Stable, opaque, shard-neutral IDs** (UUIDv7 or similar). No auto-increment that assumes one DB.

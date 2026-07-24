@@ -228,15 +228,29 @@ actually retry, and reuse an ID only when you never received a response at all.
 
 ## Objects
 
-An object is a metadata row pointing at a blob. Shape:
+An object is a metadata row pointing at a blob. This is its canonical shape — every endpoint below that returns an `object` returns exactly this; their sketches just write `{ "object": { ... } }` and mean this:
+
 ```json
 {
-  "id": "...", "collection_id": "...",
-  "version": "3", "change_seq": "42", "deleted": false,
-  "blob_key": "user-id/blob-uuid", "size_bytes": "1024",
-  "created_at": "...", "updated_at": "..."
+  "id": "018f4b2a-6e9a-7c1a-9c3e-1a2b3c4d5e6f",
+  "collection_id": "018f4b29-4f5a-7b2c-8d1e-2f3a4b5c6d7e",
+  "version": "3",
+  "change_seq": "42",
+  "deleted": false,
+  "blob_key": "018f4b28-11aa-7d3e-9f0a-3c4d5e6f7a8b/018f4b2b-22bb-7e4f-8a1b-4d5e6f7a8b9c",
+  "size_bytes": "1024",
+  "created_at": "2026-01-15T09:30:00.000Z",
+  "updated_at": "2026-01-15T09:31:12.000Z"
 }
 ```
+
+- `id`, `collection_id` — UUID strings.
+- `version`, `change_seq`, `size_bytes` — JSON **strings**, not numbers, even though they're numeric. They're Postgres `bigint` columns serialized straight onto the wire as strings — that's the stable, intentional contract, not an accident awaiting a fix. Rely on it.
+- `deleted` — boolean.
+- `blob_key` — string, or `null`.
+- `created_at`, `updated_at` — ISO 8601 timestamp strings.
+
+**The trap:** `collectionVersion` (mutation responses), `currentVersion` (the 409 conflict body), and `nextCursor` (paged list responses) are server-computed and are JSON **numbers** — the opposite representation from the row fields above. So comparing `object.change_seq` straight against `nextCursor` or `collectionVersion` compares a string to a number and will never match; coerce one side (e.g. `Number(object.change_seq)`) before comparing. This is the same coercion the cursor rule in the [end-to-end recipe](#end-to-end-recipe)'s "Saving a change" step depends on, where `cursor + 1` is a numeric comparison against `collectionVersion`.
 
 ### List / pull
 ```

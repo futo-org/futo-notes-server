@@ -9,6 +9,7 @@ import type { BlobStore } from '../src/blob/interface.ts'
 import { CollectionContents } from '../src/collection-contents/index.ts'
 import { db, waitForDb } from '../src/db/connection.ts'
 import { migrateToLatest } from '../src/db/migrate.ts'
+import { runBlobMaintenanceOnce } from '../src/maintenance/blobMaintenance.ts'
 import { notifier } from '../src/sync/notifier.ts'
 
 let blobDir: string
@@ -670,4 +671,125 @@ test('maintenance retains its ledger entry and retries after a storage deletion 
     .where('blob_key', '=', staged.blobKey)
     .select('blob_key')
     .executeTakeFirst(), undefined)
+})
+
+test('a staged blob stops being claimable after 24 hours even when cleanup has not run', async () => {
+  const { userId, collectionId } = await createUserAndCollection()
+  currentTime = new Date('2026-07-24T12:00:00.000Z')
+  const insideWindow = await contents.stageBlob({
+    userId,
+    data: new TextEncoder().encode('inside-window'),
+  })
+  const outsideWindow = await contents.stageBlob({
+    userId,
+    data: new TextEncoder().encode('outside-window'),
+  })
+
+  currentTime = new Date('2026-07-25T11:59:59.000Z')
+  assert.equal((await contents.mutateObject({
+    kind: 'create',
+    userId,
+    collectionId,
+    stagedBlobKey: insideWindow.blobKey,
+  })).kind, 'ok')
+
+  // The window is enforced when claiming, not by whenever the sweeper happens to
+  // run: no maintenance has executed here, so the row and its bytes both still
+  // exist and the claim is refused anyway.
+  currentTime = new Date('2026-07-25T12:00:00.000Z')
+  assert.deepEqual(await contents.mutateObject({
+    kind: 'create',
+    userId,
+    collectionId,
+    stagedBlobKey: outsideWindow.blobKey,
+  }), { kind: 'blob_not_staged' })
+  assert.ok(await store.get(outsideWindow.blobKey))
+  assert.ok(await db
+    .selectFrom('blob_ledger')
+    .where('blob_key', '=', outsideWindow.blobKey)
+    .where('user_id', '=', userId)
+    .where('state', '=', 'staged')
+    .select('blob_key')
+    .executeTakeFirst())
+})
+
+test('staging survives a reconciliation pass landing mid-write', async () => {
+  const { userId, collectionId } = await createUserAndCollection()
+  currentTime = new Date('2026-07-24T12:00:00.000Z')
+  const reconciler = new CollectionContents({
+    db,
+    store,
+    notifier,
+    now: () => currentTime,
+  })
+  // Reconciliation used to be able to adopt the key in the gap between the
+  // storage write and the ledger insert, so the insert failed on the primary
+  // key and a valid upload became a 500.
+  const racingStore: BlobStore = {
+    put: async (key, data) => {
+      await store.put(key, data)
+      await reconciler.reconcileStorage()
+    },
+    get: (key) => store.get(key),
+    delete: (key) => store.delete(key),
+    list: (prefix) => store.list(prefix),
+  }
+  const racing = new CollectionContents({
+    db,
+    store: racingStore,
+    notifier,
+    now: () => currentTime,
+  })
+
+  const staged = await racing.stageBlob({
+    userId,
+    data: new TextEncoder().encode('racy-ciphertext'),
+  })
+  const row = await db
+    .selectFrom('blob_ledger')
+    .where('blob_key', '=', staged.blobKey)
+    .where('user_id', '=', userId)
+    .select(['state', 'size_bytes'])
+    .executeTakeFirstOrThrow()
+  assert.equal(row.state, 'staged')
+  assert.equal(row.size_bytes, String('racy-ciphertext'.length))
+
+  // Bookkeeping survived intact, so the blob is still claimable exactly once.
+  assert.equal((await racing.mutateObject({
+    kind: 'create',
+    userId,
+    collectionId,
+    stagedBlobKey: staged.blobKey,
+  })).kind, 'ok')
+})
+
+test('reconciliation still runs when garbage collection is disabled', async () => {
+  const { userId, collectionId } = await createUserAndCollection()
+  currentTime = new Date('2026-07-24T12:00:00.000Z')
+  // An untracked file, as left behind by an upload predating the ledger.
+  const untracked = `${userId}/${uuidv7()}`
+  await store.put(untracked, new TextEncoder().encode('pre-ledger-upload'))
+  // Plus a staged blob that destructive cleanup would be eligible to remove.
+  const expiring = await contents.stageBlob({
+    userId,
+    data: new TextEncoder().encode('would-expire'),
+  })
+
+  currentTime = new Date('2026-07-26T12:00:00.000Z')
+  const result = await runBlobMaintenanceOnce(contents, { collectGarbage: false })
+  assert.ok(result.reconciled >= 1)
+  assert.equal(result.stagedDeleted, 0)
+  assert.equal(result.retainedDeleted, 0)
+  assert.equal(result.purgeableDeleted, 0)
+  assert.equal(result.mutationResultsDeleted, 0)
+  assert.ok(await store.get(expiring.blobKey))
+
+  // The pre-ledger blob is tracked now, so the legacy two-call API can still
+  // claim it inside the fresh staging window reconciliation gave it.
+  assert.equal((await contents.mutateObject({
+    kind: 'create',
+    userId,
+    collectionId,
+    stagedBlobKey: untracked,
+  })).kind, 'ok')
 })

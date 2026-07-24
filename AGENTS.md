@@ -35,12 +35,12 @@ Copy `.env.example` → `.env`. `DATABASE_URL` is always required. Set `AUTH_MOD
 - `.ts` extensions in all import paths (`import { db } from './db/connection.ts'`)
 - UUIDs via `uuidv7()` — sortable, not `crypto.randomUUID()`
 - Kysely for all queries — no raw SQL except inside `sql` template tags
-- Bigints: stored as `string` in Postgres types, parsed to `Number` at the application boundary
+- Bigints: Postgres bigint columns are typed `string` in `src/db/types.ts` (the pg driver returns them as strings). Server-computed scalars in responses — `collectionVersion`, `currentVersion`, `nextCursor`, and similar cursors/versions the server derives — are converted to `Number`. Object row fields serialized straight from the database (`version`, `change_seq`, `size_bytes`) keep their string form on the wire; that's the shipped contract, not an oversight. Both forms coexist, so any new response field must pick one deliberately.
 - Error responses: `{ error: string }` with appropriate HTTP status
 
 ## Architecture invariants
 
-- **User-partitioned data.** Every query MUST include `user_id` from auth context. Never query across users.
+- **User-partitioned data.** Every query serving an authenticated request MUST include `user_id` from auth context. Never query across users. Exception: scheduled background maintenance (session reaping, blob ledger/storage reconciliation, mutation-result expiry) has no auth context and is deliberately global — it reclaims rows by timestamp/state, not by tenant, and returns no data to any user. See `src/db/AGENTS.md` and DESIGN.md §Statelessness & scaling for the scope of that carve-out.
 - **E2EE-agnostic.** Never inspect, parse, or validate blob contents.
 - **Conflict detection, client resolution.** Reject stale writes with 409 + current state. Never merge server-side.
 - **Soft deletes.** Objects get `deleted=true` + version bump. Never hard-delete object rows.

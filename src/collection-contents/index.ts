@@ -12,18 +12,22 @@ const MUTATION_RESULT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
 const MAINTENANCE_BATCH_SIZE = 500
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
-type ObjectRecord = Pick<
-  Selectable<ObjectsTable>,
-  | 'id'
-  | 'collection_id'
-  | 'version'
-  | 'change_seq'
-  | 'deleted'
-  | 'blob_key'
-  | 'size_bytes'
-  | 'created_at'
-  | 'updated_at'
->
+// The one projection for object rows. Every read and write path selects exactly
+// these columns, so the shape cannot drift between them — and this is the single
+// place a change to the wire representation of the bigint fields would land.
+export const OBJECT_COLUMNS = [
+  'id',
+  'collection_id',
+  'version',
+  'change_seq',
+  'deleted',
+  'blob_key',
+  'size_bytes',
+  'created_at',
+  'updated_at',
+] as const
+
+type ObjectRecord = Pick<Selectable<ObjectsTable>, (typeof OBJECT_COLUMNS)[number]>
 
 interface CollectionContentsDependencies {
   db: Kysely<Database>
@@ -74,6 +78,13 @@ type StagedObjectMutationCommand =
   | (ObjectMutationCommandBase & CreateObjectIntent & { stagedBlobKey: string })
   | (ObjectMutationCommandBase & UpdateObjectIntent & { stagedBlobKey: string })
   | DeleteObjectCommand
+
+export interface BlobCollectionResult {
+  stagedDeleted: number
+  retainedDeleted: number
+  purgeableDeleted: number
+  mutationResultsDeleted: number
+}
 
 export type ObjectMutationResult =
   | { kind: 'ok'; object: ObjectRecord; collectionVersion: number }
@@ -133,8 +144,13 @@ export class CollectionContents {
     data: Uint8Array
   }): Promise<{ blobKey: string; sizeBytes: number }> {
     const blobKey = `${input.userId}/${uuidv7()}`
-    await this.store.put(blobKey, input.data)
     const now = this.now()
+    // Record the ledger row BEFORE writing bytes. The reverse order leaves a
+    // window where the file exists untracked, and a reconciliation pass landing
+    // inside it adopts the key first, making this insert fail on the primary
+    // key and turning a valid upload into a 500. A row whose bytes never
+    // arrived is harmless by comparison: cleanup ignores a missing file and the
+    // row ages out on the staging window.
     await this.db
       .insertInto('blob_ledger')
       .values({
@@ -149,17 +165,20 @@ export class CollectionContents {
         state_changed_at: now,
       })
       .execute()
+    await this.store.put(blobKey, input.data)
     return { blobKey, sizeBytes: input.data.byteLength }
   }
 
-  async runMaintenance(): Promise<{
-    reconciled: number
-    stagedDeleted: number
-    retainedDeleted: number
-    purgeableDeleted: number
-    mutationResultsDeleted: number
-  }> {
-    const reconciled = await this.reconcileUntrackedBlobs()
+  // Repair, not collection: adopts untracked storage into the ledger and never
+  // deletes anything. Safe to run when destructive cleanup is switched off, and
+  // it must be — it is the only path by which a blob uploaded before the ledger
+  // existed becomes claimable again.
+  async reconcileStorage(): Promise<{ reconciled: number }> {
+    return { reconciled: await this.reconcileUntrackedBlobs() }
+  }
+
+  // The destructive half: everything here deletes storage bytes or rows.
+  async collectGarbage(): Promise<BlobCollectionResult> {
     const stagedCutoff = new Date(this.now().getTime() - STAGED_BLOB_RETENTION_MS)
     const retainedCutoff = new Date(this.now().getTime() - RETAINED_BLOB_RETENTION_MS)
     const mutationCutoff = new Date(this.now().getTime() - MUTATION_RESULT_RETENTION_MS)
@@ -172,12 +191,17 @@ export class CollectionContents {
       .returning('mutation_id')
       .execute()
     return {
-      reconciled,
       stagedDeleted,
       retainedDeleted,
       purgeableDeleted,
       mutationResultsDeleted: deletedMutationResults.length,
     }
+  }
+
+  // Both halves, in order. Convenience for callers that want a full cycle.
+  async runMaintenance(): Promise<{ reconciled: number } & BlobCollectionResult> {
+    const { reconciled } = await this.reconcileStorage()
+    return { reconciled, ...(await this.collectGarbage()) }
   }
 
   async deleteCollection(input: {
@@ -350,17 +374,7 @@ export class CollectionContents {
         .where('id', '=', command.objectId)
         .where('collection_id', '=', command.collectionId)
         .where('user_id', '=', command.userId)
-        .select([
-          'id',
-          'collection_id',
-          'version',
-          'change_seq',
-          'deleted',
-          'blob_key',
-          'size_bytes',
-          'created_at',
-          'updated_at',
-        ])
+        .select(OBJECT_COLUMNS)
         .forUpdate()
         .executeTakeFirst()
       if (!current) return { kind: 'not_found' }
@@ -400,17 +414,7 @@ export class CollectionContents {
         .where('id', '=', command.objectId)
         .where('collection_id', '=', command.collectionId)
         .where('user_id', '=', command.userId)
-        .returning([
-          'id',
-          'collection_id',
-          'version',
-          'change_seq',
-          'deleted',
-          'blob_key',
-          'size_bytes',
-          'created_at',
-          'updated_at',
-        ])
+        .returning(OBJECT_COLUMNS)
         .executeTakeFirstOrThrow()
 
       if (object.blob_key) {
@@ -475,17 +479,7 @@ export class CollectionContents {
         .where('id', '=', command.objectId)
         .where('collection_id', '=', command.collectionId)
         .where('user_id', '=', command.userId)
-        .returning([
-          'id',
-          'collection_id',
-          'version',
-          'change_seq',
-          'deleted',
-          'blob_key',
-          'size_bytes',
-          'created_at',
-          'updated_at',
-        ])
+        .returning(OBJECT_COLUMNS)
         .executeTakeFirstOrThrow()
 
       if (current.blob_key) {
@@ -550,17 +544,7 @@ export class CollectionContents {
         size_bytes: stagedBlob.size_bytes,
         change_seq: collectionRow.current_version,
       })
-      .returning([
-        'id',
-        'collection_id',
-        'version',
-        'change_seq',
-        'deleted',
-        'blob_key',
-        'size_bytes',
-        'created_at',
-        'updated_at',
-      ])
+      .returning(OBJECT_COLUMNS)
       .executeTakeFirstOrThrow()
 
     await trx
@@ -665,11 +649,17 @@ export class CollectionContents {
     trx: Transaction<Database>,
     command: { userId: string; stagedBlobKey: string },
   ): Promise<{ blob_key: string; size_bytes: string } | undefined> {
+    // Enforce the 24-hour claim window here rather than trusting the sweeper to
+    // have run — it may be hours late, or deletion may be disabled entirely.
+    // Cleanup deletes staged rows at `state_changed_at <= cutoff`, so claiming
+    // requires strictly newer: exactly one of the two ever applies to a row.
+    const cutoff = new Date(this.now().getTime() - STAGED_BLOB_RETENTION_MS)
     return await trx
       .selectFrom('blob_ledger')
       .where('blob_key', '=', command.stagedBlobKey)
       .where('user_id', '=', command.userId)
       .where('state', '=', 'staged')
+      .where('state_changed_at', '>', cutoff)
       .select(['blob_key', 'size_bytes'])
       .forUpdate()
       .executeTakeFirst()

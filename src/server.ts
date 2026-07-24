@@ -40,18 +40,21 @@ export async function runServer(app: Hono<{ Variables: AuthContext }>, label = '
   await waitForDb()
   await migrateToLatest()
 
-  let blobMaintenance: BlobMaintenanceHandle | null = null
-  if (env.BLOB_GC_ENABLED) {
-    const intervalMs = env.BLOB_GC_INTERVAL_MS
-      ? Number(env.BLOB_GC_INTERVAL_MS)
-      : undefined
-    const contents = new CollectionContents({
+  // The loop always runs: storage reconciliation is a repair path that must not
+  // be switchable off, or a blob uploaded before the ledger existed becomes
+  // permanently unclaimable. BLOB_GC_ENABLED gates only the destructive half.
+  const intervalMs = env.BLOB_GC_INTERVAL_MS
+    ? Number(env.BLOB_GC_INTERVAL_MS)
+    : undefined
+  const blobMaintenance: BlobMaintenanceHandle = startBlobMaintenance(
+    new CollectionContents({
       db,
       store: new FsBlobStore(env.BLOB_DIR),
       notifier,
-    })
-    blobMaintenance = startBlobMaintenance(contents, intervalMs)
-  }
+    }),
+    intervalMs,
+    { collectGarbage: env.BLOB_GC_ENABLED },
+  )
 
   const sessionReaper: SessionReaperHandle = startSessionReaper()
 
@@ -67,7 +70,7 @@ export async function runServer(app: Hono<{ Variables: AuthContext }>, label = '
       process.exit(1)
     }, 10000)
 
-    blobMaintenance?.stop()
+    blobMaintenance.stop()
     sessionReaper.stop()
     await server.stop(true)
     log.info('http server closed')
