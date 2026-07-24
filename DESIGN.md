@@ -32,6 +32,21 @@ Clients compose higher-level structures on top:
 
 This keeps the server reusable for any E2EE-sync client.
 
+### One vault per account (for now)
+
+An account holds one collection today. The client protocol is single-vault ("take
+the first collection or create one"), so letting an account hold several means two
+devices can each mint their own and never see each other's notes — a silent
+split-brain. `POST /api/collections` therefore claims the vault or returns the
+existing one, and concurrent creates converge on it.
+
+The cap is enforced in the route, deliberately **not** by a `UNIQUE(user_id)`
+constraint. Two reasons. Accounts that forked before the cap existed must keep every
+collection they have — a unique constraint cannot be added over them without deleting
+rows, which is exactly what migration 008 did and migration 009 had to undo. And the
+schema stays plural, so allowing several vaults per account later is a route change,
+not a migration. Nothing else in the data model assumes the cap.
+
 ## Sync model scope
 
 FUTO Notes v1 syncs **single-user data** across that user's devices. Every collection has exactly one owner. There is no server-mediated sharing, ACLs, or cross-user access in v1.
@@ -401,7 +416,7 @@ GET  /api/auth/oidc/callback                      → OIDC callback (deferred)
 
 ### Collections
 ```
-POST   /api/collections                           → create collection
+POST   /api/collections                           → create collection, or return the account's existing one
 GET    /api/collections                           → list user's collections
 GET    /api/collections/:id                       → get collection
 GET    /api/collections/:id/key                   → get encrypted vault key material

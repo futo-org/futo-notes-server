@@ -126,13 +126,22 @@ POST $BASE/api/auth/logout → 204                                          // d
 A **collection** is a container owned by one user. Every object lives in exactly one collection, and the collection carries the global sync cursor (`current_version`) plus the client's encrypted vault key material.
 
 ```
-POST   $BASE/api/collections          → 201 { "collection": { id, user_id, current_version, created_at } }   // no body
+POST   $BASE/api/collections          → 201 { "collection": { id, user_id, current_version, created_at } }   // no body; created
+                                      → 200 { "collection": { ... } }    // you already have a vault; this is it
 GET    $BASE/api/collections          → 200 { "collections": [ ... ] }   // oldest first
 GET    $BASE/api/collections/:id      → 200 { "collection": { ... } }  | 404
 DELETE $BASE/api/collections/:id      → 204 | 404                       // objects cascade; blobs are GC'd later
 ```
 
 A new collection starts at `current_version: "0"`.
+
+**One vault per account.** `POST` is idempotent: it creates your vault the first
+time (`201`) and hands back that same vault on every later call (`200`). Two devices
+setting up at once therefore converge instead of forking into vaults that never see
+each other's notes — the same convergence the key endpoint gives you. Read the id from
+the response rather than assuming a `201`. Accounts that already hold several
+collections from before this cap keep all of them, and `GET /api/collections` still
+lists them; `POST` returns the oldest, which is the one to sync against.
 
 ---
 
