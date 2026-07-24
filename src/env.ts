@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs'
 import type { ConnectionOptions } from 'node:tls'
+import { log } from './logger.ts'
 
 export const AUTH_MODES = ['dev', 'password'] as const
 export type AuthMode = (typeof AUTH_MODES)[number]
@@ -61,7 +62,6 @@ export const env = {
   DB_SSL: dbSsl,
   // Shared SSL config for the pg pool and the LISTEN connection (see above).
   DB_SSL_OPTIONS: buildDbSslOptions(),
-  BLOB_RETENTION_DAYS: process.env.BLOB_RETENTION_DAYS,
   BLOB_GC_INTERVAL_MS: process.env.BLOB_GC_INTERVAL_MS,
   BLOB_GC_ENABLED: process.env.BLOB_GC_ENABLED !== 'false',
   // Max accepted request body size for blob uploads, in bytes (default 100 MiB).
@@ -107,5 +107,8 @@ export function validateEnv(): void {
   }
   if (!Number.isFinite(env.AUTH_RATE_LIMIT_WINDOW_MS) || env.AUTH_RATE_LIMIT_WINDOW_MS < 1) {
     throw new Error('AUTH_RATE_LIMIT_WINDOW_MS must be a positive number of milliseconds')
+  }
+  if (process.env.BLOB_RETENTION_DAYS !== undefined) {
+    log.warn('BLOB_RETENTION_DAYS is ignored: retained merge-ancestor blob lifetime is fixed at 365 days by protocol policy')
   }
 }

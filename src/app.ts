@@ -8,11 +8,13 @@ import { authRateLimit } from './auth/rate-limit.ts'
 import { authRoutes } from './auth/routes.ts'
 import { FsBlobStore } from './blob/fs.ts'
 import { createBlobRoutes } from './blobs/routes.ts'
-import { collectionsRoutes } from './collections/routes.ts'
-import { pool } from './db/connection.ts'
+import { CollectionContents } from './collection-contents/index.ts'
+import { createCollectionsRoutes } from './collections/routes.ts'
+import { db, pool } from './db/connection.ts'
 import { env } from './env.ts'
 import { log } from './logger.ts'
 import { createObjectsRoutes } from './objects/routes.ts'
+import { notifier } from './sync/notifier.ts'
 import { syncRoutes } from './sync/routes.ts'
 
 const VERSION: string = pkg.version
@@ -35,7 +37,7 @@ export function buildApp(): Hono<{ Variables: AuthContext }> {
     return c.json({ error: 'internal server error' }, 500)
   })
 
-  app.use('*', cors({ origin: '*', allowHeaders: ['Content-Type', 'Authorization'], allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'] }))
+  app.use('*', cors({ origin: '*', allowHeaders: ['Content-Type', 'Authorization', 'Mutation-Id'], allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'] }))
 
   // Rate-limit password login before the (public) auth middleware or the route
   // handler run, so a flood can't brute-force credentials or amplify CPU. Only
@@ -51,6 +53,11 @@ export function buildApp(): Hono<{ Variables: AuthContext }> {
     auth_mode: env.AUTH_MODE,
     signup: 'closed',
     billing: false,
+    mutation_ids: {
+      supported: true,
+      required: false,
+      retention_days: 30,
+    },
   }))
 
   app.get('/health', async (c) => {
@@ -71,9 +78,10 @@ export function buildApp(): Hono<{ Variables: AuthContext }> {
     app.route('/api/auth/password', passwordRoutes)
   }
   const blobStore = new FsBlobStore(env.BLOB_DIR)
-  app.route('/api/collections', collectionsRoutes)
-  app.route('/api/collections', createObjectsRoutes(blobStore))
-  app.route('/api/blobs', createBlobRoutes(blobStore))
+  const contents = new CollectionContents({ db, store: blobStore, notifier })
+  app.route('/api/collections', createCollectionsRoutes(contents))
+  app.route('/api/collections', createObjectsRoutes(contents))
+  app.route('/api/blobs', createBlobRoutes(blobStore, contents))
   app.route('/api/sync', syncRoutes)
 
   return app

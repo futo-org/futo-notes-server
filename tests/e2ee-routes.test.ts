@@ -6,7 +6,6 @@ import { FsBlobStore } from '../src/blob/fs.ts'
 import { db, waitForDb } from '../src/db/connection.ts'
 import { migrateToLatest } from '../src/db/migrate.ts'
 import { env } from '../src/env.ts'
-import { runBlobGcOnce } from '../src/maintenance/blobGc.ts'
 
 const app = buildApp()
 
@@ -123,6 +122,35 @@ test('dev auth, collections, blobs, and global sync cursor round-trip', async ()
   }))
   assert.equal(downloaded.status, 200)
   assert.equal(await downloaded.text(), 'encrypted-two')
+
+  const deleteClaimed = await app.fetch(new Request(
+    `http://test.local/api/blobs/${blobTwo}`,
+    { method: 'DELETE', headers: auth },
+  ))
+  assert.equal(deleteClaimed.status, 409)
+  assert.deepEqual(await deleteClaimed.json(), { error: 'blob is in use' })
+
+  const stagedOnly = await uploadBlob(login.token, 'never-claimed')
+  const deleteStaged = await app.fetch(new Request(
+    `http://test.local/api/blobs/${stagedOnly}`,
+    { method: 'DELETE', headers: auth },
+  ))
+  assert.equal(deleteStaged.status, 204)
+
+  const deleteObject = await app.fetch(new Request(
+    `http://test.local/api/collections/${created.collection.id}/objects/${firstObject.object.id}?version=1`,
+    { method: 'DELETE', headers: auth },
+  ))
+  assert.equal(deleteObject.status, 200)
+  assert.deepEqual(await deleteObject.json(), {
+    object: {
+      id: firstObject.object.id,
+      version: '2',
+      change_seq: '3',
+      deleted: true,
+    },
+    collectionVersion: 3,
+  })
 })
 
 test('blob-objects single-round-trip create, update, and conflict', async () => {
@@ -225,7 +253,89 @@ test('blob-objects single-round-trip create, update, and conflict', async () => 
   assert.equal(missingVersionRes.status, 400)
 })
 
-test('deleting a collection orphans its objects blobs for GC', async () => {
+test('Mutation-Id replays a one-call create without replacing its ciphertext', async () => {
+  const email = `mutation-id-${Date.now()}-${Math.random().toString(16).slice(2)}@example.test`
+  const login = await json<{ token: string; user: { id: string } }>('/api/auth/dev/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, name: 'Mutation ID Test' }),
+  })
+  const auth = { Authorization: `Bearer ${login.token}` }
+  const created = await json<{ collection: { id: string } }>('/api/collections', {
+    method: 'POST',
+    headers: auth,
+  })
+
+  const validationMutationId = uuidv7()
+  const invalid = await app.fetch(new Request(
+    `http://test.local/api/collections/${created.collection.id}/blob-objects`,
+    {
+      method: 'POST',
+      headers: {
+        ...auth,
+        'Content-Type': 'application/octet-stream',
+        'Mutation-Id': validationMutationId,
+      },
+    },
+  ))
+  assert.equal(invalid.status, 400)
+  const corrected = await app.fetch(new Request(
+    `http://test.local/api/collections/${created.collection.id}/blob-objects`,
+    {
+      method: 'POST',
+      headers: {
+        ...auth,
+        'Content-Type': 'application/octet-stream',
+        'Mutation-Id': validationMutationId,
+      },
+      body: 'corrected-after-validation',
+    },
+  ))
+  assert.equal(corrected.status, 201)
+
+  const mutationId = uuidv7()
+  const firstResponse = await app.fetch(new Request(
+    `http://test.local/api/collections/${created.collection.id}/blob-objects`,
+    {
+      method: 'POST',
+      headers: {
+        ...auth,
+        'Content-Type': 'application/octet-stream',
+        'Mutation-Id': mutationId,
+      },
+      body: 'original-ciphertext',
+    },
+  ))
+  assert.equal(firstResponse.status, 201)
+  const first = await firstResponse.json() as {
+    object: { id: string; blob_key: string }
+    collectionVersion: number
+  }
+
+  const retryResponse = await app.fetch(new Request(
+    `http://test.local/api/collections/${created.collection.id}/blob-objects`,
+    {
+      method: 'POST',
+      headers: {
+        ...auth,
+        'Content-Type': 'application/octet-stream',
+        'Mutation-Id': mutationId,
+      },
+      body: 'different-retry-body',
+    },
+  ))
+  assert.equal(retryResponse.status, 201)
+  assert.deepEqual(await retryResponse.json(), first)
+
+  const blob = await app.fetch(new Request(
+    `http://test.local/api/blobs/${first.object.blob_key}`,
+    { headers: auth },
+  ))
+  assert.equal(blob.status, 200)
+  assert.equal(await blob.text(), 'original-ciphertext')
+})
+
+test('deleting a collection removes its objects and leaves blobs for maintenance', async () => {
   const email = `coll-del-${Date.now()}-${Math.random().toString(16).slice(2)}@example.test`
   const login = await json<{ token: string; user: { id: string } }>('/api/auth/dev/login', {
     method: 'POST',
@@ -266,15 +376,20 @@ test('deleting a collection orphans its objects blobs for GC', async () => {
   }))
   assert.equal(delRes.status, 204)
 
-  // Each blob now has an orphaned_blobs row scoped to this user.
+  const missingCollection = await app.fetch(new Request(
+    `http://test.local/api/collections/${cid}`,
+    { headers: auth },
+  ))
+  assert.equal(missingCollection.status, 404)
+
+  // The transaction only makes the blobs purgeable. Scheduled maintenance
+  // removes their bytes after the collection deletion commits.
   for (const blobKey of [objOne.object.blob_key, objTwo.object.blob_key]) {
-    const rows = await db
-      .selectFrom('orphaned_blobs')
-      .where('blob_key', '=', blobKey)
-      .selectAll()
-      .execute()
-    assert.equal(rows.length, 1)
-    assert.equal(rows[0].user_id, login.user.id)
+    const blob = await app.fetch(new Request(
+      `http://test.local/api/blobs/${blobKey}`,
+      { headers: auth },
+    ))
+    assert.equal(blob.status, 200)
   }
 })
 
@@ -439,9 +554,9 @@ test('concurrent different vault-key claims produce one winner and one conflict'
   assert.equal(loser.currentKey.encrypted_vault_key, winner.key.encrypted_vault_key)
 })
 
-test('orphaned blobs are retained and reclaimed after retention window', async () => {
+test('superseded blobs are retained and a stale raw update only stages its blob', async () => {
   const email = `orphan-${Date.now()}-${Math.random().toString(16).slice(2)}@example.test`
-  const login = await json<{ token: string }>('/api/auth/dev/login', {
+  const login = await json<{ token: string; user: { id: string } }>('/api/auth/dev/login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email, name: 'Orphan Test' }),
@@ -460,7 +575,7 @@ test('orphaned blobs are retained and reclaimed after retention window', async (
   ))
   const v1 = (await v1Res.json()) as { object: { id: string; blob_key: string } }
 
-  // Update → v2 — v1's blobKey becomes orphaned.
+  // Update → v2 — v1's blob becomes a retained merge ancestor.
   const v2Res = await app.fetch(new Request(
     `http://test.local/api/collections/${cid}/blob-objects/${v1.object.id}?version=2`,
     { method: 'PUT', headers: { ...auth, 'Content-Type': 'application/octet-stream' }, body: 'v2-body' },
@@ -476,43 +591,46 @@ test('orphaned blobs are retained and reclaimed after retention window', async (
   assert.equal(stillThere.status, 200)
   assert.equal(await stillThere.text(), 'v1-body')
 
-  // Ledger records the orphan.
-  const ledgerRows = await db
-    .selectFrom('orphaned_blobs')
-    .where('blob_key', '=', v1.object.blob_key)
-    .selectAll()
-    .execute()
-  assert.equal(ledgerRows.length, 1)
+  const store = new FsBlobStore(env.BLOB_DIR)
+  const filesBeforeStaleUpdate = new Set(await store.list(`${login.user.id}/`))
 
-  // Stale update leaks its own blob — it lands in orphaned_blobs too.
+  // Inline ciphertext is staged before the mutation transaction opens, so a
+  // rejected update leaves exactly one unclaimed staged blob. It is never
+  // bound to an object and expires on the normal 24-hour staging window.
   const staleRes = await app.fetch(new Request(
     `http://test.local/api/collections/${cid}/blob-objects/${v1.object.id}?version=2`,
     { method: 'PUT', headers: { ...auth, 'Content-Type': 'application/octet-stream' }, body: 'stale-body' },
   ))
   assert.equal(staleRes.status, 409)
-  const staleLeakCount = await db
-    .selectFrom('orphaned_blobs')
-    .where('user_id', '=', ledgerRows[0].user_id)
-    .select(({ fn }) => fn.count<number>('blob_key').as('count'))
+
+  const addedFiles = (await store.list(`${login.user.id}/`))
+    .filter((key) => !filesBeforeStaleUpdate.has(key))
+  assert.equal(addedFiles.length, 1)
+  const [addedFile] = addedFiles
+  assert.ok(addedFile)
+  const stagedRow = await db
+    .selectFrom('blob_ledger')
+    .where('blob_key', '=', addedFile)
+    .where('user_id', '=', login.user.id)
+    .select(['state', 'object_id'])
     .executeTakeFirstOrThrow()
-  assert.ok(Number(staleLeakCount.count) >= 2)
+  assert.equal(stagedRow.state, 'staged')
+  assert.equal(stagedRow.object_id, null)
 
-  // GC with a 0-day retention deletes everything orphaned so far. This is the
-  // one-shot GC runner the scheduled loop calls.
-  const store = new FsBlobStore(env.BLOB_DIR)
-  const before = await db.selectFrom('orphaned_blobs').selectAll().execute()
-  assert.ok(before.length >= 2)
-  const result = await runBlobGcOnce(store, 0)
-  assert.ok(result.deleted >= 2)
+  // The rejected update left the object pointing at v2's blob.
+  const unchanged = await json<{ object: { version: string; blob_key: string } }>(
+    `/api/collections/${cid}/objects/${v1.object.id}`,
+    { headers: auth },
+  )
+  assert.equal(unchanged.object.version, '2')
+  assert.equal(unchanged.object.blob_key, v2.object.blob_key)
 
-  // Blob is gone from storage.
-  const gone = await app.fetch(new Request(
+  // Both the retained ancestor and current blob remain fetchable.
+  const ancestor = await app.fetch(new Request(
     `http://test.local/api/blobs/${v1.object.blob_key}`,
     { headers: auth },
   ))
-  assert.equal(gone.status, 404)
-
-  // v2 — the live blob — is still reachable. GC must never touch live blobs.
+  assert.equal(ancestor.status, 200)
   const live = await app.fetch(new Request(
     `http://test.local/api/blobs/${v2.object.blob_key}`,
     { headers: auth },

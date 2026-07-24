@@ -33,7 +33,7 @@ Some errors also carry a stable machine-readable `code`:
 | `400` | Invalid JSON or failed validation |
 | `401` | Missing or invalid session |
 | `404` | Not found, or not owned by you (we return 404 rather than 403 to avoid leaking existence) |
-| `409` | Version conflict — you tried to write a stale version (see [The sync model](#the-sync-model)) |
+| `409` | Version conflict, Mutation ID intent mismatch, direct deletion of an in-use blob, or a `blob_key` that isn't currently staged |
 | `413` | Blob upload body exceeds the server's size limit (default 100 MiB) |
 
 **Auth.** Every `/api/*` route except the login endpoints requires a session. Present it either way:
@@ -43,7 +43,7 @@ Some errors also carry a stable machine-readable `code`:
 
 Sessions expire 7 days after issuance; authenticated activity does not extend that fixed lifetime. If a supplied cookie or bearer token has expired or is otherwise invalid, the server returns `401`, a `WWW-Authenticate: Bearer … error="invalid_token"` challenge, and `{ "error": "session expired or invalid", "code": "invalid_session" }`. A client that securely retained its login material should log in again, receive a new session token, retry the request once, and preserve its local sync cursor/object map; session expiry is not a vault reset.
 
-**Value encoding — read this.** Postgres `bigint` columns are serialized as **strings** in responses. So `version`, `change_seq`, `size_bytes`, and `current_version` come back as strings (`"3"`), but you **send** numeric fields (`version`, `size_bytes`) as JSON **numbers** (`3`). The one exception: the `collectionVersion` field in mutation responses is a number, not a string. Parse defensively.
+**Value encoding — read this.** Postgres `bigint` columns come back as **strings** in responses: `version`, `change_seq`, `size_bytes`, `current_version`. Scalars the server computes come back as **numbers**: `collectionVersion`, `currentVersion`, `nextCursor`. Requests run the other way round — you *send* `version` and `size_bytes` as JSON numbers (`3`). Parse defensively, and see [the object shape](#objects) for the field-by-field breakdown and the string-vs-number comparison trap this sets up.
 
 ---
 
@@ -55,11 +55,25 @@ Call this once when a user adds a server, to learn how to drive login. One clien
 GET $BASE/
 ```
 ```json
-{ "name": "futo-notes", "version": "0.4.1", "auth_mode": "password", "signup": "closed", "billing": false }
+{
+  "name": "futo-notes",
+  "version": "0.6.0",
+  "auth_mode": "password",
+  "signup": "closed",
+  "billing": false,
+  "mutation_ids": {
+    "supported": true,
+    "required": false,
+    "retention_days": 30
+  }
+}
 ```
 
 - `auth_mode` is `"dev"` or `"password"` (`"oidc"` is reserved for later). It tells you which login endpoint to use.
 - `signup` is `"closed"` in v1.
+- `mutation_ids` advertises retry-safe object mutations. They are supported but
+  optional for backward compatibility, and recorded outcomes are retained for a
+  fixed 30 days.
 
 Health check (no auth):
 ```
@@ -183,19 +197,66 @@ Apply the rows in order, then advance your cursor to the highest `change_seq` yo
 
 **Conflict resolution is entirely yours.** The server only rejects stale writes and hands back the current version + blob key. The expected client strategy (see DESIGN.md): fetch the server's blob, three-way merge against your common ancestor, and if that fails, save a conflict copy. The server sees only opaque blobs, so it could not merge even if it wanted to.
 
+### Retry safety with Mutation IDs
+
+Send an opaque, client-generated `Mutation-Id` header on every create, update,
+or delete. Reuse that value only when retrying the same intended mutation.
+
+After syntax and field validation succeeds, the first mutation outcome is
+recorded for 30 days. A retry returns that exact outcome
+without advancing an object version or collection cursor again, or publishing
+another change notification—the retry body is ignored, and the object keeps
+the blob key from the original attempt. On the single-round-trip
+`blob-objects` routes, staging happens before the Mutation ID check runs, so a
+retry still stages its ciphertext as a new blob; that blob is just never
+claimed, and expires automatically on the normal 24h staging window—so a
+one-call retry isn't entirely free, but it can't create a second object or
+change what the client observes. Reusing the ID for a different mutation kind,
+collection, object, or requested version returns:
+
+```json
+{ "error": "Mutation-Id reused for different intent" }
+```
+
+with status `409`. IDs must contain 1–128 characters. They are currently
+optional so older clients continue to work, but clients should use them for
+every mutation—especially single-round-trip creates, whose success response may
+be lost after the server commits. Definitive outcomes produced by the mutation
+coordinator, including `404` and `409`, are recorded just like success. Requests
+rejected before that point—invalid JSON or fields, empty or oversized bodies,
+or an invalid Mutation ID—are not recorded because they do not provide a valid
+mutation intent.
+
 ---
 
 ## Objects
 
-An object is a metadata row pointing at a blob. Shape:
+An object is a metadata row pointing at a blob. This is its canonical shape for
+reads, creates, and updates. Soft-delete responses retain their older compact
+projection `{ id, version, change_seq, deleted }` for wire compatibility.
+
 ```json
 {
-  "id": "...", "collection_id": "...",
-  "version": "3", "change_seq": "42", "deleted": false,
-  "blob_key": "user-id/blob-uuid", "size_bytes": "1024",
-  "created_at": "...", "updated_at": "..."
+  "id": "018f4b2a-6e9a-7c1a-9c3e-1a2b3c4d5e6f",
+  "collection_id": "018f4b29-4f5a-7b2c-8d1e-2f3a4b5c6d7e",
+  "version": "3",
+  "change_seq": "42",
+  "deleted": false,
+  "blob_key": "018f4b28-11aa-7d3e-9f0a-3c4d5e6f7a8b/018f4b2b-22bb-7e4f-8a1b-4d5e6f7a8b9c",
+  "size_bytes": "1024",
+  "created_at": "2026-01-15T09:30:00.000Z",
+  "updated_at": "2026-01-15T09:31:12.000Z"
 }
 ```
+
+- `id`, `collection_id` — UUID strings.
+- `version`, `change_seq` — JSON **strings**, not numbers, even though they're numeric. They're Postgres `bigint` columns serialized straight onto the wire as strings — that's the stable, intentional contract, not an accident awaiting a fix. Rely on it.
+- `deleted` — boolean.
+- `blob_key` — string, or `null`.
+- `size_bytes` — JSON string (same `bigint`-as-string rule), or `null`. The column is nullable, so treat `null` as unknown size rather than assuming a string is always there. Every write path the server offers today populates it.
+- `created_at`, `updated_at` — ISO 8601 timestamp strings.
+
+**The trap:** `collectionVersion` (mutation responses), `currentVersion` (the 409 conflict body), and `nextCursor` (paged list responses) are server-computed and are JSON **numbers** — the opposite representation from the row fields above. So comparing `object.change_seq` straight against `nextCursor` or `collectionVersion` compares a string to a number and will never match; coerce one side (e.g. `Number(object.change_seq)`) before comparing. This is the same coercion the cursor rule in the [end-to-end recipe](#end-to-end-recipe)'s "Saving a change" step depends on, where `cursor + 1` is a numeric comparison against `collectionVersion`.
 
 ### List / pull
 ```
@@ -220,8 +281,16 @@ POST $BASE/api/collections/:cid/objects
 { "blob_key": "<your-user-id>/<uuid>", "size_bytes": 1024 }
     → 201 { "object": { ... }, "collectionVersion": 1 }
     → 400 invalid blob_key/size_bytes | 404 collection not found
+    → 409 { "error": "blob is not staged" }
 ```
-`blob_key` must be a blob you own — i.e. `"<your-user-id>/<blob-uuid>"`, exactly the key returned by `POST /api/blobs`.
+`blob_key` must be your still-staged blob—i.e.
+`"<your-user-id>/<blob-uuid>"`, exactly the key returned by `POST /api/blobs`.
+A successful mutation claims it; reusing a key that's already claimed (by an
+earlier mutation) or whose 24h staging window expired returns the `409` above.
+Re-upload the ciphertext to get a fresh staged key and retry under a **new**
+Mutation ID. `size_bytes` is still required for validation, but the value you
+send is no longer stored—the response's `object.size_bytes` reflects the
+actual byte length the server measured when the blob was staged.
 
 ### Update (version-guarded)
 ```
@@ -229,9 +298,16 @@ PUT $BASE/api/collections/:cid/objects/:oid
 { "version": 4, "blob_key": "<your-user-id>/<uuid>", "size_bytes": 2048 }
     → 200 { "object": { ... }, "collectionVersion": 7 }
     → 409 { "error": "version conflict", "currentVersion", "currentBlobKey" }
+    → 409 { "error": "blob is not staged" }
     → 404 object not found | 400 invalid body
 ```
-`version` must equal the object's current version + 1.
+`version` must equal the object's current version + 1. `blob_key` must still be
+staged—an already-claimed key (by an earlier mutation) or one whose 24h
+staging window expired returns the `blob is not staged` `409` above. Re-upload
+the ciphertext to get a fresh staged key and retry under a **new** Mutation ID.
+`size_bytes` is still required for validation, but the value you send is no
+longer stored—the response's `object.size_bytes` reflects the actual byte
+length the server measured when the blob was staged.
 
 ### Delete (soft, optional race guard)
 ```
@@ -241,10 +317,12 @@ DELETE $BASE/api/collections/:cid/objects/:oid[?version=N]
     → 404 not found
 ```
 Soft delete sets `deleted: true` and bumps the version so peers see the tombstone. Supplying `?version=N` makes the delete lose to a newer concurrent edit (edit-vs-delete race; edit wins). Omit it to delete unconditionally.
+Deleting an already-deleted object is another mutation: without a replayed
+Mutation ID it advances the tombstone version and collection cursor again.
 
 ### Single-round-trip variants
 
-These halve the round trips on high-latency networks by combining the blob upload and the object write. The body is the raw ciphertext (`application/octet-stream`); the server mints the blob key for you. Response shapes and conflict semantics are identical to the two-call versions above.
+These halve the round trips on high-latency networks by combining the blob upload and the object write. The body is the raw ciphertext (`application/octet-stream`); the server mints the blob key for you. Response shapes and conflict semantics are identical to the two-call versions above, **except** `409 { "error": "blob is not staged" }` cannot happen here—the server mints and stages the blob itself in the same call, so there's no caller-supplied key to go stale.
 
 ```
 POST $BASE/api/collections/:cid/blob-objects              → 201 { "object", "collectionVersion" }   // create
@@ -261,10 +339,19 @@ Opaque encrypted bytes. Keys have the form `<user-id>/<blob-uuid>` and are alway
 ```
 POST   $BASE/api/blobs                    → 201 { "key": "<user-id>/<uuid>" }   // body: raw bytes
 GET    $BASE/api/blobs/:userId/:blobId    → 200 <raw bytes>  (application/octet-stream) | 404
-DELETE $BASE/api/blobs/:userId/:blobId    → 204                                  // idempotent
+DELETE $BASE/api/blobs/:userId/:blobId    → 204 | 409 { "error": "blob is in use" }
 ```
 - Upload an empty body → `400`. A key you don't own → `404` on GET/DELETE (no existence leak).
-- The blob lifecycle is independent of objects: uploading a blob doesn't create an object, and replacing an object's blob leaves the old blob to be reclaimed later by server-side GC (clients rely on old blobs being available for a window to fetch the common ancestor during three-way merge).
+- Uploading stages a blob for a fixed 24 hours. Creating or updating an object
+  atomically claims it. DELETE is idempotent for staged or absent blobs,
+  including legacy files not yet adopted into the ledger. Any non-staged ledger
+  state—claimed, retained, purgeable, or legacy-shared—is controlled by
+  object/collection lifetime and returns `409`.
+- Replacing an object's blob retains the prior blob for 365 days so clients can
+  fetch a merge ancestor. Deleting a collection makes its claimed and retained
+  blobs immediately eligible for asynchronous removal; quarantined
+  legacy-shared blobs remain non-deletable. These lifetimes are fixed protocol
+  policy, not server configuration.
 
 ### Batch fetch
 
@@ -336,9 +423,16 @@ A minimal sync client, start to finish:
 5. Full pull: `GET /api/collections/:id/objects?sinceVersion=0`. For each row, download its blob (`GET /api/blobs/:userId/:blobId`), decrypt, apply. Set `cursor` to the highest `change_seq`.
 
 **Saving a change**
-1. Encrypt locally. Upload the blob (`POST /api/blobs`) or use `POST/PUT .../blob-objects` to do it in one call.
-2. Create (`POST .../objects`) or update (`PUT .../objects/:oid` with `version = lastSeen + 1`).
-3. On `200/201`: advance `cursor` to `collectionVersion`. On `409`: fetch `currentBlobKey`, merge, retry with `currentVersion + 1`.
+1. Generate one Mutation ID for the intended change and encrypt locally.
+2. Upload the blob (`POST /api/blobs`) or use `POST/PUT .../blob-objects` to do it in one call.
+3. Create (`POST .../objects`) or update (`PUT .../objects/:oid` with `version = lastSeen + 1`), sending `Mutation-Id`.
+4. If the response is lost, retry the same request with the same Mutation ID.
+   On `200/201`: advance `cursor` to `collectionVersion` **only if** it equals
+   `cursor + 1`—that's the only value proving no other device's change landed
+   in between, so a gap means leave `cursor` alone and pull instead. On a
+   version-conflict `409`:
+   fetch `currentBlobKey`, merge, and use a new Mutation ID for the new intent
+   at `currentVersion + 1`.
 
 **Staying in sync**
 1. Open `GET /api/sync/events`. On `ready` and on every `change`, pull `GET .../objects?sinceVersion=<cursor>` and apply.

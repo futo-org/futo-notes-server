@@ -87,7 +87,10 @@ retry without clearing their local vault cursor/object map.
 
 ### Capability discovery
 
-`GET /` returns `{ name, version, auth_mode, signup, billing }`. Clients fetch it once at server-add time to render the right login UI per-server — one client build works against any deployment without per-server configuration.
+`GET /` returns `{ name, version, auth_mode, signup, billing, mutation_ids }`.
+Clients fetch it once at server-add time to render the right login UI and
+discover retry-safety support. `mutation_ids` is
+`{ supported: true, required: false, retention_days: 30 }`.
 
 ### Yucca migration path
 Yucca's auth is built — `packages/yucca-api` has a working OIDC Authorization Code + PKCE implementation (via the public `openid-client` library, generic issuer discovery) with opaque session tokens and a 7-day httpOnly cookie (a `mock-oidc-provider` package backs local dev). The session model is already identical to this design, so migration stays a config change: point `OIDC_ISSUER` at the shared IdP when OIDC lands here. No session-layer code changes needed.
@@ -182,7 +185,9 @@ True zero-knowledge — hiding even collection/object IDs and activity shape —
 
 ### Multi-tenant isolation
 
-Postgres is a single shared instance. All users' rows live in the same tables, separated by `user_id` / `collection_id` foreign keys. Every query must be scoped by the authenticated user's ID. A missing scope is a cross-tenant leak — testing and review should treat this as a top-priority invariant.
+Postgres is a single shared instance. All users' rows live in the same tables, separated by `user_id` / `collection_id` foreign keys. Every query serving an authenticated request must be scoped by the authenticated user's ID. A missing scope is a cross-tenant leak — testing and review should treat this as a top-priority invariant.
+
+**Exception: scheduled background maintenance.** The invariant above exists to stop cross-tenant leaks from reaching a *request* and to keep shard routing trivial; it applies without exception to anything serving an authenticated request. Background maintenance jobs have no auth context and are deliberately global instead: the session reaper (`src/maintenance/sessionReaper.ts`) deletes expired sessions by `expires_at` across all users, and blob ledger/storage reconciliation and the mutation-result sweep (`src/collection-contents/index.ts`) reclaim rows by `state`/`state_changed_at`/`created_at` across all users. These sweeps never return data to any user and select purely on timestamp and lifecycle state, never on tenant. This is a real cost, not a free pass — see §Statelessness & scaling for what it means at Stage 3.
 
 ## Data model
 
@@ -218,7 +223,21 @@ objects
   updated_at     timestamptz
 ```
 
-Earlier-version blobs can be retained or garbage-collected depending on policy — a configuration concern, not a structural one.
+### Blob ledger and Mutation IDs
+
+`blob_ledger` is the authoritative lifetime record for every known blob. A blob
+is `staged`, `claimed`, `retained`, or `purgeable`; migration-only
+`legacy_shared` rows quarantine historic shared references from deletion.
+Claimed rows name exactly one object version. The storage bytes are deleted
+before the ledger row, so an interrupted cleanup remains retryable.
+The former `orphaned_blobs` table is retained only for safe downgrade and
+migration auditing; runtime code neither reads nor writes it.
+
+`mutation_results` records the original outcome of an optional client-generated
+Mutation ID for 30 days. Its key is `(user_id, mutation_id)`, and its stored
+intent includes mutation kind, collection, object, and requested version.
+Collection and object IDs intentionally are not foreign keys: a retry must still
+receive its original outcome after those rows have been deleted.
 
 ### Users and sessions
 
@@ -247,12 +266,30 @@ Keeping the DB small protects the scaling path: Immich is nervous about DB-at-sc
 Versioned sync with per-object conflict checks and a collection-global pull cursor. No CRDTs — last-write-wins with conflict surfacing.
 
 ### Push (client → server)
-1. Client encrypts object content, uploads blob to server
-2. Client sends sync request: `{ objectId, version, blobKey }`
+1. Client chooses a Mutation ID and encrypts object content
+2. Client uploads a staged blob and sends `{ objectId, version, blobKey }`, or
+   sends the ciphertext through a single-round-trip blob-object route
 3. Server checks: is `version` exactly `server_object_version + 1`?
    - Yes → accept, update metadata
    - No → reject with `409 Conflict`, return current server version and blob key so client can resolve
 4. On accepted create/update/delete, server increments `collections.current_version` and writes that value to `objects.change_seq`
+
+The server serializes mutations collection-first. Version validation, claiming
+the staged blob, changing the object, advancing the collection cursor, recording
+the Mutation ID outcome, and publishing the transactional notification are one
+database transaction. A conflict does not claim the staged blob or advance the
+cursor. Retrying the same Mutation ID returns the recorded outcome and ignores
+retried ciphertext; reusing it for a different intent is rejected.
+
+Writing blob bytes is deliberately **outside** that transaction, including on
+the single-round-trip routes: storing ciphertext while holding the collection's
+row lock would serialize every other mutation in the collection behind that
+I/O, and would hold a pooled connection across a network round trip once blobs
+live in object storage. So a one-call mutation stages its blob first, then opens
+the transaction to claim it. A mutation that is then declined — conflict, replay,
+missing object — leaves its blob unclaimed, and the 24-hour staging window
+reclaims it. Bounded, self-correcting waste is the accepted price of keeping
+storage I/O off the lock.
 
 ### Pull (server → client)
 1. Client sends its last seen collection cursor
@@ -275,11 +312,24 @@ The client implements a two-tier strategy:
 
 The server's only role is rejecting stale pushes with `409` and returning the current version. All merge logic lives in the client — and since the server sees only opaque blobs, it could not resolve them even if it wanted to.
 
-### Blob retention on delete
+### Blob lifetime
 
-A soft delete sets `deleted=true` and bumps the version, but the object's blob is **retained**, not reclaimed: it stays fetchable so a client can still pull it as the common ancestor during three-way merge of a concurrent edit-vs-delete. The tombstone keeps the blobKey live. Replaced blobs (from an update) are likewise retained — recorded in `orphaned_blobs` at replacement time and reclaimed by the GC only after the retention window.
+A separate upload is staged for a fixed 24 hours. An accepted create or update
+atomically claims it for exactly one object version; direct deletion is allowed
+only while staged. Any ledger state other than staged — claimed, retained,
+purgeable, or legacy-shared — returns `409 blob is in use`.
 
-A blob's reference is only severed when the **collection** is deleted. Deleting a collection cascades its object rows away (including soft-deleted tombstones), so the delete handler first records every referenced blob in `orphaned_blobs` inside the same transaction; the GC reclaims them on its next pass. `orphaned_blobs.user_id` FKs to `users`, not the collection, so those ledger rows survive the cascade.
+A soft delete sets `deleted=true` and bumps the version, but its claimed blob
+stays fetchable because the tombstone may be a merge ancestor. Updating an
+object moves the prior claimed blob to retained for a fixed 365 days. Deleting
+the collection makes all of its claimed and retained blobs immediately
+purgeable; asynchronous maintenance removes storage bytes first and then their
+ledger rows. Failed storage deletions retain their rows and retry later.
+
+Storage reconciliation treats a valid user-owned blob file missing from the
+ledger as freshly staged, giving it the full 24-hour claim window. Historic
+duplicate references are marked `legacy_shared` and never automatically
+deleted. These lifetimes are protocol policy, not self-host configuration.
 
 ## Statelessness & scaling
 
@@ -298,7 +348,7 @@ When shared collections land (§Sync model scope → Future direction), the inva
 
 Cheap now, expensive to retrofit. Every one of these is a prerequisite for the sharding story, and all of them survive the shared-collections extension:
 
-1. **Every query scoped by `user_id`** (by owner, post-sharing). No exceptions.
+1. **Every query serving an authenticated request scoped by `user_id`** (by owner, post-sharing). No exceptions. The sole carve-out is scheduled background maintenance (session reaping, blob ledger/storage reconciliation, mutation-result expiry — see §Multi-tenant isolation), which has no auth context and is deliberately global. At Stage 3 (sharded), that carve-out has a real cost: these sweepers can no longer assume one database and must iterate per shard instead.
 2. **No cross-user foreign keys in v1.** When shared collections land, the lone exception will be `collection_members`, keyed by collection → owner.
 3. **`user_id` present on every leaf row**, not just reachable via join. Makes shard routing trivial.
 4. **Stable, opaque, shard-neutral IDs** (UUIDv7 or similar). No auto-increment that assumes one DB.
@@ -329,7 +379,7 @@ All endpoints under `/api`. This section is the design-level overview; for the f
 
 ### Capability
 ```
-GET  /                                            → { name, version, auth_mode, signup, billing }
+GET  /                                            → { name, version, auth_mode, signup, billing, mutation_ids }
 GET  /health                                      → { status, db }
 ```
 
@@ -365,7 +415,7 @@ DELETE /api/collections/:id/objects/:objectId     → soft delete
 ```
 POST   /api/blobs                                 → upload encrypted blob, returns blob key
 GET    /api/blobs/:key                            → download encrypted blob
-DELETE /api/blobs/:key                            → delete blob
+DELETE /api/blobs/:key                            → delete a staged blob; 409 once claimed
 ```
 
 ### Sync

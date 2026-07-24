@@ -2,11 +2,12 @@ import type { Hono } from 'hono'
 import type { AuthContext } from './auth/middleware.ts'
 import { hashPassword } from './auth/password.ts'
 import { FsBlobStore } from './blob/fs.ts'
+import { CollectionContents } from './collection-contents/index.ts'
 import { db, waitForDb } from './db/connection.ts'
 import { migrateToLatest } from './db/migrate.ts'
 import { env, validateEnv } from './env.ts'
 import { log } from './logger.ts'
-import { startBlobGc, type BlobGcHandle } from './maintenance/blobGc.ts'
+import { startBlobMaintenance, type BlobMaintenanceHandle } from './maintenance/blobMaintenance.ts'
 import { startSessionReaper, type SessionReaperHandle } from './maintenance/sessionReaper.ts'
 import { notifier } from './sync/notifier.ts'
 
@@ -39,13 +40,21 @@ export async function runServer(app: Hono<{ Variables: AuthContext }>, label = '
   await waitForDb()
   await migrateToLatest()
 
-  let blobGc: BlobGcHandle | null = null
-  if (env.BLOB_GC_ENABLED) {
-    const intervalMs = env.BLOB_GC_INTERVAL_MS
-      ? Number(env.BLOB_GC_INTERVAL_MS)
-      : undefined
-    blobGc = startBlobGc(new FsBlobStore(env.BLOB_DIR), intervalMs)
-  }
+  // The loop always runs: storage reconciliation and fixed Mutation-ID expiry
+  // must not be switchable off. BLOB_GC_ENABLED gates blob-byte/ledger garbage
+  // collection only.
+  const intervalMs = env.BLOB_GC_INTERVAL_MS
+    ? Number(env.BLOB_GC_INTERVAL_MS)
+    : undefined
+  const blobMaintenance: BlobMaintenanceHandle = startBlobMaintenance(
+    new CollectionContents({
+      db,
+      store: new FsBlobStore(env.BLOB_DIR),
+      notifier,
+    }),
+    intervalMs,
+    { collectGarbage: env.BLOB_GC_ENABLED },
+  )
 
   const sessionReaper: SessionReaperHandle = startSessionReaper()
 
@@ -61,7 +70,7 @@ export async function runServer(app: Hono<{ Variables: AuthContext }>, label = '
       process.exit(1)
     }, 10000)
 
-    blobGc?.stop()
+    blobMaintenance.stop()
     sessionReaper.stop()
     await server.stop(true)
     log.info('http server closed')
