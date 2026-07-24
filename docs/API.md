@@ -43,7 +43,7 @@ Some errors also carry a stable machine-readable `code`:
 
 Sessions expire 7 days after issuance; authenticated activity does not extend that fixed lifetime. If a supplied cookie or bearer token has expired or is otherwise invalid, the server returns `401`, a `WWW-Authenticate: Bearer … error="invalid_token"` challenge, and `{ "error": "session expired or invalid", "code": "invalid_session" }`. A client that securely retained its login material should log in again, receive a new session token, retry the request once, and preserve its local sync cursor/object map; session expiry is not a vault reset.
 
-**Value encoding — read this.** Postgres `bigint` columns are serialized as **strings** in responses. So `version`, `change_seq`, `size_bytes`, and `current_version` come back as strings (`"3"`), but you **send** numeric fields (`version`, `size_bytes`) as JSON **numbers** (`3`). The one exception: the `collectionVersion` field in mutation responses is a number, not a string. Parse defensively.
+**Value encoding — read this.** Postgres `bigint` columns come back as **strings** in responses: `version`, `change_seq`, `size_bytes`, `current_version`. Scalars the server computes come back as **numbers**: `collectionVersion`, `currentVersion`, `nextCursor`. Requests run the other way round — you *send* `version` and `size_bytes` as JSON numbers (`3`). Parse defensively, and see [the object shape](#objects) for the field-by-field breakdown and the string-vs-number comparison trap this sets up.
 
 ---
 
@@ -245,9 +245,10 @@ An object is a metadata row pointing at a blob. This is its canonical shape — 
 ```
 
 - `id`, `collection_id` — UUID strings.
-- `version`, `change_seq`, `size_bytes` — JSON **strings**, not numbers, even though they're numeric. They're Postgres `bigint` columns serialized straight onto the wire as strings — that's the stable, intentional contract, not an accident awaiting a fix. Rely on it.
+- `version`, `change_seq` — JSON **strings**, not numbers, even though they're numeric. They're Postgres `bigint` columns serialized straight onto the wire as strings — that's the stable, intentional contract, not an accident awaiting a fix. Rely on it.
 - `deleted` — boolean.
 - `blob_key` — string, or `null`.
+- `size_bytes` — JSON string (same `bigint`-as-string rule), or `null`. The column is nullable, so treat `null` as unknown size rather than assuming a string is always there. Every write path the server offers today populates it.
 - `created_at`, `updated_at` — ISO 8601 timestamp strings.
 
 **The trap:** `collectionVersion` (mutation responses), `currentVersion` (the 409 conflict body), and `nextCursor` (paged list responses) are server-computed and are JSON **numbers** — the opposite representation from the row fields above. So comparing `object.change_seq` straight against `nextCursor` or `collectionVersion` compares a string to a number and will never match; coerce one side (e.g. `Number(object.change_seq)`) before comparing. This is the same coercion the cursor rule in the [end-to-end recipe](#end-to-end-recipe)'s "Saving a change" step depends on, where `cursor + 1` is a numeric comparison against `collectionVersion`.
