@@ -157,17 +157,22 @@ Content-Type: application/json
   "previous_key_updated_at": "<opaque revision from GET/PUT>" // rotation only
 }
     → 200 { "key": { ... } }
-    → 409 { "error": "key conflict", "currentKey": { ... } }
+    → 409 { "error": "key conflict", "currentKey": { ... } }   // stale rotation token only
     → 400 invalid body | 404 not found
 ```
 
 The first client may claim an unset key without `previous_key_updated_at`. Retrying
 the exact same material is idempotent and returns `200` with the original
-`key_updated_at`. A different write must include the current `key_updated_at` from
-a prior `GET` or `PUT`; the server treats it as an opaque revision token and rotates
-the material only if it still matches. A missing or stale token returns `409` with
-the authoritative material in `currentKey`, allowing the client to resolve the
-conflict safely. Do not parse or synthesize the token.
+`key_updated_at`. A **rotation** — replacing key material that already exists — must
+include the current `key_updated_at` from a prior `GET` or `PUT`; the server treats it
+as an opaque revision token and rotates the material only if it still matches. A stale
+token returns `409` with the authoritative material in `currentKey`, allowing the
+client to resolve the conflict safely. Do not parse or synthesize the token.
+
+A claim that omits the token has not asked to replace anything, so losing a race to
+mint the first key is not an error: the server returns `200` with the **authoritative**
+key material, which may differ from what you sent. Adopt what you get back — one vault
+has exactly one key. The winner's key is never overwritten.
 
 > Heads-up: a successful rotation does **not** currently emit a real-time `change` event, so peers learn about it on their next poll, not instantly. Note it if you depend on instant key propagation.
 
