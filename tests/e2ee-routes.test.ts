@@ -465,21 +465,19 @@ test('PUT /collections/:id/key supports idempotent claims, conflicts, and guarde
   )
   assert.deepEqual(retry.key, first.key)
 
-  // A racing second client must receive an explicit conflict and the
-  // authoritative key, rather than a misleading successful response.
+  // A racing second client claimed no revision, so it adopts the authoritative
+  // key rather than replacing it. A 409 here fails the client's whole connect.
   const second = await app.fetch(new Request(`http://test.local/api/collections/${cid}/key`, {
     method: 'PUT',
     headers: { ...auth, 'Content-Type': 'application/json' },
     body: JSON.stringify({ key_salt: 'bbbb', key_kdf: kdf, encrypted_vault_key: 'second-key' }),
   }))
-  assert.equal(second.status, 409)
-  const conflict = await second.json() as {
-    error: string
-    currentKey: { encrypted_vault_key: string; key_updated_at: string }
+  assert.equal(second.status, 200)
+  const adopted = await second.json() as {
+    key: { encrypted_vault_key: string; key_updated_at: string }
   }
-  assert.equal(conflict.error, 'key conflict')
-  assert.equal(conflict.currentKey.encrypted_vault_key, 'first-key')
-  assert.equal(conflict.currentKey.key_updated_at, first.key.key_updated_at)
+  assert.equal(adopted.key.encrypted_vault_key, 'first-key')
+  assert.equal(adopted.key.key_updated_at, first.key.key_updated_at)
 
   // A client that names the exact revision it read may deliberately rotate.
   const rotated = await json<{ key: { encrypted_vault_key: string; key_updated_at: string } }>(
@@ -519,7 +517,7 @@ test('PUT /collections/:id/key supports idempotent claims, conflicts, and guarde
   assert.equal(fetched.key.encrypted_vault_key, 'second-key')
 })
 
-test('concurrent different vault-key claims produce one winner and one conflict', async () => {
+test('concurrent different vault-key claims converge on one winner', async () => {
   const login = await json<{ token: string }>('/api/auth/dev/login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -544,14 +542,17 @@ test('concurrent different vault-key claims produce one winner and one conflict'
   ))
 
   const responses = await Promise.all([request('client-a'), request('client-b')])
-  assert.deepEqual(responses.map((response) => response.status).sort(), [200, 409])
-  const winner = await responses.find((response) => response.status === 200)!.json() as {
-    key: { encrypted_vault_key: string }
-  }
-  const loser = await responses.find((response) => response.status === 409)!.json() as {
-    currentKey: { encrypted_vault_key: string }
-  }
-  assert.equal(loser.currentKey.encrypted_vault_key, winner.key.encrypted_vault_key)
+  assert.deepEqual(responses.map((response) => response.status), [200, 200])
+  const [a, b] = await Promise.all(responses.map((response) => response.json())) as Array<{
+    key: { encrypted_vault_key: string; key_updated_at: string }
+  }>
+  // Both mints succeed, and both are told the same authoritative key.
+  assert.deepEqual(a.key, b.key)
+  const stored = await json<{ key: { encrypted_vault_key: string } }>(
+    `/api/collections/${created.collection.id}/key`,
+    { headers: auth },
+  )
+  assert.equal(stored.key.encrypted_vault_key, a.key.encrypted_vault_key)
 })
 
 test('superseded blobs are retained and a stale raw update only stages its blob', async () => {

@@ -137,6 +137,11 @@ export function createCollectionsRoutes(
         isDeepStrictEqual(body.key_kdf, current.key_kdf) &&
         body.encrypted_vault_key === current.encrypted_vault_key
       if (idempotent) return { kind: 'ok', key } as const
+      // A first claim names no revision, so it never asked to replace anything.
+      // Losing that race is not a conflict: return the authoritative material so
+      // the caller adopts it (one vault, one key). Only guarded rotations below
+      // can conflict.
+      if (body.previous_key_updated_at === undefined) return { kind: 'ok', key } as const
       if (body.previous_key_updated_at === current.key_updated_at.toISOString()) {
         return save(true)
       }

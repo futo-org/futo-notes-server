@@ -160,6 +160,13 @@ Current client key model:
 - The server stores `key_salt`, `key_kdf`, and `encrypted_vault_key` on the collection.
 - The server never sees the vault password, password-derived key, vault key, filenames, or note content.
 
+Key material is **not** on the 409-conflict path that object mutations use. A first
+claim of an unset key converges: the loser of the race is handed the authoritative
+material with `200` and adopts it, because one vault has exactly one key and the
+client has nothing to merge. Only a *rotation* — a write naming the exact revision
+it read — can conflict, and only when that revision is stale. The winner's key is
+never overwritten either way.
+
 ## Threat model
 
 Explicit about what the server is trusted with and what it is not, so future schema or feature changes don't accidentally smuggle sensitive plaintext into Postgres.
