@@ -33,146 +33,146 @@ function isKeyMaterialBody(value: unknown): value is KeyMaterialRequest {
 export function createCollectionsRoutes(
   contents: CollectionContents,
 ): Hono<{ Variables: AuthContext }> {
-const collectionsRoutes = new Hono<{ Variables: AuthContext }>()
+  const collectionsRoutes = new Hono<{ Variables: AuthContext }>()
 
-collectionsRoutes.post('/', async (c) => {
-  const userId = c.var.user.id
-  const created = await db
-    .insertInto('collections')
-    .values({ id: uuidv7(), user_id: userId })
-    .returning(['id', 'user_id', 'current_version', 'created_at'])
-    .executeTakeFirstOrThrow()
-  return c.json({ collection: created }, 201)
-})
-
-collectionsRoutes.get('/', async (c) => {
-  const userId = c.var.user.id
-  const rows = await db
-    .selectFrom('collections')
-    .where('user_id', '=', userId)
-    .select(['id', 'user_id', 'current_version', 'created_at'])
-    .orderBy('created_at', 'asc')
-    .execute()
-  return c.json({ collections: rows })
-})
-
-collectionsRoutes.get('/:id/key', async (c) => {
-  const userId = c.var.user.id
-  const id = c.req.param('id')
-  const row = await db
-    .selectFrom('collections')
-    .where('id', '=', id)
-    .where('user_id', '=', userId)
-    .select(['key_salt', 'key_kdf', 'encrypted_vault_key', 'key_updated_at'])
-    .executeTakeFirst()
-  if (!row) return c.json({ error: 'not found' }, 404)
-  if (!row.key_salt || !row.key_kdf || !row.encrypted_vault_key) {
-    return c.json({ key: null })
-  }
-  return c.json({
-    key: {
-      key_salt: row.key_salt,
-      key_kdf: row.key_kdf,
-      encrypted_vault_key: row.encrypted_vault_key,
-      key_updated_at: row.key_updated_at,
-    },
+  collectionsRoutes.post('/', async (c) => {
+    const userId = c.var.user.id
+    const created = await db
+      .insertInto('collections')
+      .values({ id: uuidv7(), user_id: userId })
+      .returning(['id', 'user_id', 'current_version', 'created_at'])
+      .executeTakeFirstOrThrow()
+    return c.json({ collection: created }, 201)
   })
-})
 
-collectionsRoutes.put('/:id/key', async (c) => {
-  const userId = c.var.user.id
-  const id = c.req.param('id')
-  let body: unknown
-  try {
-    body = await c.req.json()
-  } catch {
-    return c.json({ error: 'invalid json' }, 400)
-  }
-  if (!isKeyMaterialBody(body)) {
-    return c.json({ error: 'valid key_salt, key_kdf, and encrypted_vault_key required' }, 400)
-  }
+  collectionsRoutes.get('/', async (c) => {
+    const userId = c.var.user.id
+    const rows = await db
+      .selectFrom('collections')
+      .where('user_id', '=', userId)
+      .select(['id', 'user_id', 'current_version', 'created_at'])
+      .orderBy('created_at', 'asc')
+      .execute()
+    return c.json({ collections: rows })
+  })
 
-  const outcome = await db.transaction().execute(async (trx) => {
-    // Serialize claims and rotations on this collection. This closes the gap
-    // between reading a revision token and applying its guarded replacement.
-    const current = await trx
+  collectionsRoutes.get('/:id/key', async (c) => {
+    const userId = c.var.user.id
+    const id = c.req.param('id')
+    const row = await db
       .selectFrom('collections')
       .where('id', '=', id)
       .where('user_id', '=', userId)
       .select(['key_salt', 'key_kdf', 'encrypted_vault_key', 'key_updated_at'])
-      .forUpdate()
       .executeTakeFirst()
-    if (!current) return { kind: 'not-found' } as const
+    if (!row) return c.json({ error: 'not found' }, 404)
+    if (!row.key_salt || !row.key_kdf || !row.encrypted_vault_key) {
+      return c.json({ key: null })
+    }
+    return c.json({
+      key: {
+        key_salt: row.key_salt,
+        key_kdf: row.key_kdf,
+        encrypted_vault_key: row.encrypted_vault_key,
+        key_updated_at: row.key_updated_at,
+      },
+    })
+  })
 
-    const save = async (rotation: boolean) => {
-      const row = await trx
-        .updateTable('collections')
-        .set({
-          key_salt: body.key_salt,
-          key_kdf: body.key_kdf,
-          encrypted_vault_key: body.encrypted_vault_key,
-          // Keep the serialized timestamp usable as an opaque revision token,
-          // even when two requests land in the same millisecond.
-          key_updated_at: rotation
-            ? sql`greatest(clock_timestamp(), key_updated_at + interval '1 millisecond')`
-            : sql`clock_timestamp()`,
-        })
+  collectionsRoutes.put('/:id/key', async (c) => {
+    const userId = c.var.user.id
+    const id = c.req.param('id')
+    let body: unknown
+    try {
+      body = await c.req.json()
+    } catch {
+      return c.json({ error: 'invalid json' }, 400)
+    }
+    if (!isKeyMaterialBody(body)) {
+      return c.json({ error: 'valid key_salt, key_kdf, and encrypted_vault_key required' }, 400)
+    }
+
+    const outcome = await db.transaction().execute(async (trx) => {
+      // Serialize claims and rotations on this collection. This closes the gap
+      // between reading a revision token and applying its guarded replacement.
+      const current = await trx
+        .selectFrom('collections')
         .where('id', '=', id)
         .where('user_id', '=', userId)
-        .returning(['key_salt', 'key_kdf', 'encrypted_vault_key', 'key_updated_at'])
-        .executeTakeFirstOrThrow()
-      return { kind: 'ok', key: row } as const
-    }
+        .select(['key_salt', 'key_kdf', 'encrypted_vault_key', 'key_updated_at'])
+        .forUpdate()
+        .executeTakeFirst()
+      if (!current) return { kind: 'not-found' } as const
 
-    if (!current.key_salt || !current.key_kdf || !current.encrypted_vault_key || !current.key_updated_at) {
-      return save(false)
+      const save = async (rotation: boolean) => {
+        const row = await trx
+          .updateTable('collections')
+          .set({
+            key_salt: body.key_salt,
+            key_kdf: body.key_kdf,
+            encrypted_vault_key: body.encrypted_vault_key,
+            // Keep the serialized timestamp usable as an opaque revision token,
+            // even when two requests land in the same millisecond.
+            key_updated_at: rotation
+              ? sql`greatest(clock_timestamp(), key_updated_at + interval '1 millisecond')`
+              : sql`clock_timestamp()`,
+          })
+          .where('id', '=', id)
+          .where('user_id', '=', userId)
+          .returning(['key_salt', 'key_kdf', 'encrypted_vault_key', 'key_updated_at'])
+          .executeTakeFirstOrThrow()
+        return { kind: 'ok', key: row } as const
+      }
+
+      if (!current.key_salt || !current.key_kdf || !current.encrypted_vault_key || !current.key_updated_at) {
+        return save(false)
+      }
+      const key = {
+        key_salt: current.key_salt,
+        key_kdf: current.key_kdf,
+        encrypted_vault_key: current.encrypted_vault_key,
+        key_updated_at: current.key_updated_at,
+      }
+      const idempotent = body.key_salt === current.key_salt &&
+        isDeepStrictEqual(body.key_kdf, current.key_kdf) &&
+        body.encrypted_vault_key === current.encrypted_vault_key
+      if (idempotent) return { kind: 'ok', key } as const
+      if (body.previous_key_updated_at === current.key_updated_at.toISOString()) {
+        return save(true)
+      }
+      return { kind: 'conflict', key } as const
+    })
+
+    if (outcome.kind === 'not-found') {
+      return c.json({ error: 'not found' }, 404)
     }
-    const key = {
-      key_salt: current.key_salt,
-      key_kdf: current.key_kdf,
-      encrypted_vault_key: current.encrypted_vault_key,
-      key_updated_at: current.key_updated_at,
+    if (outcome.kind === 'conflict') {
+      return c.json({ error: 'key conflict', currentKey: outcome.key }, 409)
     }
-    const idempotent = body.key_salt === current.key_salt &&
-      isDeepStrictEqual(body.key_kdf, current.key_kdf) &&
-      body.encrypted_vault_key === current.encrypted_vault_key
-    if (idempotent) return { kind: 'ok', key } as const
-    if (body.previous_key_updated_at === current.key_updated_at.toISOString()) {
-      return save(true)
-    }
-    return { kind: 'conflict', key } as const
+    return c.json({ key: outcome.key })
   })
 
-  if (outcome.kind === 'not-found') {
-    return c.json({ error: 'not found' }, 404)
-  }
-  if (outcome.kind === 'conflict') {
-    return c.json({ error: 'key conflict', currentKey: outcome.key }, 409)
-  }
-  return c.json({ key: outcome.key })
-})
-
-collectionsRoutes.get('/:id', async (c) => {
-  const userId = c.var.user.id
-  const id = c.req.param('id')
-  const row = await db
-    .selectFrom('collections')
-    .where('id', '=', id)
-    .where('user_id', '=', userId)
-    .select(['id', 'user_id', 'current_version', 'created_at'])
-    .executeTakeFirst()
-  if (!row) return c.json({ error: 'not found' }, 404)
-  return c.json({ collection: row })
-})
-
-collectionsRoutes.delete('/:id', async (c) => {
-  const result = await contents.deleteCollection({
-    userId: c.var.user.id,
-    collectionId: c.req.param('id'),
+  collectionsRoutes.get('/:id', async (c) => {
+    const userId = c.var.user.id
+    const id = c.req.param('id')
+    const row = await db
+      .selectFrom('collections')
+      .where('id', '=', id)
+      .where('user_id', '=', userId)
+      .select(['id', 'user_id', 'current_version', 'created_at'])
+      .executeTakeFirst()
+    if (!row) return c.json({ error: 'not found' }, 404)
+    return c.json({ collection: row })
   })
-  if (result.kind === 'not_found') return c.json({ error: 'not found' }, 404)
-  return c.body(null, 204)
-})
 
-return collectionsRoutes
+  collectionsRoutes.delete('/:id', async (c) => {
+    const result = await contents.deleteCollection({
+      userId: c.var.user.id,
+      collectionId: c.req.param('id'),
+    })
+    if (result.kind === 'not_found') return c.json({ error: 'not found' }, 404)
+    return c.body(null, 204)
+  })
+
+  return collectionsRoutes
 }

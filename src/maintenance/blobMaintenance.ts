@@ -5,7 +5,7 @@ export type BlobMaintenanceResult = Awaited<
   ReturnType<CollectionContents['runMaintenance']>
 >
 
-export async function runBlobGcOnce(
+export async function runBlobMaintenanceOnce(
   contents: CollectionContents,
 ): Promise<BlobMaintenanceResult> {
   const result = await contents.runMaintenance()
@@ -21,23 +21,23 @@ export async function runBlobGcOnce(
   return result
 }
 
-export interface BlobGcHandle {
+export interface BlobMaintenanceHandle {
   stop(): void
 }
 
 // Start a background loop that runs once after startup, then periodically.
 // Lifetime policy belongs to CollectionContents; this file only schedules it.
-export function startBlobGc(
+export function startBlobMaintenance(
   contents: CollectionContents,
   intervalMs: number = 6 * 60 * 60 * 1000,
-): BlobGcHandle {
+): BlobMaintenanceHandle {
   let stopped = false
   let timer: NodeJS.Timeout | null = null
 
   const tick = async () => {
     if (stopped) return
     try {
-      await runBlobGcOnce(contents)
+      await runBlobMaintenanceOnce(contents)
     } catch (err) {
       log.error('blob-maintenance: cycle failed', { error: String(err) })
     }

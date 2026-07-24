@@ -279,6 +279,16 @@ database transaction. A conflict does not claim the staged blob or advance the
 cursor. Retrying the same Mutation ID returns the recorded outcome and ignores
 retried ciphertext; reusing it for a different intent is rejected.
 
+Writing blob bytes is deliberately **outside** that transaction, including on
+the single-round-trip routes: storing ciphertext while holding the collection's
+row lock would serialize every other mutation in the collection behind that
+I/O, and would hold a pooled connection across a network round trip once blobs
+live in object storage. So a one-call mutation stages its blob first, then opens
+the transaction to claim it. A mutation that is then declined — conflict, replay,
+missing object — leaves its blob unclaimed, and the 24-hour staging window
+reclaims it. Bounded, self-correcting waste is the accepted price of keeping
+storage I/O off the lock.
+
 ### Pull (server → client)
 1. Client sends its last seen collection cursor
 2. Server sends deltas ordered by `change_seq`: all objects where `change_seq > client_cursor`

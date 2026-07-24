@@ -7,7 +7,7 @@ import { db, waitForDb } from './db/connection.ts'
 import { migrateToLatest } from './db/migrate.ts'
 import { env, validateEnv } from './env.ts'
 import { log } from './logger.ts'
-import { startBlobGc, type BlobGcHandle } from './maintenance/blobGc.ts'
+import { startBlobMaintenance, type BlobMaintenanceHandle } from './maintenance/blobMaintenance.ts'
 import { startSessionReaper, type SessionReaperHandle } from './maintenance/sessionReaper.ts'
 import { notifier } from './sync/notifier.ts'
 
@@ -40,7 +40,7 @@ export async function runServer(app: Hono<{ Variables: AuthContext }>, label = '
   await waitForDb()
   await migrateToLatest()
 
-  let blobGc: BlobGcHandle | null = null
+  let blobMaintenance: BlobMaintenanceHandle | null = null
   if (env.BLOB_GC_ENABLED) {
     const intervalMs = env.BLOB_GC_INTERVAL_MS
       ? Number(env.BLOB_GC_INTERVAL_MS)
@@ -50,7 +50,7 @@ export async function runServer(app: Hono<{ Variables: AuthContext }>, label = '
       store: new FsBlobStore(env.BLOB_DIR),
       notifier,
     })
-    blobGc = startBlobGc(contents, intervalMs)
+    blobMaintenance = startBlobMaintenance(contents, intervalMs)
   }
 
   const sessionReaper: SessionReaperHandle = startSessionReaper()
@@ -67,7 +67,7 @@ export async function runServer(app: Hono<{ Variables: AuthContext }>, label = '
       process.exit(1)
     }, 10000)
 
-    blobGc?.stop()
+    blobMaintenance?.stop()
     sessionReaper.stop()
     await server.stop(true)
     log.info('http server closed')

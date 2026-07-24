@@ -311,24 +311,31 @@ test('an unclaimed staged blob is removed after the fixed 24-hour window', async
   })
 
   currentTime = new Date('2026-07-25T11:59:59.000Z')
-  assert.deepEqual(await contents.runMaintenance(), {
-    reconciled: 0,
-    stagedDeleted: 0,
-    retainedDeleted: 0,
-    purgeableDeleted: 0,
-    mutationResultsDeleted: 0,
-  })
+  await contents.runMaintenance()
   assert.ok(await store.get(staged.blobKey))
+  assert.ok(
+    await db
+      .selectFrom('blob_ledger')
+      .where('blob_key', '=', staged.blobKey)
+      .where('user_id', '=', userId)
+      .where('state', '=', 'staged')
+      .select('blob_key')
+      .executeTakeFirst(),
+  )
 
   currentTime = new Date('2026-07-25T12:00:00.000Z')
-  assert.deepEqual(await contents.runMaintenance(), {
-    reconciled: 0,
-    stagedDeleted: 1,
-    retainedDeleted: 0,
-    purgeableDeleted: 0,
-    mutationResultsDeleted: 0,
-  })
+  const maintenance = await contents.runMaintenance()
+  assert.ok(maintenance.stagedDeleted >= 1)
   assert.equal(await store.get(staged.blobKey), null)
+  assert.equal(
+    await db
+      .selectFrom('blob_ledger')
+      .where('blob_key', '=', staged.blobKey)
+      .where('user_id', '=', userId)
+      .select('blob_key')
+      .executeTakeFirst(),
+    undefined,
+  )
   assert.deepEqual(
     await contents.mutateObject({
       kind: 'create',
@@ -414,9 +421,18 @@ test('deleting a collection makes its claimed and retained blobs immediately pur
   )
 
   const maintenance = await contents.runMaintenance()
-  assert.equal(maintenance.purgeableDeleted, 2)
+  assert.ok(maintenance.purgeableDeleted >= 2)
   assert.equal(await store.get(firstBlob.blobKey), null)
   assert.equal(await store.get(secondBlob.blobKey), null)
+  assert.deepEqual(
+    await db
+      .selectFrom('blob_ledger')
+      .where('user_id', '=', userId)
+      .where('blob_key', 'in', [firstBlob.blobKey, secondBlob.blobKey])
+      .select('blob_key')
+      .execute(),
+    [],
+  )
 })
 
 test('a retained merge ancestor remains available for one year', async () => {
@@ -448,12 +464,31 @@ test('a retained merge ancestor remains available for one year', async () => {
   })).kind, 'ok')
 
   currentTime = new Date('2027-07-24T11:59:59.000Z')
-  assert.equal((await contents.runMaintenance()).retainedDeleted, 0)
+  await contents.runMaintenance()
   assert.ok(await store.get(firstBlob.blobKey))
+  assert.ok(
+    await db
+      .selectFrom('blob_ledger')
+      .where('blob_key', '=', firstBlob.blobKey)
+      .where('user_id', '=', userId)
+      .where('state', '=', 'retained')
+      .select('blob_key')
+      .executeTakeFirst(),
+  )
 
   currentTime = new Date('2027-07-24T12:00:00.000Z')
-  assert.ok((await contents.runMaintenance()).retainedDeleted >= 1)
+  const maintenance = await contents.runMaintenance()
+  assert.ok(maintenance.retainedDeleted >= 1)
   assert.equal(await store.get(firstBlob.blobKey), null)
+  assert.equal(
+    await db
+      .selectFrom('blob_ledger')
+      .where('blob_key', '=', firstBlob.blobKey)
+      .where('user_id', '=', userId)
+      .select('blob_key')
+      .executeTakeFirst(),
+    undefined,
+  )
   assert.ok(await store.get(secondBlob.blobKey))
 })
 
@@ -475,7 +510,15 @@ test('a Mutation ID result expires after the fixed 30-day window', async () => {
   assert.equal(created.kind, 'ok')
 
   currentTime = new Date('2026-08-23T11:59:59.000Z')
-  assert.equal((await contents.runMaintenance()).mutationResultsDeleted, 0)
+  await contents.runMaintenance()
+  assert.ok(
+    await db
+      .selectFrom('mutation_results')
+      .where('user_id', '=', userId)
+      .where('mutation_id', '=', mutationId)
+      .select('mutation_id')
+      .executeTakeFirst(),
+  )
   assert.deepEqual(
     await contents.mutateObject({
       kind: 'create',
@@ -488,7 +531,17 @@ test('a Mutation ID result expires after the fixed 30-day window', async () => {
   )
 
   currentTime = new Date('2026-08-23T12:00:00.000Z')
-  assert.ok((await contents.runMaintenance()).mutationResultsDeleted >= 1)
+  const maintenance = await contents.runMaintenance()
+  assert.ok(maintenance.mutationResultsDeleted >= 1)
+  assert.equal(
+    await db
+      .selectFrom('mutation_results')
+      .where('user_id', '=', userId)
+      .where('mutation_id', '=', mutationId)
+      .select('mutation_id')
+      .executeTakeFirst(),
+    undefined,
+  )
   assert.deepEqual(
     await contents.mutateObject({
       kind: 'create',
@@ -508,8 +561,15 @@ test('maintenance reconciles an untracked stored blob as freshly staged', async 
   await store.put(blobKey, new TextEncoder().encode('historical-untracked-upload'))
 
   const maintenance = await contents.runMaintenance()
-  assert.equal(maintenance.reconciled, 1)
-  assert.equal(maintenance.stagedDeleted, 0)
+  assert.ok(maintenance.reconciled >= 1)
+  const ledgerRow = await db
+    .selectFrom('blob_ledger')
+    .where('blob_key', '=', blobKey)
+    .where('user_id', '=', userId)
+    .select('state')
+    .executeTakeFirst()
+  assert.equal(ledgerRow?.state, 'staged')
+  assert.ok(await store.get(blobKey))
 
   const claimed = await contents.mutateObject({
     kind: 'create',
@@ -520,6 +580,51 @@ test('maintenance reconciles an untracked stored blob as freshly staged', async 
   assert.equal(claimed.kind, 'ok')
   if (claimed.kind !== 'ok') return
   assert.equal(claimed.object.blob_key, blobKey)
+})
+
+test('one maintenance cycle drains more purgeable blobs than a single batch', async () => {
+  const { userId } = await createUserAndCollection()
+  currentTime = new Date('2026-07-24T12:00:00.000Z')
+  // Deliberately over the 500-row maintenance batch size: a sweep that trimmed
+  // one batch per cycle would need days to reclaim a large deleted collection.
+  const total = 600
+  const blobKeys: string[] = []
+  for (let index = 0; index < total; index += 1) {
+    const blobKey = `${userId}/${uuidv7()}`
+    await store.put(blobKey, new TextEncoder().encode(`purgeable-${index}`))
+    blobKeys.push(blobKey)
+  }
+  await db
+    .insertInto('blob_ledger')
+    .values(blobKeys.map((blobKey) => ({
+      blob_key: blobKey,
+      user_id: userId,
+      size_bytes: '1',
+      state: 'purgeable' as const,
+      collection_id: null,
+      object_id: null,
+      object_version: null,
+      created_at: currentTime,
+      state_changed_at: currentTime,
+    })))
+    .execute()
+
+  const maintenance = await contents.runMaintenance()
+  assert.ok(maintenance.purgeableDeleted >= total)
+  assert.deepEqual(
+    await db
+      .selectFrom('blob_ledger')
+      .where('user_id', '=', userId)
+      .where('state', '=', 'purgeable')
+      .select('blob_key')
+      .execute(),
+    [],
+  )
+  const firstKey = blobKeys.at(0)
+  const lastKey = blobKeys.at(-1)
+  assert.ok(firstKey && lastKey)
+  assert.equal(await store.get(firstKey), null)
+  assert.equal(await store.get(lastKey), null)
 })
 
 test('maintenance retains its ledger entry and retries after a storage deletion failure', async () => {

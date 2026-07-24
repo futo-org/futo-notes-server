@@ -511,7 +511,7 @@ test('concurrent different vault-key claims produce one winner and one conflict'
   assert.equal(loser.currentKey.encrypted_vault_key, winner.key.encrypted_vault_key)
 })
 
-test('superseded blobs are retained and stale raw updates do not leak blobs', async () => {
+test('superseded blobs are retained and a stale raw update only stages its blob', async () => {
   const email = `orphan-${Date.now()}-${Math.random().toString(16).slice(2)}@example.test`
   const login = await json<{ token: string; user: { id: string } }>('/api/auth/dev/login', {
     method: 'POST',
@@ -549,18 +549,38 @@ test('superseded blobs are retained and stale raw updates do not leak blobs', as
   assert.equal(await stillThere.text(), 'v1-body')
 
   const store = new FsBlobStore(env.BLOB_DIR)
-  const filesBeforeStaleUpdate = await store.list(`${login.user.id}/`)
+  const filesBeforeStaleUpdate = new Set(await store.list(`${login.user.id}/`))
 
-  // The version check happens before inline ciphertext is stored.
+  // Inline ciphertext is staged before the mutation transaction opens, so a
+  // rejected update leaves exactly one unclaimed staged blob. It is never
+  // bound to an object and expires on the normal 24-hour staging window.
   const staleRes = await app.fetch(new Request(
     `http://test.local/api/collections/${cid}/blob-objects/${v1.object.id}?version=2`,
     { method: 'PUT', headers: { ...auth, 'Content-Type': 'application/octet-stream' }, body: 'stale-body' },
   ))
   assert.equal(staleRes.status, 409)
-  assert.deepEqual(
-    await store.list(`${login.user.id}/`),
-    filesBeforeStaleUpdate,
+
+  const addedFiles = (await store.list(`${login.user.id}/`))
+    .filter((key) => !filesBeforeStaleUpdate.has(key))
+  assert.equal(addedFiles.length, 1)
+  const [addedFile] = addedFiles
+  assert.ok(addedFile)
+  const stagedRow = await db
+    .selectFrom('blob_ledger')
+    .where('blob_key', '=', addedFile)
+    .where('user_id', '=', login.user.id)
+    .select(['state', 'object_id'])
+    .executeTakeFirstOrThrow()
+  assert.equal(stagedRow.state, 'staged')
+  assert.equal(stagedRow.object_id, null)
+
+  // The rejected update left the object pointing at v2's blob.
+  const unchanged = await json<{ object: { version: string; blob_key: string } }>(
+    `/api/collections/${cid}/objects/${v1.object.id}`,
+    { headers: auth },
   )
+  assert.equal(unchanged.object.version, '2')
+  assert.equal(unchanged.object.blob_key, v2.object.blob_key)
 
   // Both the retained ancestor and current blob remain fetchable.
   const ancestor = await app.fetch(new Request(
