@@ -4,12 +4,16 @@ import type { AuthContext } from '../auth/middleware.ts'
 import {
   OBJECT_COLUMNS,
   type CollectionContents,
+  type ObjectMutationOutcome,
   type ObjectMutationResult,
 } from '../collection-contents/index.ts'
+import { isValidMutationId } from '../collection-contents/mutation-id.ts'
 import { db } from '../db/connection.ts'
 import { env } from '../env.ts'
+import { isUuidIdentifier } from '../identifiers/is-uuid-identifier.ts'
+import { createBatchBlobObjectRoutes } from './batch-upload/routes.ts'
+import { collectionBelongsToUser } from './collection-ownership.ts'
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const MAX_PULL_LIMIT = 1000
 
 const blobLimit = bodyLimit({
@@ -37,17 +41,7 @@ function isNonNegativeSafeInteger(value: unknown): value is number {
 function isBlobKeyOwnedByUser(blobKey: unknown, userId: string): blobKey is string {
   if (typeof blobKey !== 'string') return false
   const [keyUserId, blobId, extra] = blobKey.split('/')
-  return extra === undefined && keyUserId === userId && UUID_RE.test(blobId)
-}
-
-async function ensureCollectionOwned(userId: string, collectionId: string): Promise<boolean> {
-  const row = await db
-    .selectFrom('collections')
-    .where('id', '=', collectionId)
-    .where('user_id', '=', userId)
-    .select('id')
-    .executeTakeFirst()
-  return !!row
+  return extra === undefined && keyUserId === userId && isUuidIdentifier(blobId)
 }
 
 function mutationResponse(
@@ -78,6 +72,19 @@ function mutationResponse(
   }
 }
 
+function createMutationResponse(
+  c: AppContext,
+  outcome: ObjectMutationOutcome,
+  successStatus: 200 | 201 = 201,
+): Response {
+  if (outcome.result.kind !== 'ok') return mutationResponse(c, outcome.result)
+  return c.json({
+    object: outcome.result.object,
+    collectionVersion: outcome.result.collectionVersion,
+    replayed: outcome.replayed,
+  }, successStatus)
+}
+
 function deleteMutationResponse(
   c: AppContext,
   result: ObjectMutationResult,
@@ -98,11 +105,29 @@ export function createObjectsRoutes(
   contents: CollectionContents,
 ): Hono<{ Variables: AuthContext }> {
   const routes = new Hono<{ Variables: AuthContext }>()
+  routes.route('/', createBatchBlobObjectRoutes(contents))
+
+  routes.get('/:cid/create-mutations/:mutationId', async (c) => {
+    const mutationId = c.req.param('mutationId')
+    if (!isValidMutationId(mutationId)) {
+      return c.json({ error: 'invalid Mutation-Id' }, 400)
+    }
+    const outcome = await contents.getCreateMutationOutcome({
+      userId: c.var.user.id,
+      collectionId: c.req.param('cid'),
+      mutationId,
+    })
+    if (outcome.kind === 'missing') return c.json({ error: 'not found' }, 404)
+    if (outcome.kind === 'pending') {
+      return c.json({ error: 'mutation still in progress' }, 409)
+    }
+    return createMutationResponse(c, outcome.outcome, 200)
+  })
 
   routes.get('/:cid/objects', async (c) => {
     const userId = c.var.user.id
     const cid = c.req.param('cid')
-    if (!(await ensureCollectionOwned(userId, cid))) {
+    if (!(await collectionBelongsToUser({ userId, collectionId: cid }))) {
       return c.json({ error: 'not found' }, 404)
     }
     const sinceVersion = Number(c.req.query('sinceVersion') ?? 0)
@@ -167,14 +192,14 @@ export function createObjectsRoutes(
     ) {
       return c.json({ error: 'valid blob_key and size_bytes required' }, 400)
     }
-    const result = await contents.mutateObject({
+    const outcome = await contents.mutateObjectWithReplay({
       kind: 'create',
       userId,
       collectionId: c.req.param('cid'),
       stagedBlobKey: body.blob_key,
       mutationId: c.req.header('Mutation-Id'),
     })
-    return mutationResponse(c, result, 201)
+    return createMutationResponse(c, outcome)
   })
 
   routes.put('/:cid/objects/:oid', async (c) => {
@@ -232,14 +257,14 @@ export function createObjectsRoutes(
     if (body.byteLength === 0) {
       return c.json({ error: 'empty body' }, 400)
     }
-    const result = await contents.mutateObject({
+    const outcome = await contents.mutateObjectWithReplay({
       kind: 'create',
       userId: c.var.user.id,
       collectionId: c.req.param('cid'),
       blobData: body,
       mutationId: c.req.header('Mutation-Id'),
     })
-    return mutationResponse(c, result, 201)
+    return createMutationResponse(c, outcome)
   })
 
   routes.put('/:cid/blob-objects/:oid', blobLimit, async (c) => {

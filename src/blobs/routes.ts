@@ -4,9 +4,8 @@ import type { AuthContext } from '../auth/middleware.ts'
 import type { BlobStore } from '../blob/interface.ts'
 import type { CollectionContents } from '../collection-contents/index.ts'
 import { env } from '../env.ts'
+import { isUuidIdentifier } from '../identifiers/is-uuid-identifier.ts'
 import { log } from '../logger.ts'
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 const blobLimit = bodyLimit({
   maxSize: env.MAX_BLOB_BYTES,
@@ -136,7 +135,7 @@ export function createBlobRoutes(
         const frameIndex = index++
         const key = keys[frameIndex]
         const [keyUserId, blobId, extra] = key.split('/')
-        if (extra !== undefined || keyUserId !== userId || !UUID_RE.test(blobId ?? '')) {
+        if (extra !== undefined || keyUserId !== userId || !isUuidIdentifier(blobId ?? '')) {
           send(key, BATCH_STATUS_MISSING, null)
           return
         }
@@ -185,7 +184,7 @@ export function createBlobRoutes(
     const paramBlobId = c.req.param('blobId')
 
     // Ownership check — return 404 (not 403) to avoid existence leaks.
-    if (paramUserId !== userId || !UUID_RE.test(paramBlobId)) {
+    if (paramUserId !== userId || !isUuidIdentifier(paramBlobId)) {
       return c.json({ error: 'not found' }, 404)
     }
 
@@ -205,7 +204,7 @@ export function createBlobRoutes(
     const paramUserId = c.req.param('userId')
     const paramBlobId = c.req.param('blobId')
 
-    if (paramUserId !== userId || !UUID_RE.test(paramBlobId)) {
+    if (paramUserId !== userId || !isUuidIdentifier(paramBlobId)) {
       return c.json({ error: 'not found' }, 404)
     }
 

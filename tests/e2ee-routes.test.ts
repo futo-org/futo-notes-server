@@ -310,6 +310,7 @@ test('Mutation-Id replays a one-call create without replacing its ciphertext', a
   const first = await firstResponse.json() as {
     object: { id: string; blob_key: string }
     collectionVersion: number
+    replayed: boolean
   }
 
   const retryResponse = await app.fetch(new Request(
@@ -325,7 +326,11 @@ test('Mutation-Id replays a one-call create without replacing its ciphertext', a
     },
   ))
   assert.equal(retryResponse.status, 201)
-  assert.deepEqual(await retryResponse.json(), first)
+  const replay = await retryResponse.json() as typeof first
+  assert.deepEqual(replay.object, first.object)
+  assert.equal(replay.collectionVersion, first.collectionVersion)
+  assert.equal(first.replayed, false)
+  assert.equal(replay.replayed, true)
 
   const blob = await app.fetch(new Request(
     `http://test.local/api/blobs/${first.object.blob_key}`,
@@ -333,6 +338,55 @@ test('Mutation-Id replays a one-call create without replacing its ciphertext', a
   ))
   assert.equal(blob.status, 200)
   assert.equal(await blob.text(), 'original-ciphertext')
+})
+
+test('creates without Mutation-Id remain independent for older clients', async () => {
+  const email = `legacy-create-${Date.now()}-${Math.random().toString(16).slice(2)}@example.test`
+  const login = await json<{ token: string }>('/api/auth/dev/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, name: 'Legacy Create Test' }),
+  })
+  const auth = { Authorization: `Bearer ${login.token}` }
+  const created = await json<{ collection: { id: string } }>('/api/collections', {
+    method: 'POST',
+    headers: auth,
+  })
+  const createUrl = `http://test.local/api/collections/${created.collection.id}/blob-objects`
+
+  const createWithoutMutationId = async (body: string) => {
+    const response = await app.fetch(new Request(createUrl, {
+      method: 'POST',
+      headers: { ...auth, 'Content-Type': 'application/octet-stream' },
+      body,
+    }))
+    assert.equal(response.status, 201)
+    return response.json() as Promise<{
+      object: { id: string; blob_key: string }
+      replayed: boolean
+    }>
+  }
+
+  const first = await createWithoutMutationId('first-ciphertext')
+  const retry = await createWithoutMutationId('edited-retry-ciphertext')
+
+  assert.notEqual(retry.object.id, first.object.id)
+  assert.equal(first.replayed, false)
+  assert.equal(retry.replayed, false)
+  const [firstBlob, retryBlob] = await Promise.all([
+    app.fetch(new Request(
+      `http://test.local/api/blobs/${first.object.blob_key}`,
+      { headers: auth },
+    )),
+    app.fetch(new Request(
+      `http://test.local/api/blobs/${retry.object.blob_key}`,
+      { headers: auth },
+    )),
+  ])
+  assert.equal(firstBlob.status, 200)
+  assert.equal(retryBlob.status, 200)
+  assert.equal(await firstBlob.text(), 'first-ciphertext')
+  assert.equal(await retryBlob.text(), 'edited-retry-ciphertext')
 })
 
 test('deleting a collection removes its objects and leaves blobs for maintenance', async () => {

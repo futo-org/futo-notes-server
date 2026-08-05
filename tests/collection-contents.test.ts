@@ -221,7 +221,53 @@ test('a Mutation ID returns its original result and cannot identify a different 
   })
   assert.deepEqual(replayed, created)
 
+  const replayOutcome = await contents.mutateObjectWithReplay({
+    kind: 'create',
+    userId,
+    collectionId,
+    stagedBlobKey: staged.blobKey,
+    mutationId,
+  })
+  assert.equal(replayOutcome.replayed, true)
+  assert.deepEqual(replayOutcome.result, created)
+
+  const recovered = await contents.getCreateMutationOutcome({
+    userId,
+    collectionId,
+    mutationId,
+  })
+  assert.deepEqual(recovered, {
+    kind: 'found',
+    outcome: { result: created, replayed: true },
+  })
+
+  const failedMutationId = uuidv7()
+  const failed = await contents.mutateObject({
+    kind: 'create',
+    userId,
+    collectionId,
+    stagedBlobKey: `${userId}/${uuidv7()}`,
+    mutationId: failedMutationId,
+  })
+  assert.deepEqual(failed, { kind: 'blob_not_staged' })
+  assert.deepEqual(
+    await contents.getCreateMutationOutcome({
+      userId,
+      collectionId,
+      mutationId: failedMutationId,
+    }),
+    { kind: 'missing' },
+  )
+
   const other = await createUserAndCollection()
+  assert.deepEqual(
+    await contents.getCreateMutationOutcome({
+      userId,
+      collectionId: other.collectionId,
+      mutationId,
+    }),
+    { kind: 'missing' },
+  )
   const mismatch = await contents.mutateObject({
     kind: 'create',
     userId,
@@ -307,6 +353,76 @@ test('Mutation IDs replay updates and deletes without another collection change'
     .select('current_version')
     .executeTakeFirstOrThrow()
   assert.equal(collection.current_version, '3')
+})
+
+test('create lookup reports an in-progress mutation before blob staging finishes', async () => {
+  const { userId, collectionId } = await createUserAndCollection()
+  const mutationId = uuidv7()
+  let markStagingStarted!: () => void
+  let finishStaging!: () => void
+  const stagingStarted = new Promise<void>((resolve) => { markStagingStarted = resolve })
+  const stagingFinished = new Promise<void>((resolve) => { finishStaging = resolve })
+  const blockingStore: BlobStore = {
+    get: (key) => store.get(key),
+    list: (prefix) => store.list(prefix),
+    delete: (key) => store.delete(key),
+    put: async (key, data) => {
+      markStagingStarted()
+      await stagingFinished
+      await store.put(key, data)
+    },
+  }
+  const blockingContents = new CollectionContents({
+    db,
+    store: blockingStore,
+    notifier,
+    now: () => currentTime,
+  })
+
+  const create = blockingContents.mutateObject({
+    kind: 'create',
+    userId,
+    collectionId,
+    mutationId,
+    blobData: new TextEncoder().encode('still staging'),
+  })
+  await stagingStarted
+  assert.deepEqual(
+    await blockingContents.getCreateMutationOutcome({ userId, collectionId, mutationId }),
+    { kind: 'pending' },
+  )
+  finishStaging()
+  const created = await create
+  assert.equal(created.kind, 'ok')
+  assert.deepEqual(
+    await blockingContents.getCreateMutationOutcome({ userId, collectionId, mutationId }),
+    { kind: 'found', outcome: { result: created, replayed: true } },
+  )
+})
+
+test('an abandoned in-progress create claim expires with staged blobs', async () => {
+  const { userId, collectionId } = await createUserAndCollection()
+  const mutationId = uuidv7()
+  currentTime = new Date('2026-07-24T12:00:00.000Z')
+  await db
+    .insertInto('mutation_results')
+    .values({
+      user_id: userId,
+      mutation_id: mutationId,
+      kind: 'create',
+      collection_id: collectionId,
+      object_id: null,
+      requested_version: null,
+      result: { kind: 'pending' },
+      created_at: currentTime,
+    })
+    .execute()
+
+  currentTime = new Date('2026-07-25T12:00:00.000Z')
+  assert.deepEqual(
+    await contents.getCreateMutationOutcome({ userId, collectionId, mutationId }),
+    { kind: 'missing' },
+  )
 })
 
 test('an unclaimed staged blob is removed after the fixed 24-hour window', async () => {
@@ -435,6 +551,7 @@ test('direct deletion removes staged or untracked blobs, but not in-use blobs', 
 test('deleting a collection makes its claimed and retained blobs immediately purgeable', async () => {
   const { userId, collectionId } = await createUserAndCollection()
   currentTime = new Date('2026-07-24T12:00:00.000Z')
+  const mutationId = uuidv7()
   const firstBlob = await contents.stageBlob({
     userId,
     data: new TextEncoder().encode('first-version'),
@@ -444,6 +561,7 @@ test('deleting a collection makes its claimed and retained blobs immediately pur
     userId,
     collectionId,
     stagedBlobKey: firstBlob.blobKey,
+    mutationId,
   })
   assert.equal(created.kind, 'ok')
   if (created.kind !== 'ok') return
@@ -482,6 +600,15 @@ test('deleting a collection makes its claimed and retained blobs immediately pur
       .select('blob_key')
       .execute(),
     [],
+  )
+  assert.equal(
+    await db
+      .selectFrom('mutation_results')
+      .where('user_id', '=', userId)
+      .where('mutation_id', '=', mutationId)
+      .select('mutation_id')
+      .executeTakeFirst(),
+    undefined,
   )
 })
 
@@ -542,7 +669,7 @@ test('a retained merge ancestor remains available for one year', async () => {
   assert.ok(await store.get(secondBlob.blobKey))
 })
 
-test('a Mutation ID can identify a new intent at the fixed 30-day boundary', async () => {
+test('a successful create keeps its Mutation ID after the 30-day window', async () => {
   const { userId, collectionId } = await createUserAndCollection()
   currentTime = new Date('2026-07-24T12:00:00.000Z')
   const staged = await contents.stageBlob({
@@ -582,22 +709,52 @@ test('a Mutation ID can identify a new intent at the fixed 30-day boundary', asy
   )
 
   currentTime = new Date('2026-08-23T12:00:00.000Z')
-  // Expiry is part of Mutation-ID semantics, not a side effect of whether the
-  // maintenance loop happened to run at the boundary. A different intent must
-  // be free to reuse the expired identifier instead of seeing a stale mismatch.
-  const reused = await contents.mutateObject({
+  await contents.runMaintenance()
+  assert.deepEqual(
+    await contents.getCreateMutationOutcome({ userId, collectionId, mutationId }),
+    { kind: 'found', outcome: { result: created, replayed: true } },
+  )
+  assert.deepEqual(await contents.mutateObject({
+    kind: 'create',
+    userId,
+    collectionId,
+    stagedBlobKey: staged.blobKey,
+    mutationId,
+  }), created)
+  assert.deepEqual(await contents.mutateObject({
     kind: 'delete',
     userId,
     collectionId,
     objectId: created.object.id,
     expectedVersion: 1,
     mutationId,
+  }), { kind: 'mutation_mismatch' })
+})
+
+test('other Mutation ID outcomes expire after 30 days without maintenance', async () => {
+  const { userId, collectionId } = await createUserAndCollection()
+  currentTime = new Date('2026-07-24T12:00:00.000Z')
+  const mutationId = uuidv7()
+  assert.equal((await contents.mutateObject({
+    kind: 'delete',
+    userId,
+    collectionId,
+    objectId: uuidv7(),
+    mutationId,
+  })).kind, 'not_found')
+
+  currentTime = new Date('2026-08-23T12:00:00.000Z')
+  const staged = await contents.stageBlob({
+    userId,
+    data: new TextEncoder().encode('reused after expiry'),
   })
-  assert.equal(reused.kind, 'ok')
-  if (reused.kind !== 'ok') return
-  assert.equal(reused.object.deleted, true)
-  assert.equal(reused.object.version, '2')
-  assert.equal(reused.collectionVersion, 2)
+  assert.equal((await contents.mutateObject({
+    kind: 'create',
+    userId,
+    collectionId,
+    stagedBlobKey: staged.blobKey,
+    mutationId,
+  })).kind, 'ok')
 })
 
 test('maintenance reconciles an untracked stored blob as freshly staged', async () => {
@@ -820,17 +977,13 @@ test('reconciliation still runs when garbage collection is disabled', async () =
     data: new TextEncoder().encode('would-expire'),
   })
   const mutationId = uuidv7()
-  const mutationBlob = await contents.stageBlob({
-    userId,
-    data: new TextEncoder().encode('expired-mutation-result'),
-  })
   assert.equal((await contents.mutateObject({
-    kind: 'create',
+    kind: 'delete',
     userId,
     collectionId,
-    stagedBlobKey: mutationBlob.blobKey,
+    objectId: uuidv7(),
     mutationId,
-  })).kind, 'ok')
+  })).kind, 'not_found')
 
   currentTime = new Date('2026-08-24T12:00:00.000Z')
   const result = await runBlobMaintenanceOnce(contents, { collectGarbage: false })

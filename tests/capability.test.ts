@@ -18,6 +18,7 @@ test('GET / returns capability JSON', async () => {
       supported: boolean
       required: boolean
       retention_days: number
+      successful_create_outcomes: string
     }
   }
   assert.equal(data.name, 'futo-notes')
@@ -29,5 +30,6 @@ test('GET / returns capability JSON', async () => {
     supported: true,
     required: false,
     retention_days: 30,
+    successful_create_outcomes: 'durable',
   })
 })
