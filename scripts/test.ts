@@ -19,6 +19,7 @@ const groups = [
       'isolation',
       'blob-limit',
       'blobs-batch',
+      'blob-objects-batch',
     ],
   },
   {

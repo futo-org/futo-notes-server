@@ -66,9 +66,10 @@ export const env = {
   BLOB_GC_ENABLED: process.env.BLOB_GC_ENABLED !== 'false',
   // Max accepted request body size for blob uploads, in bytes (default 100 MiB).
   MAX_BLOB_BYTES: Number(process.env.MAX_BLOB_BYTES ?? 104857600),
-  // Complete encoded-response cap for one POST /api/blobs/batch response, in bytes
-  // (default 32 MiB). Entries past the cap return status=omitted; the first
-  // blob of a response always ships so clients make progress.
+  // Shared batch payload cap (default 32 MiB). It limits one
+  // POST /api/blobs/batch response and one blob-objects/batch request.
+  // Download entries past the cap return status=omitted; the first blob of a
+  // response always ships so clients make progress.
   MAX_BATCH_BYTES: Number(process.env.MAX_BATCH_BYTES ?? 33554432),
   // Login rate limiting. Caps password attempts per client per window,
   // blunting brute force and hash-mode CPU amplification. 0 disables.

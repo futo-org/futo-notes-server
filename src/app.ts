@@ -57,6 +57,7 @@ export function buildApp(): Hono<{ Variables: AuthContext }> {
       supported: true,
       required: false,
       retention_days: 30,
+      successful_create_outcomes: 'durable',
     },
   }))
 

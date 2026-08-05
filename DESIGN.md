@@ -105,7 +105,8 @@ retry without clearing their local vault cursor/object map.
 `GET /` returns `{ name, version, auth_mode, signup, billing, mutation_ids }`.
 Clients fetch it once at server-add time to render the right login UI and
 discover retry-safety support. `mutation_ids` is
-`{ supported: true, required: false, retention_days: 30 }`.
+`{ supported: true, required: false, retention_days: 30,
+successful_create_outcomes: "durable" }`.
 
 ### Yucca migration path
 Yucca's auth is built — `packages/yucca-api` has a working OIDC Authorization Code + PKCE implementation (via the public `openid-client` library, generic issuer discovery) with opaque session tokens and a 7-day httpOnly cookie (a `mock-oidc-provider` package backs local dev). The session model is already identical to this design, so migration stays a config change: point `OIDC_ISSUER` at the shared IdP when OIDC lands here. No session-layer code changes needed.
@@ -256,10 +257,20 @@ The former `orphaned_blobs` table is retained only for safe downgrade and
 migration auditing; runtime code neither reads nor writes it.
 
 `mutation_results` records the original outcome of an optional client-generated
-Mutation ID for 30 days. Its key is `(user_id, mutation_id)`, and its stored
+Mutation ID. Successful creates remain for the collection lifetime so a lookup
+can distinguish a lost response from a request that never committed; other
+outcomes expire after 30 days. New clients use opaque 1–128 character URL/header-safe
+ASCII tokens so classic and batch transports preserve the same identity;
+classic routes continue accepting their broader legacy syntax. Its key is
+`(user_id, mutation_id)`, and its stored
 intent includes mutation kind, collection, object, and requested version.
-Collection and object IDs intentionally are not foreign keys: a retry must still
-receive its original outcome after those rows have been deleted.
+Collection and object IDs intentionally are not foreign keys: object deletion
+does not erase retry ownership. Collection deletion explicitly removes its
+mutation results because that sync namespace no longer exists.
+Creates insert an in-progress result before blob staging. The recovery lookup
+returns `409` for that state instead of a false `404`; the final mutation
+transaction replaces it with the authoritative outcome. Pending claims use the
+same 24-hour lifetime as staged blobs.
 
 ### Users and sessions
 
@@ -431,6 +442,8 @@ POST   /api/collections/:id/objects               → create object
 GET    /api/collections/:id/objects/:objectId     → get object metadata
 PUT    /api/collections/:id/objects/:objectId     → update object (push new version)
 DELETE /api/collections/:id/objects/:objectId     → soft delete
+POST   /api/collections/:id/blob-objects/batch    → batch create/update with inline ciphertext
+GET    /api/collections/:id/create-mutations/:id  → recover a durable create outcome
 ```
 
 ### Blobs

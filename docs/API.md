@@ -64,7 +64,8 @@ GET $BASE/
   "mutation_ids": {
     "supported": true,
     "required": false,
-    "retention_days": 30
+    "retention_days": 30,
+    "successful_create_outcomes": "durable"
   }
 }
 ```
@@ -72,8 +73,9 @@ GET $BASE/
 - `auth_mode` is `"dev"` or `"password"` (`"oidc"` is reserved for later). It tells you which login endpoint to use.
 - `signup` is `"closed"` in v1.
 - `mutation_ids` advertises retry-safe object mutations. They are supported but
-  optional for backward compatibility, and recorded outcomes are retained for a
-  fixed 30 days.
+  optional for backward compatibility. Successful create outcomes remain
+  available for the collection lifetime; other recorded outcomes are retained for
+  30 days.
 
 Health check (no auth):
 ```
@@ -213,33 +215,61 @@ Apply the rows in order, then advance your cursor to the highest `change_seq` yo
 
 ### Retry safety with Mutation IDs
 
-Send an opaque, client-generated `Mutation-Id` header on every create, update,
+Send a client-generated `Mutation-Id` header on every create, update,
 or delete. Reuse that value only when retrying the same intended mutation.
 
 After syntax and field validation succeeds, the first mutation outcome is
-recorded for 30 days. A retry returns that exact outcome
+recorded. Successful create outcomes remain for the collection lifetime; other
+outcomes expire after 30 days. A retry inside its retention window returns that exact outcome
 without advancing an object version or collection cursor again, or publishing
 another change notification—the retry body is ignored, and the object keeps
-the blob key from the original attempt. On the single-round-trip
-`blob-objects` routes, staging happens before the Mutation ID check runs, so a
-retry still stages its ciphertext as a new blob; that blob is just never
-claimed, and expires automatically on the normal 24h staging window—so a
-one-call retry isn't entirely free, but it can't create a second object or
-change what the client observes. Reusing the ID for a different mutation kind,
+the blob key from the original attempt. Completed Mutation IDs are checked
+before a one-call create stages ciphertext, so ordinary replays do not create
+an extra staged blob. Concurrent requests that both observe the in-progress
+claim may stage independently, but only one can finalize it; any unclaimed blob
+expires on the normal 24-hour staging window. Reusing the ID for a different mutation kind,
 collection, object, or requested version returns:
 
 ```json
 { "error": "Mutation-Id reused for different intent" }
 ```
 
-with status `409`. IDs must contain 1–128 characters. They are currently
+with status `409`. Classic routes retain the published contract of any non-empty
+1–128-character header value; percent-encode that value when using the retained
+outcome lookup path. Framed batch creates require 1–128 URL/header-safe ASCII
+characters: letters, digits, `.`, `_`, `~`, and `-`. New clients should use
+that batch-safe syntax on every route so fallback preserves the ID unchanged.
+IDs are currently
 optional so older clients continue to work, but clients should use them for
 every mutation—especially single-round-trip creates, whose success response may
-be lost after the server commits. Definitive outcomes produced by the mutation
+be lost after the server commits. A request without `Mutation-Id` remains an
+independent mutation: each successful create keeps its submitted ciphertext,
+but retrying after a lost create response can produce a duplicate
+object. Definitive outcomes produced by the mutation
 coordinator, including `404` and `409`, are recorded just like success. Requests
 rejected before that point—invalid JSON or fields, empty or oversized bodies,
 or an invalid Mutation ID—are not recorded because they do not provide a valid
 mutation intent.
+
+The server records an in-progress claim for a create Mutation ID before staging
+its blob. This closes the window where recovery could report a missing outcome
+while the original request was still committing. An abandoned claim becomes
+missing after the same 24-hour window used for staged blobs.
+
+If a client has lost the original create body—for example, the local file was
+deleted after an ambiguous response—it can recover the successful create
+outcome without replaying ciphertext:
+
+```http
+GET /api/collections/:cid/create-mutations/:mutationId
+```
+
+The response has the normal create shape with `"replayed": true`. A create that
+is still staging returns `409 { "error": "mutation still in progress" }`; the
+client must retain its pending state and retry. For an existing collection, a
+`404` proves that the scoped Mutation ID never committed a create. Clients that
+use that result to discard pending state must be released only after a server
+advertising `"successful_create_outcomes": "durable"` is deployed.
 
 ---
 
@@ -343,6 +373,60 @@ POST $BASE/api/collections/:cid/blob-objects              → 201 { "object", "c
 PUT  $BASE/api/collections/:cid/blob-objects/:oid?version=N → 200 { "object", "collectionVersion" }   // update; ?version required
     → 400 empty body | 404 collection/object | 409 conflict
 ```
+
+Create responses also include the additive boolean `replayed`. It is `false`
+when this request commits the Mutation ID and `true` when the server returns
+that Mutation ID's retained outcome. Retry ciphertext never replaces the
+original blob.
+
+### Batch single-round-trip uploads
+
+```
+POST $BASE/api/collections/:cid/blob-objects/batch
+Content-Type: application/octet-stream
+```
+
+The request body concatenates up to 200 create or update frames:
+
+```
+[u8 operation][u16 identifierLen][identifier utf8][u32 version][u32 blobLen][blob bytes]
+```
+
+Integers are big-endian. Operation `0` creates an object: `identifier` is the
+client-generated Mutation ID and `version` must be zero. Retrying that frame
+reuses the same Mutation ID and returns the original object even when the retry
+carries different ciphertext. Operation `1` updates an object: `identifier` is
+the object ID and `version` must be the next positive object version. The
+current protocol does not attach a Mutation ID to batch updates; their existing
+version guard still prevents a retry from advancing the version twice.
+
+The response preserves request order:
+
+```json
+{
+  "results": [
+    { "status": "created", "object": { "...": "..." }, "collectionVersion": 1 },
+    { "status": "updated", "object": { "...": "..." }, "collectionVersion": 2 }
+  ]
+}
+```
+
+| Status | Meaning |
+|--------|---------|
+| `created` | The create Mutation ID committed and returned `object`, `collectionVersion` |
+| `replayed` | The create Mutation ID already had a retained outcome; retry ciphertext was ignored |
+| `updated` | The versioned update committed and returned `object`, `collectionVersion` |
+| `conflict` | Stale update; returns `currentVersion`, `currentBlobKey` |
+| `not_found` | The update target is absent or not owned by the caller |
+| `too_large` | This entry exceeds `MAX_BLOB_BYTES` |
+| `error` | This entry failed operationally; later entries are still attempted |
+
+Entries are coordinated independently through the same Collection Contents
+module as classic writes. Each successful non-replay mutation publishes its
+own transactional SSE change event; conflicts, failures, and replays publish
+none. Malformed framing, an empty batch, or more than 200 entries rejects the
+complete request with `400`. A request body over `MAX_BATCH_BYTES` (default
+32 MiB) returns `413`.
 
 ---
 

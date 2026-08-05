@@ -3,14 +3,22 @@ import { sql } from 'kysely'
 import { uuidv7 } from 'uuidv7'
 import type { BlobStore } from '../blob/interface.ts'
 import type { Database, ObjectsTable } from '../db/types.ts'
+import { isUuidIdentifier } from '../identifiers/is-uuid-identifier.ts'
 import { log } from '../logger.ts'
 import type { Notifier } from '../sync/notifier.ts'
+import { findCreateMutationResult } from './find-create-mutation-result.ts'
+import { isValidMutationId } from './mutation-id.ts'
 
 const STAGED_BLOB_RETENTION_MS = 24 * 60 * 60 * 1000
 const RETAINED_BLOB_RETENTION_MS = 365 * 24 * 60 * 60 * 1000
-const MUTATION_RESULT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
+const TRANSIENT_MUTATION_RESULT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
 const MAINTENANCE_BATCH_SIZE = 500
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+interface BlobDeletionBatch {
+  candidates: number
+  deleted: number
+  failed: number
+}
 
 // The one projection for object rows. Every read and write path selects exactly
 // these columns, so the shape cannot drift between them — and this is the single
@@ -97,6 +105,17 @@ export type ObjectMutationResult =
   | { kind: 'invalid_mutation_id' }
   | { kind: 'mutation_mismatch' }
 
+/** Reports whether an object mutation returned a retained Mutation ID outcome. */
+export interface ObjectMutationOutcome {
+  result: ObjectMutationResult
+  replayed: boolean
+}
+
+export type CreateMutationLookup =
+  | { kind: 'found'; outcome: ObjectMutationOutcome }
+  | { kind: 'pending' }
+  | { kind: 'missing' }
+
 function intentObjectId(command: StagedObjectMutationCommand): string | null {
   return command.kind === 'create' ? null : command.objectId
 }
@@ -127,6 +146,42 @@ function decodeResult(value: Record<string, unknown>): ObjectMutationResult {
     }
   }
   return value as ObjectMutationResult
+}
+
+function isDurableCreateResult(
+  kind: string,
+  result: Record<string, unknown>,
+): boolean {
+  return kind === 'create' && result.kind === 'ok'
+}
+
+function isPendingMutationResult(result: Record<string, unknown>): boolean {
+  return result.kind === 'pending'
+}
+
+function mutationResultIsExpired(
+  kind: string,
+  result: Record<string, unknown>,
+  createdAt: Date,
+  now: Date,
+): boolean {
+  if (isDurableCreateResult(kind, result)) return false
+  const retention = isPendingMutationResult(result)
+    ? STAGED_BLOB_RETENTION_MS
+    : TRANSIENT_MUTATION_RESULT_RETENTION_MS
+  return createdAt.getTime() + retention <= now.getTime()
+}
+
+async function lockMutationId(
+  trx: Transaction<Database>,
+  userId: string,
+  mutationId: string,
+): Promise<void> {
+  await sql`
+    select pg_advisory_xact_lock(
+      hashtextextended(${`${userId}:${mutationId}`}, 0)
+    )
+  `.execute(trx)
 }
 
 async function lockBlobKey(
@@ -202,10 +257,20 @@ export class CollectionContents {
   }
 
   async expireMutationResults(): Promise<number> {
-    const mutationCutoff = new Date(this.now().getTime() - MUTATION_RESULT_RETENTION_MS)
+    const pendingCutoff = new Date(this.now().getTime() - STAGED_BLOB_RETENTION_MS)
+    const mutationCutoff = new Date(
+      this.now().getTime() - TRANSIENT_MUTATION_RESULT_RETENTION_MS,
+    )
     const deleted = await this.db
       .deleteFrom('mutation_results')
-      .where('created_at', '<=', mutationCutoff)
+      .where(sql<boolean>`
+        (result ->> 'kind' = 'pending' and created_at <= ${pendingCutoff})
+        or (
+          result ->> 'kind' <> 'pending'
+          and not (kind = 'create' and result ->> 'kind' = 'ok')
+          and created_at <= ${mutationCutoff}
+        )
+      `)
       .returning('mutation_id')
       .execute()
     return deleted.length
@@ -247,6 +312,11 @@ export class CollectionContents {
         .where('user_id', '=', input.userId)
         .where('collection_id', '=', input.collectionId)
         .where('state', 'in', ['claimed', 'retained'])
+        .execute()
+      await trx
+        .deleteFrom('mutation_results')
+        .where('user_id', '=', input.userId)
+        .where('collection_id', '=', input.collectionId)
         .execute()
       await trx
         .deleteFrom('collections')
@@ -345,11 +415,51 @@ export class CollectionContents {
   async mutateObject(
     command: ObjectMutationCommand,
   ): Promise<ObjectMutationResult> {
-    if (
-      command.mutationId !== undefined
-      && (command.mutationId.length < 1 || command.mutationId.length > 128)
-    ) {
-      return { kind: 'invalid_mutation_id' }
+    return (await this.mutateObjectWithReplay(command)).result
+  }
+
+  /** Looks up a successful or still-running create without replaying its body. */
+  async getCreateMutationOutcome(input: {
+    userId: string
+    collectionId: string
+    mutationId: string
+  }): Promise<CreateMutationLookup> {
+    return await this.db.transaction().execute(async (trx) => {
+      await lockMutationId(trx, input.userId, input.mutationId)
+      const retained = await findCreateMutationResult({ db: trx, ...input })
+      if (!retained) return { kind: 'missing' }
+      if (mutationResultIsExpired(
+        'create',
+        retained.result,
+        retained.created_at,
+        this.now(),
+      )) {
+        await trx
+          .deleteFrom('mutation_results')
+          .where('user_id', '=', input.userId)
+          .where('mutation_id', '=', input.mutationId)
+          .execute()
+        return { kind: 'missing' }
+      }
+      if (isPendingMutationResult(retained.result)) return { kind: 'pending' }
+      const result = decodeResult(retained.result)
+      return result.kind === 'ok'
+        ? { kind: 'found', outcome: { result, replayed: true } }
+        : { kind: 'missing' }
+    })
+  }
+
+  /** Mutates collection contents and identifies a retained Mutation ID replay. */
+  async mutateObjectWithReplay(
+    command: ObjectMutationCommand,
+  ): Promise<ObjectMutationOutcome> {
+    if (command.mutationId !== undefined && !isValidMutationId(command.mutationId)) {
+      return { result: { kind: 'invalid_mutation_id' }, replayed: false }
+    }
+
+    if (command.kind === 'create' && command.mutationId !== undefined) {
+      const replay = await this.reserveCreateMutation(command)
+      if (replay) return replay
     }
 
     // Stage inline ciphertext before opening the mutation transaction. Writing
@@ -362,11 +472,7 @@ export class CollectionContents {
 
     return await this.db.transaction().execute(async (trx) => {
       if (staged.mutationId !== undefined) {
-        await sql`
-          select pg_advisory_xact_lock(
-            hashtextextended(${`${staged.userId}:${staged.mutationId}`}, 0)
-          )
-        `.execute(trx)
+        await lockMutationId(trx, staged.userId, staged.mutationId)
         const existing = await trx
           .selectFrom('mutation_results')
           .where('user_id', '=', staged.userId)
@@ -381,8 +487,12 @@ export class CollectionContents {
           ])
           .executeTakeFirst()
         if (existing) {
-          const expiresAt = existing.created_at.getTime() + MUTATION_RESULT_RETENTION_MS
-          if (expiresAt <= this.now().getTime()) {
+          if (mutationResultIsExpired(
+            existing.kind,
+            existing.result,
+            existing.created_at,
+            this.now(),
+          )) {
             await trx
               .deleteFrom('mutation_results')
               .where('user_id', '=', staged.userId)
@@ -393,7 +503,12 @@ export class CollectionContents {
               && existing.collection_id === staged.collectionId
               && existing.object_id === intentObjectId(staged)
               && existing.requested_version === intentVersion(staged)
-            return matches ? decodeResult(existing.result) : { kind: 'mutation_mismatch' }
+            if (!matches) {
+              return { result: { kind: 'mutation_mismatch' }, replayed: false }
+            }
+            if (!isPendingMutationResult(existing.result)) {
+              return { result: decodeResult(existing.result), replayed: true }
+            }
           }
         }
       }
@@ -412,9 +527,80 @@ export class CollectionContents {
             result: encodeResult(result),
             created_at: this.now(),
           })
+          .onConflict((conflict) => conflict
+            .columns(['user_id', 'mutation_id'])
+            .doUpdateSet({ result: encodeResult(result), created_at: this.now() }))
           .execute()
       }
-      return result
+      return { result, replayed: false }
+    })
+  }
+
+  private async reserveCreateMutation(
+    command: CreateObjectCommand,
+  ): Promise<ObjectMutationOutcome | null> {
+    const mutationId = command.mutationId
+    if (mutationId === undefined) return null
+    return await this.db.transaction().execute(async (trx) => {
+      await lockMutationId(trx, command.userId, mutationId)
+      const existing = await trx
+        .selectFrom('mutation_results')
+        .where('user_id', '=', command.userId)
+        .where('mutation_id', '=', mutationId)
+        .select([
+          'kind',
+          'collection_id',
+          'object_id',
+          'requested_version',
+          'result',
+          'created_at',
+        ])
+        .executeTakeFirst()
+      if (existing && !mutationResultIsExpired(
+        existing.kind,
+        existing.result,
+        existing.created_at,
+        this.now(),
+      )) {
+        const matches = existing.kind === 'create'
+          && existing.collection_id === command.collectionId
+          && existing.object_id === null
+          && existing.requested_version === null
+        if (!matches) {
+          return { result: { kind: 'mutation_mismatch' }, replayed: false }
+        }
+        if (!isPendingMutationResult(existing.result)) {
+          return { result: decodeResult(existing.result), replayed: true }
+        }
+        await trx
+          .updateTable('mutation_results')
+          .set({ created_at: this.now() })
+          .where('user_id', '=', command.userId)
+          .where('mutation_id', '=', mutationId)
+          .execute()
+        return null
+      }
+      if (existing) {
+        await trx
+          .deleteFrom('mutation_results')
+          .where('user_id', '=', command.userId)
+          .where('mutation_id', '=', mutationId)
+          .execute()
+      }
+      await trx
+        .insertInto('mutation_results')
+        .values({
+          user_id: command.userId,
+          mutation_id: mutationId,
+          kind: 'create',
+          collection_id: command.collectionId,
+          object_id: null,
+          requested_version: null,
+          result: { kind: 'pending' },
+          created_at: this.now(),
+        })
+        .execute()
+      return null
     })
   }
 
@@ -664,40 +850,50 @@ export class CollectionContents {
     // the default six-hour interval a one-batch sweep would take days to
     // reclaim them.
     while (true) {
-      const candidates = await this.db
+      const batch = await this.deleteEligibleBlobBatch(state, cutoff)
+      if (batch.candidates === 0) break
+      deleted += batch.deleted
+
+      // Nothing moved, so the same rows would be selected forever. Leave them
+      // for the next cycle instead of spinning on them.
+      if (batch.deleted === 0) {
+        if (batch.failed > 0) {
+          log.warn('blob-maintenance: batch made no progress', {
+            state,
+            candidates: batch.candidates,
+            failed: batch.failed,
+          })
+        }
+        break
+      }
+      if (batch.candidates < MAINTENANCE_BATCH_SIZE) break
+    }
+    return deleted
+  }
+
+  private async deleteEligibleBlobBatch(
+    state: 'staged' | 'retained' | 'purgeable',
+    cutoff: Date,
+  ): Promise<BlobDeletionBatch> {
+    return await this.db.transaction().execute(async (trx) => {
+      const candidates = await trx
         .selectFrom('blob_ledger')
         .where('state', '=', state)
         .where('state_changed_at', '<=', cutoff)
         .select('blob_key')
         .limit(MAINTENANCE_BATCH_SIZE)
+        .forUpdate()
+        .skipLocked()
         .execute()
-      if (candidates.length === 0) break
+      const deletedKeys: string[] = []
+      let failed = 0
 
-      let removedInBatch = 0
-      let failedInBatch = 0
       for (const candidate of candidates) {
         try {
-          const removed = await this.db.transaction().execute(async (trx) => {
-            const row = await trx
-              .selectFrom('blob_ledger')
-              .where('blob_key', '=', candidate.blob_key)
-              .where('state', '=', state)
-              .where('state_changed_at', '<=', cutoff)
-              .select('blob_key')
-              .forUpdate()
-              .executeTakeFirst()
-            if (!row) return false
-            await this.store.delete(row.blob_key)
-            await trx
-              .deleteFrom('blob_ledger')
-              .where('blob_key', '=', row.blob_key)
-              .where('state', '=', state)
-              .execute()
-            return true
-          })
-          if (removed) removedInBatch += 1
+          await this.store.delete(candidate.blob_key)
+          deletedKeys.push(candidate.blob_key)
         } catch (error) {
-          failedInBatch += 1
+          failed += 1
           // Keep the ledger row authoritative so the next cycle retries this
           // blob, while allowing unrelated candidates in the batch to progress.
           log.warn('blob-maintenance: delete failed', {
@@ -707,23 +903,21 @@ export class CollectionContents {
           })
         }
       }
-      deleted += removedInBatch
 
-      // Nothing moved, so the same rows would be selected forever. Leave them
-      // for the next cycle instead of spinning on them.
-      if (removedInBatch === 0) {
-        if (failedInBatch > 0) {
-          log.warn('blob-maintenance: batch made no progress', {
-            state,
-            candidates: candidates.length,
-            failed: failedInBatch,
-          })
-        }
-        break
+      if (deletedKeys.length > 0) {
+        await trx
+          .deleteFrom('blob_ledger')
+          .where('blob_key', 'in', deletedKeys)
+          .where('state', '=', state)
+          .where('state_changed_at', '<=', cutoff)
+          .execute()
       }
-      if (candidates.length < MAINTENANCE_BATCH_SIZE) break
-    }
-    return deleted
+      return {
+        candidates: candidates.length,
+        deleted: deletedKeys.length,
+        failed,
+      }
+    })
   }
 
   private async lockStagedBlob(
@@ -752,7 +946,7 @@ export class CollectionContents {
     for (const blobKey of await this.store.list('')) {
       const [userId, blobId, extra] = blobKey.split('/')
       if (userId === undefined || blobId === undefined || extra !== undefined) continue
-      if (!UUID_RE.test(userId) || !UUID_RE.test(blobId)) continue
+      if (!isUuidIdentifier(userId) || !isUuidIdentifier(blobId)) continue
       candidates.push({ blobKey, userId })
     }
 
