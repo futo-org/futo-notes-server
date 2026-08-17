@@ -1,10 +1,16 @@
 package main
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
-	"os"
+	"time"
+
+	"futo-notes-server/internal/config"
+	"futo-notes-server/internal/db"
 )
 
 const (
@@ -58,26 +64,39 @@ func handleCapability(authMode string) http.HandlerFunc {
 	}
 }
 
-func handleHealth(w http.ResponseWriter, r *http.Request) {
-	// No database yet: report connected unconditionally until Postgres
-	// support lands, then this becomes a real ping with a 503 branch.
-	writeJSON(w, http.StatusOK, struct {
-		Status string `json:"status"`
-		DB     string `json:"db"`
-	}{Status: "ok", DB: "connected"})
+type healthStatus struct {
+	Status string `json:"status"`
+	DB     string `json:"db"`
+}
+
+func handleHealth(database *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		if err := database.PingContext(ctx); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, healthStatus{Status: "degraded", DB: "unreachable"})
+			return
+		}
+		writeJSON(w, http.StatusOK, healthStatus{Status: "ok", DB: "connected"})
+	}
 }
 
 func main() {
-	authMode := os.Getenv("AUTH_MODE")
-	if authMode == "" {
-		authMode = "password"
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	database, err := db.Open(cfg)
+	if err != nil {
+		log.Fatal(err)
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /{$}", handleCapability(authMode))
-	mux.HandleFunc("GET /health", handleHealth)
+	mux.HandleFunc("GET /{$}", handleCapability(cfg.AuthMode))
+	mux.HandleFunc("GET /health", handleHealth(database))
 
-	addr := ":3005"
+	addr := fmt.Sprintf(":%d", cfg.Port)
 	log.Printf("listening on %s", addr)
 	log.Fatal(http.ListenAndServe(addr, mux))
 }

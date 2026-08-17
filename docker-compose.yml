@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: futo-notes-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: futo_notes
+      POSTGRES_PASSWORD: futo_notes
+      POSTGRES_DB: futo_notes
+    ports:
+      - "5433:5432"
+    volumes:
+      - futo-notes-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U futo_notes -d futo_notes"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  futo-notes-pg-data:
