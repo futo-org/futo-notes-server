@@ -1,0 +1,1652 @@
+openapi: 3.0.3
+
+info:
+  title: FUTO Notes Sync API
+  version: "1.0.0"
+  description: |
+    HTTP contract for the FUTO Notes generic E2EE sync server. This document
+    describes API **v1**: the behavior shipped by the TypeScript server (0.6.x)
+    and the target the Go rewrite implements.
+
+    This file is the shape layer only. It cannot express the parts of the
+    contract that decide whether an implementation is actually correct:
+
+    - transaction boundaries and lock ordering for create/update/delete
+    - the `blob_ledger` state machine and blob lifetimes
+    - `mutation_results` retention tiers and the in-progress claim
+    - background job schedules
+
+    Those live in `Specs/Rewriting the server in Go.md` and `DESIGN.md`. Two
+    payloads here are custom binary framings that OpenAPI can only type as
+    `application/octet-stream` — their byte layouts are documented inline on the
+    relevant operations. The SSE stream is likewise described in prose on
+    `GET /api/sync/events`.
+
+    ## Value encoding
+
+    Read this before generating types. Two representations coexist deliberately.
+
+    Fields serialized straight off a database row are JSON **strings**, because
+    they are Postgres `bigint` columns:
+
+    - `object.version`, `object.change_seq`, `object.size_bytes`
+    - `collection.current_version`
+
+    Scalars the server computes are JSON **numbers**:
+
+    - `collectionVersion` (mutation responses)
+    - `currentVersion` (409 conflict bodies, SSE `change` events)
+    - `nextCursor` (paged list responses)
+
+    Requests run the other way: clients *send* `version` and `size_bytes` as
+    JSON numbers. So comparing `object.change_seq` against `collectionVersion`
+    compares a string to a number and never matches — coerce one side.
+
+    ## Ownership and existence
+
+    Anything the authenticated user does not own returns `404`, never `403`, so
+    the API does not leak existence across tenants.
+
+    ## Limits
+
+    | Limit | Default | Applies to |
+    |---|---|---|
+    | `MAX_BLOB_BYTES` | 100 MiB (104857600) | one blob upload body, one batch-upload entry |
+    | `MAX_BATCH_BYTES` | 32 MiB (33554432) | `blob-objects/batch` request body; `blobs/batch` response payload |
+    | batch-fetch request body | 64 KiB (65536) | `POST /api/blobs/batch` |
+    | batch fetch keys | 200 | `POST /api/blobs/batch` |
+    | batch fetch key length | 128 chars | each key in `POST /api/blobs/batch` |
+    | batch upload entries | 200 | `POST /api/collections/{cid}/blob-objects/batch` |
+    | pull page size | clamped to 1000 | `?limit` on the objects list |
+    | `Mutation-Id` length | 1–128 chars | every object mutation |
+    | login rate limit | 10 per 60s per client | `POST /api/auth/password/login` |
+    | session TTL | 7 days, no sliding renewal | all sessions |
+
+    Any operation may also return `500 {"error": "internal server error"}`; that
+    is omitted from individual operations below.
+  license:
+    name: FUTO Source First License
+    url: https://sourcefirst.com/
+
+servers:
+  - url: "{baseUrl}"
+    description: Any deployment origin
+    variables:
+      baseUrl:
+        default: http://localhost:3000
+
+security:
+  - bearerAuth: []
+  - cookieAuth: []
+
+tags:
+  - name: capability
+    description: Unauthenticated discovery and health
+  - name: auth
+    description: Login, session identity, logout
+  - name: collections
+    description: Vault containers and encrypted vault key material
+  - name: objects
+    description: Versioned metadata rows pointing at blobs
+  - name: blobs
+    description: Opaque ciphertext storage
+  - name: sync
+    description: Change notification stream
+
+paths:
+  /:
+    get:
+      operationId: getCapability
+      tags: [capability]
+      security: []
+      summary: Capability discovery
+      description: |
+        Called once when a user adds a server, so one client build can drive any
+        deployment's login flow and know whether retry-safe mutations exist.
+      responses:
+        "200":
+          description: Server capabilities
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Capability"
+
+  /health:
+    get:
+      operationId: getHealth
+      tags: [capability]
+      security: []
+      summary: Health check
+      responses:
+        "200":
+          description: Database reachable
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, db]
+                properties:
+                  status:
+                    type: string
+                    enum: [ok]
+                  db:
+                    type: string
+                    enum: [connected]
+        "503":
+          description: Database unreachable
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, db]
+                properties:
+                  status:
+                    type: string
+                    enum: [degraded]
+                  db:
+                    type: string
+                    enum: [unreachable]
+
+  /api/auth/dev/login:
+    post:
+      operationId: devLogin
+      tags: [auth]
+      security: []
+      summary: Passwordless login (dev mode only)
+      description: |
+        Mounted only when `AUTH_MODE=dev`. Upserts a user by email and opens a
+        session. Development and tests only; the Go server may omit it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email:
+                  type: string
+                  description: Trimmed and lowercased by the server.
+                name:
+                  type: string
+                  description: Defaults to the email's local part.
+      responses:
+        "200":
+          $ref: "#/components/responses/LoginSuccess"
+        "400":
+          description: Invalid JSON, or `email` missing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/auth/password/login:
+    post:
+      operationId: passwordLogin
+      tags: [auth]
+      security: []
+      summary: Password login (password mode only)
+      description: |
+        Mounted only when `AUTH_MODE=password`. Verifies the submitted password
+        against the configured plaintext (`FUTO_NOTES_PASSWORD`) or scrypt hash
+        (`FUTO_NOTES_PASSWORD_HASH`), lazily upserts the singleton user
+        (`sub='local'`), and opens a session.
+
+        Rate limited to `AUTH_RATE_LIMIT` (default 10) attempts per
+        `AUTH_RATE_LIMIT_WINDOW_MS` (default 60000) per client, before the route
+        handler runs.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                password:
+                  type: string
+      responses:
+        "200":
+          $ref: "#/components/responses/LoginSuccess"
+        "400":
+          description: Invalid JSON, or `password` missing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Wrong password
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: invalid password }
+        "429":
+          description: |
+            Rate limit exceeded. Carries a `Retry-After` header in seconds.
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+                minimum: 1
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: too many requests }
+
+  /api/auth:
+    get:
+      operationId: getCurrentUser
+      tags: [auth]
+      summary: Who am I
+      responses:
+        "200":
+          description: The authenticated user
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user]
+                properties:
+                  user:
+                    $ref: "#/components/schemas/User"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/auth/logout:
+    post:
+      operationId: logout
+      tags: [auth]
+      summary: Destroy the current session
+      description: Deletes the session row and clears the `session` cookie.
+      responses:
+        "204":
+          description: Session destroyed
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/collections:
+    post:
+      operationId: claimCollection
+      tags: [collections]
+      summary: Claim the account's vault, or return the existing one
+      description: |
+        One vault per account. Takes no request body. Creates the vault the
+        first time (`201`) and returns that same vault on every later call
+        (`200`), so two devices setting up concurrently converge instead of
+        forking. Read the id from the response rather than branching on the
+        status.
+
+        Accounts holding several collections from before this cap keep all of
+        them; this route returns the oldest by `(created_at, id)`, which is the
+        one to sync against.
+      responses:
+        "201":
+          description: Vault created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CollectionEnvelope"
+        "200":
+          description: Vault already existed; this is it
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CollectionEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    get:
+      operationId: listCollections
+      tags: [collections]
+      summary: List the user's collections
+      description: Ordered oldest first by `(created_at, id)`.
+      responses:
+        "200":
+          description: The user's collections
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [collections]
+                properties:
+                  collections:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Collection"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/collections/{id}:
+    parameters:
+      - $ref: "#/components/parameters/CollectionId"
+    get:
+      operationId: getCollection
+      tags: [collections]
+      summary: Get one collection
+      responses:
+        "200":
+          description: The collection
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CollectionEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      operationId: deleteCollection
+      tags: [collections]
+      summary: Delete a collection
+      description: |
+        Objects cascade. The collection's claimed and retained blobs become
+        immediately purgeable and are removed by asynchronous maintenance
+        (storage bytes first, then ledger rows). Mutation results scoped to this
+        collection are deleted, because that sync namespace no longer exists.
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/collections/{id}/key:
+    parameters:
+      - $ref: "#/components/parameters/CollectionId"
+    get:
+      operationId: getCollectionKey
+      tags: [collections]
+      summary: Get encrypted vault key material
+      responses:
+        "200":
+          description: |
+            The stored material, or `{"key": null}` when the collection exists
+            but no key has been claimed yet.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [key]
+                properties:
+                  key:
+                    type: object
+                    nullable: true
+                    allOf:
+                      - $ref: "#/components/schemas/KeyMaterial"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      operationId: putCollectionKey
+      tags: [collections]
+      summary: Claim or rotate encrypted vault key material
+      description: |
+        All three material fields are opaque to the server.
+
+        **Claim** (no `previous_key_updated_at`): sets the material if none
+        exists. Resubmitting identical material is idempotent and returns the
+        original `key_updated_at`. Losing a race to mint the first key is *not*
+        an error — the server returns `200` with the **authoritative** material,
+        which may differ from what was sent. Adopt what comes back; one vault
+        has exactly one key, and the winner's key is never overwritten.
+
+        **Rotation** (replacing material that already exists): requires
+        `previous_key_updated_at` equal to the current `key_updated_at` from a
+        prior GET or PUT. The server treats it as an opaque revision token — do
+        not parse or synthesize it. A stale token returns `409` with the
+        authoritative material in `currentKey`.
+
+        A successful rotation does not emit an SSE `change` event; peers learn
+        about it on their next poll.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [key_salt, key_kdf, encrypted_vault_key]
+              properties:
+                key_salt:
+                  type: string
+                  minLength: 1
+                key_kdf:
+                  type: object
+                  description: Any JSON object — the client's KDF parameters.
+                  additionalProperties: true
+                encrypted_vault_key:
+                  type: string
+                  minLength: 1
+                previous_key_updated_at:
+                  type: string
+                  minLength: 1
+                  description: |
+                    Opaque revision token from a prior GET/PUT. Required for
+                    rotation, omitted for a first claim.
+      responses:
+        "200":
+          description: Material stored, or the authoritative material adopted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [key]
+                properties:
+                  key:
+                    $ref: "#/components/schemas/KeyMaterial"
+        "400":
+          description: Invalid JSON, or a missing/empty required field
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Stale rotation token
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error, currentKey]
+                properties:
+                  error:
+                    type: string
+                    enum: [key conflict]
+                  currentKey:
+                    $ref: "#/components/schemas/KeyMaterial"
+
+  /api/collections/{cid}/objects:
+    parameters:
+      - $ref: "#/components/parameters/CollectionIdCid"
+    get:
+      operationId: listObjects
+      tags: [objects]
+      summary: Pull objects changed since a cursor
+      description: |
+        Returns every object in the collection whose `change_seq` is greater
+        than `sinceVersion`, ordered ascending. Apply rows in order, then
+        advance the cursor to the highest `change_seq` received. `deleted: true`
+        rows are tombstones.
+
+        Omitting `limit` returns `{"objects": [...]}` with no row cap. Supplying
+        it adds `hasMore` and `nextCursor` to the response.
+      parameters:
+        - name: sinceVersion
+          in: query
+          required: false
+          description: Exclusive cursor. Defaults to 0 (full pull).
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+            default: 0
+        - name: limit
+          in: query
+          required: false
+          description: |
+            Page size. Values above 1000 are silently clamped to 1000, not
+            rejected. Values below 1 or non-integers return `400`.
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        "200":
+          description: The delta page
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ObjectList"
+                  - $ref: "#/components/schemas/PagedObjectList"
+        "400":
+          description: Invalid `sinceVersion` or `limit`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    post:
+      operationId: createObject
+      tags: [objects]
+      summary: Create an object from a staged blob
+      description: |
+        Two-call create: upload ciphertext with `POST /api/blobs` first, then
+        name the returned key here. `blob_key` must be `{your-user-id}/{uuid}`
+        and must still be staged; a key already claimed by an earlier mutation,
+        or one whose 24-hour staging window expired, returns
+        `409 blob is not staged`. Re-upload to get a fresh key and retry under a
+        **new** `Mutation-Id`.
+
+        `size_bytes` is validated but not stored — the response reflects the
+        byte length the server measured when the blob was staged.
+
+        A replayed `Mutation-Id` also returns `201`, with `replayed: true`.
+      parameters:
+        - $ref: "#/components/parameters/MutationIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [blob_key, size_bytes]
+              properties:
+                blob_key:
+                  type: string
+                  description: A staged key owned by the caller.
+                  example: 018f4b28-11aa-7d3e-9f0a-3c4d5e6f7a8b/018f4b2b-22bb-7e4f-8a1b-4d5e6f7a8b9c
+                size_bytes:
+                  type: integer
+                  format: int64
+                  minimum: 0
+      responses:
+        "201":
+          description: Created, or the replayed outcome of this Mutation-Id
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateMutationSuccess"
+        "400":
+          description: |
+            Invalid JSON, or `blob_key`/`size_bytes` failed validation, or the
+            `Mutation-Id` header is syntactically invalid.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Blob not staged, or Mutation-Id reused for a different intent
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/BlobNotStagedError"
+                  - $ref: "#/components/schemas/MutationMismatchError"
+
+  /api/collections/{cid}/objects/{oid}:
+    parameters:
+      - $ref: "#/components/parameters/CollectionIdCid"
+      - $ref: "#/components/parameters/ObjectId"
+    get:
+      operationId: getObject
+      tags: [objects]
+      summary: Get object metadata
+      responses:
+        "200":
+          description: The object
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [object]
+                properties:
+                  object:
+                    $ref: "#/components/schemas/Object"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      operationId: updateObject
+      tags: [objects]
+      summary: Update an object (version-guarded)
+      description: |
+        `version` must equal the object's current version + 1; anything else is
+        a `409` carrying the server's current state. `blob_key` must still be
+        staged, with the same re-upload-under-a-new-Mutation-Id rule as create.
+
+        Unlike create, the success body carries no `replayed` field.
+
+        The prior claimed blob moves to `retained` and stays fetchable for 365
+        days, so it can serve as a merge ancestor.
+      parameters:
+        - $ref: "#/components/parameters/MutationIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version, blob_key, size_bytes]
+              properties:
+                version:
+                  type: integer
+                  format: int64
+                  minimum: 1
+                  description: Must be the object's current version + 1.
+                blob_key:
+                  type: string
+                size_bytes:
+                  type: integer
+                  format: int64
+                  minimum: 0
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MutationSuccess"
+        "400":
+          description: Invalid JSON, invalid fields, or invalid `Mutation-Id`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Version conflict, blob not staged, or Mutation-Id intent mismatch
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/VersionConflict"
+                  - $ref: "#/components/schemas/BlobNotStagedError"
+                  - $ref: "#/components/schemas/MutationMismatchError"
+    delete:
+      operationId: deleteObject
+      tags: [objects]
+      summary: Soft delete an object
+      description: |
+        Sets `deleted: true` and bumps the version so peers see the tombstone.
+        The tombstone's claimed blob stays fetchable, because it may be a merge
+        ancestor.
+
+        Supplying `?version=N` makes the delete lose to a newer concurrent edit
+        (edit-vs-delete race; the edit wins). Omit it to delete
+        unconditionally. Deleting an already-deleted object is another
+        mutation: without a replayed `Mutation-Id` it advances the tombstone
+        version and the collection cursor again.
+
+        The success body carries the compact object projection
+        (`id`, `version`, `change_seq`, `deleted`), not the full row.
+      parameters:
+        - $ref: "#/components/parameters/MutationIdHeader"
+        - name: version
+          in: query
+          required: false
+          description: Optional race guard — the version the client expects to delete.
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+      responses:
+        "200":
+          description: Tombstoned
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [object, collectionVersion]
+                properties:
+                  object:
+                    $ref: "#/components/schemas/DeletedObject"
+                  collectionVersion:
+                    $ref: "#/components/schemas/CollectionVersion"
+        "400":
+          description: Invalid `?version`, or invalid `Mutation-Id`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Version conflict, or Mutation-Id intent mismatch
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/VersionConflict"
+                  - $ref: "#/components/schemas/MutationMismatchError"
+
+  /api/collections/{cid}/blob-objects:
+    parameters:
+      - $ref: "#/components/parameters/CollectionIdCid"
+    post:
+      operationId: createBlobObject
+      tags: [objects]
+      summary: Create an object and its blob in one call
+      description: |
+        Single round trip: the body is raw ciphertext and the server mints,
+        stages, and claims the blob key itself. Semantics match the two-call
+        create, except `409 blob is not staged` cannot occur — there is no
+        caller-supplied key to go stale.
+
+        Blob bytes are written before the mutation transaction opens, so a
+        request later declined by conflict or replay leaves an unclaimed blob
+        that the 24-hour staging window reclaims.
+
+        Use a `Mutation-Id` here especially: the success response can be lost
+        after the server has already committed.
+      parameters:
+        - $ref: "#/components/parameters/MutationIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+              description: Raw ciphertext. Empty body → 400. Over `MAX_BLOB_BYTES` → 413.
+      responses:
+        "201":
+          description: Created, or the replayed outcome of this Mutation-Id
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateMutationSuccess"
+        "400":
+          description: Empty body, or invalid `Mutation-Id`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Mutation-Id reused for a different intent
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MutationMismatchError"
+        "413":
+          $ref: "#/components/responses/BlobTooLarge"
+
+  /api/collections/{cid}/blob-objects/{oid}:
+    parameters:
+      - $ref: "#/components/parameters/CollectionIdCid"
+      - $ref: "#/components/parameters/ObjectId"
+    put:
+      operationId: updateBlobObject
+      tags: [objects]
+      summary: Update an object and its blob in one call
+      description: |
+        Single-round-trip update. `?version` is **required** here (the two-call
+        route carries it in the JSON body instead). Same conflict semantics;
+        `409 blob is not staged` cannot occur.
+      parameters:
+        - $ref: "#/components/parameters/MutationIdHeader"
+        - name: version
+          in: query
+          required: true
+          description: Must be the object's current version + 1.
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MutationSuccess"
+        "400":
+          description: Missing/invalid `?version`, empty body, or invalid `Mutation-Id`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Version conflict, or Mutation-Id intent mismatch
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/VersionConflict"
+                  - $ref: "#/components/schemas/MutationMismatchError"
+        "413":
+          $ref: "#/components/responses/BlobTooLarge"
+
+  /api/collections/{cid}/blob-objects/batch:
+    parameters:
+      - $ref: "#/components/parameters/CollectionIdCid"
+    post:
+      operationId: batchBlobObjects
+      tags: [objects]
+      summary: Batch create/update with inline ciphertext
+      description: |
+        **Custom binary request framing.** The body concatenates 1–200 frames,
+        repeating to EOF, integers big-endian:
+
+        ```
+        [u8 operation][u16 identifierLen][identifier utf8][u32 version][u32 blobLen][blob bytes]
+        ```
+
+        - operation `0` = create. `identifier` is the client-generated
+          `Mutation-Id` and must match `^[A-Za-z0-9._~-]{1,128}$`. `version`
+          must be `0`. Retrying a frame under the same Mutation-Id returns the
+          original object even if the retry carries different ciphertext.
+        - operation `1` = update. `identifier` is the object UUID and `version`
+          must be the next positive object version. Batch updates carry no
+          Mutation-Id; the version guard alone stops a retry from advancing the
+          version twice.
+        - `blobLen` must be non-zero.
+
+        Entries are **not** one transaction. Each is coordinated independently,
+        in order, and one failure does not stop the rest. Each successful
+        non-replay mutation publishes its own SSE `change` event; conflicts,
+        failures, and replays publish none.
+
+        Results are returned in request order. Malformed framing, an empty
+        batch, or more than 200 entries rejects the whole request with `400`.
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "200":
+          description: Per-entry results, in request order
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results]
+                properties:
+                  results:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/BatchUploadResult"
+        "400":
+          description: |
+            Framing error, empty batch, or over 200 entries. The message names
+            the failure: `truncated operation`, `invalid operation`,
+            `truncated object id length`, `truncated identifier`,
+            `invalid identifier`, `invalid create mutation id`,
+            `invalid update object id`, `truncated version`,
+            `create version must be zero`, `update version must be positive`,
+            `truncated blob length`, `blob must not be empty`, `truncated blob`,
+            `too many entries (max 200)`,
+            `batch must contain at least one entry`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "413":
+          description: Request body exceeds `MAX_BATCH_BYTES`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: request too large }
+
+  /api/collections/{cid}/create-mutations/{mutationId}:
+    parameters:
+      - $ref: "#/components/parameters/CollectionIdCid"
+      - name: mutationId
+        in: path
+        required: true
+        description: |
+          The create Mutation-Id to look up. Percent-encode it if it contains
+          characters outside the URL-safe set.
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+    get:
+      operationId: getCreateMutation
+      tags: [objects]
+      summary: Recover a durable create outcome
+      description: |
+        For a client that lost the original create body — the local file was
+        deleted after an ambiguous response — and cannot replay ciphertext.
+
+        Successful create outcomes are retained for the collection's lifetime,
+        which is what makes a `404` meaningful: for an existing collection it
+        proves this scoped Mutation-Id never committed a create. Clients that
+        discard pending state on that `404` must only ship against a server
+        advertising `mutation_ids.successful_create_outcomes: "durable"`.
+
+        A create still staging returns `409`; retain pending state and retry.
+      responses:
+        "200":
+          description: "The recorded create outcome, with `replayed: true`"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateMutationSuccess"
+        "400":
+          description: Invalid Mutation-Id syntax
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: invalid Mutation-Id }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: |
+            No create committed under this Mutation-Id — or the collection is
+            not the caller's.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: The original create is still in progress
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: mutation still in progress }
+
+  /api/blobs:
+    post:
+      operationId: uploadBlob
+      tags: [blobs]
+      summary: Stage an encrypted blob
+      description: |
+        Body is raw ciphertext. Returns the storage key, always scoped to the
+        caller as `{user-id}/{uuid}`. The blob is `staged` for a fixed 24 hours;
+        an accepted create or update claims it for exactly one object version.
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "201":
+          description: Staged
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [key]
+                properties:
+                  key:
+                    type: string
+                    example: 018f4b28-11aa-7d3e-9f0a-3c4d5e6f7a8b/018f4b2b-22bb-7e4f-8a1b-4d5e6f7a8b9c
+        "400":
+          description: Empty body
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: empty body }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          $ref: "#/components/responses/BlobTooLarge"
+
+  /api/blobs/batch:
+    post:
+      operationId: batchFetchBlobs
+      tags: [blobs]
+      summary: Fetch up to 200 blobs in one request
+      description: |
+        Removes the per-request overhead that makes a large first sync
+        latency-bound.
+
+        **Custom binary response framing** — one frame per requested key, in
+        request order, integers big-endian:
+
+        ```
+        [u16 keyLen][key utf8][u8 status][u32 blobLen][blob bytes]
+        ```
+
+        | status | meaning |
+        |---|---|
+        | `0` ok | `blobLen` bytes of blob follow |
+        | `1` missing | absent, malformed, or not owned by the caller — same no-existence-leak policy as the single GET's 404; `blobLen = 0` |
+        | `2` omitted | including this blob would push the encoded response past `MAX_BATCH_BYTES`; re-request omitted keys in a fresh batch; `blobLen = 0` |
+
+        The cap counts every frame's 7 fixed bytes, UTF-8 key bytes, and blob
+        bytes. The first available blob always ships even if its frame alone
+        exceeds the cap, so a client always makes progress.
+
+        A storage read failure after the `200` has been sent aborts the stream
+        mid-body rather than emitting an error frame; clients see a truncated
+        transfer and retry.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [keys]
+              properties:
+                keys:
+                  type: array
+                  minItems: 1
+                  maxItems: 200
+                  items:
+                    type: string
+                    maxLength: 128
+      responses:
+        "200":
+          description: Binary frame stream
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "400":
+          description: |
+            Invalid JSON, empty `keys`, a non-string or over-128-char key, or
+            more than 200 keys.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          description: Request body over 64 KiB
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: request too large }
+
+  /api/blobs/{userId}/{blobId}:
+    parameters:
+      - name: userId
+        in: path
+        required: true
+        description: Must be the authenticated user's id, else `404`.
+        schema:
+          type: string
+          format: uuid
+      - name: blobId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: downloadBlob
+      tags: [blobs]
+      summary: Download a blob
+      responses:
+        "200":
+          description: Raw ciphertext
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      operationId: deleteBlob
+      tags: [blobs]
+      summary: Delete a staged blob
+      description: |
+        Direct deletion is allowed only while the blob is `staged`. Idempotent
+        for staged or absent blobs, including legacy files not yet adopted into
+        the ledger. Any other ledger state — `claimed`, `retained`,
+        `purgeable`, `legacy_shared` — is governed by object/collection
+        lifetime and returns `409`.
+      responses:
+        "204":
+          description: Deleted, or already absent
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Blob is claimed, retained, purgeable, or legacy-shared
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: blob is in use }
+
+  /api/sync/events:
+    get:
+      operationId: syncEvents
+      tags: [sync]
+      summary: SSE change stream
+      description: |
+        A **doorbell, not a pipe**: events carry no object content, only enough
+        routing information to say which collection changed, so the E2EE
+        invariant holds. Response headers include `X-Accel-Buffering: no` so
+        proxies that don't auto-detect SSE stop buffering.
+
+        Events:
+
+        | event | data | meaning |
+        |---|---|---|
+        | `ready` | *(empty)* | sent once per connection — treat as "pull now from your cursor" |
+        | `change` | `{"collectionId": "...", "currentVersion": N}` | a mutation happened; pull that collection. `currentVersion` is a JSON **number** |
+        | `ping` | *(empty)* | heartbeat every 25s; ignore |
+
+        Pending `change` events are coalesced per collection (newest version
+        wins) rather than queued, bounding memory under a slow reader.
+
+        **The stream is lossy across disconnects.** Events fired while it is
+        down are not replayed; there is no event log and no `Last-Event-ID`
+        recovery. The server deliberately ends the stream when its upstream
+        Postgres `LISTEN` connection drops, so a client reconnects and re-pulls
+        instead of trusting a silently-dead stream. Therefore: pull on every
+        `ready`, and keep a low-frequency safety poll (30–60s) as a backstop.
+
+        Browser caveat: native `EventSource` cannot set an `Authorization`
+        header, and CORS here is `*` without credentials, so a cross-origin
+        browser `EventSource` will not authenticate. Same-origin browsers and
+        any client that can set a bearer header are unaffected.
+      responses:
+        "200":
+          description: Event stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        The raw session token returned by a login endpoint. Preferred for
+        non-browser clients.
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: session
+      description: |
+        `httpOnly` cookie set by login; `Secure` unless `COOKIE_SECURE=false`,
+        `SameSite=Lax`, `Max-Age` 7 days. The cookie is checked before the
+        `Authorization` header.
+
+  parameters:
+    CollectionId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    CollectionIdCid:
+      name: cid
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    ObjectId:
+      name: oid
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    MutationIdHeader:
+      name: Mutation-Id
+      in: header
+      required: false
+      description: |
+        Client-generated idempotency key. Reuse the same value only when
+        retrying the *same* intended mutation; reusing it for a different kind,
+        collection, object, or requested version returns `409`.
+
+        A retry inside the retention window returns the recorded outcome
+        without advancing the object version or collection cursor and without
+        publishing another change event; the retry body is ignored and the
+        object keeps the original attempt's blob key.
+
+        Successful create outcomes are retained for the collection's lifetime;
+        other outcomes expire after 30 days. Definitive `404` and `409`
+        outcomes are recorded like successes. Requests rejected earlier —
+        invalid JSON or fields, empty or oversized bodies, an invalid
+        Mutation-Id — are not recorded, because they carry no valid intent.
+
+        Omitting the header leaves the request an independent mutation: a
+        retry after a lost response can duplicate an object.
+
+        The pattern below is the syntax required on the framed batch route and
+        the one the Go server accepts everywhere. The TypeScript server also
+        accepts any non-empty 1–128-character value on the classic routes; that
+        looser legacy syntax is deliberately dropped in v1 Go.
+      schema:
+        type: string
+        pattern: "^[A-Za-z0-9._~-]{1,128}$"
+
+  responses:
+    LoginSuccess:
+      description: |
+        Session opened. The raw token is returned in the body *and* set as the
+        `session` cookie.
+      headers:
+        Set-Cookie:
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [user, token]
+            properties:
+              user:
+                $ref: "#/components/schemas/User"
+              token:
+                type: string
+                description: |
+                  Raw session token, 32 random bytes hex-encoded. Only its
+                  SHA-256 hash is stored server-side.
+    Unauthorized:
+      description: |
+        No credentials were supplied (`{"error": "unauthorized"}`), or the
+        supplied session is expired/invalid — which additionally carries
+        `WWW-Authenticate: Bearer realm="futo-notes", error="invalid_token"`
+        and the stable code `invalid_session`. A client holding retained login
+        material should re-login, retry once, and **keep** its sync cursor and
+        object map; session expiry is not a vault reset.
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: "#/components/schemas/Error"
+              - type: object
+                required: [error, code]
+                properties:
+                  error:
+                    type: string
+                  code:
+                    type: string
+                    enum: [invalid_session]
+    NotFound:
+      description: |
+        Not found, or not owned by the caller — `404` rather than `403` so
+        existence does not leak across tenants.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example: { error: not found }
+    BlobTooLarge:
+      description: Body exceeds `MAX_BLOB_BYTES` (default 100 MiB)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example: { error: blob too large }
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+
+    Capability:
+      type: object
+      required: [name, version, auth_mode, signup, billing, mutation_ids]
+      properties:
+        name:
+          type: string
+          enum: [futo-notes]
+        version:
+          type: string
+          description: Server build version.
+          example: 0.6.0
+        auth_mode:
+          type: string
+          enum: [dev, password]
+          description: |
+            Which login endpoint to drive. `oidc` is reserved for later.
+        signup:
+          type: string
+          enum: [closed]
+        billing:
+          type: boolean
+        mutation_ids:
+          type: object
+          required: [supported, required, retention_days, successful_create_outcomes]
+          properties:
+            supported:
+              type: boolean
+            required:
+              type: boolean
+              description: |
+                False for backward compatibility with clients that predate
+                Mutation-Ids.
+            retention_days:
+              type: integer
+              description: Retention for non-create outcomes.
+            successful_create_outcomes:
+              type: string
+              enum: [durable]
+              description: |
+                `durable` means successful creates are retained for the
+                collection's lifetime, which is what makes a `404` from the
+                recovery route trustworthy.
+
+    User:
+      type: object
+      required: [id, email, name]
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+        name:
+          type: string
+
+    Collection:
+      type: object
+      required: [id, user_id, current_version, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        current_version:
+          type: string
+          pattern: "^[0-9]+$"
+          description: |
+            Collection-global pull cursor, bumped by 1 on every object
+            mutation. A JSON **string** (Postgres `bigint`). A new collection
+            starts at `"0"`.
+          example: "42"
+        created_at:
+          type: string
+          format: date-time
+
+    CollectionEnvelope:
+      type: object
+      required: [collection]
+      properties:
+        collection:
+          $ref: "#/components/schemas/Collection"
+
+    KeyMaterial:
+      type: object
+      required: [key_salt, key_kdf, encrypted_vault_key, key_updated_at]
+      description: |
+        Client-side vault key material. Every field is opaque to the server,
+        which never sees the vault password, the password-derived key, or the
+        vault key itself.
+      properties:
+        key_salt:
+          type: string
+        key_kdf:
+          type: object
+          additionalProperties: true
+        encrypted_vault_key:
+          type: string
+        key_updated_at:
+          type: string
+          format: date-time
+          description: |
+            Doubles as the opaque revision token for guarded rotation. Treat as
+            opaque: do not parse or synthesize it.
+
+    Object:
+      type: object
+      required:
+        [id, collection_id, version, change_seq, deleted, blob_key, size_bytes, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        collection_id:
+          type: string
+          format: uuid
+        version:
+          type: string
+          pattern: "^[0-9]+$"
+          description: |
+            Per-object conflict counter, JSON **string**. A new object is `"1"`.
+          example: "3"
+        change_seq:
+          type: string
+          pattern: "^[0-9]+$"
+          description: |
+            The collection's `current_version` at the moment this object was
+            last mutated. JSON **string**. Pull ordering key.
+          example: "42"
+        deleted:
+          type: boolean
+        blob_key:
+          type: string
+          nullable: true
+        size_bytes:
+          type: string
+          pattern: "^[0-9]+$"
+          nullable: true
+          description: |
+            Byte length the server measured when the blob was staged, JSON
+            **string**. The column is nullable — treat `null` as unknown size —
+            though every current write path populates it.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    DeletedObject:
+      type: object
+      required: [id, version, change_seq, deleted]
+      description: |
+        Compact projection returned by soft delete, kept for wire
+        compatibility.
+      properties:
+        id:
+          type: string
+          format: uuid
+        version:
+          type: string
+          pattern: "^[0-9]+$"
+        change_seq:
+          type: string
+          pattern: "^[0-9]+$"
+        deleted:
+          type: boolean
+          enum: [true]
+
+    CollectionVersion:
+      type: integer
+      format: int64
+      description: |
+        The collection's new cursor value after this mutation. Server-computed,
+        so a JSON **number** — unlike `object.change_seq`, which is a string.
+
+        Advance a local cursor to this value only if it equals `cursor + 1`;
+        that is the only value proving no other device's change landed in
+        between. A gap means leave the cursor alone and pull.
+
+    ObjectList:
+      type: object
+      required: [objects]
+      properties:
+        objects:
+          type: array
+          items:
+            $ref: "#/components/schemas/Object"
+
+    PagedObjectList:
+      type: object
+      required: [objects, hasMore, nextCursor]
+      description: Returned when `?limit` is supplied.
+      properties:
+        objects:
+          type: array
+          items:
+            $ref: "#/components/schemas/Object"
+        hasMore:
+          type: boolean
+        nextCursor:
+          type: integer
+          format: int64
+          description: |
+            The `change_seq` of the last returned object as a **number**, or
+            the request's `sinceVersion` if the page was empty. Pass it as the
+            next request's `sinceVersion` until `hasMore` is false.
+
+    MutationSuccess:
+      type: object
+      required: [object, collectionVersion]
+      properties:
+        object:
+          $ref: "#/components/schemas/Object"
+        collectionVersion:
+          $ref: "#/components/schemas/CollectionVersion"
+
+    CreateMutationSuccess:
+      type: object
+      required: [object, collectionVersion, replayed]
+      properties:
+        object:
+          $ref: "#/components/schemas/Object"
+        collectionVersion:
+          $ref: "#/components/schemas/CollectionVersion"
+        replayed:
+          type: boolean
+          description: |
+            `false` when this request committed the Mutation-Id, `true` when
+            the server returned that Mutation-Id's retained outcome. Retry
+            ciphertext never replaces the original blob.
+
+    VersionConflict:
+      type: object
+      required: [error, currentVersion, currentBlobKey]
+      description: |
+        The stale-write rejection. The server surfaces conflicts and never
+        merges — it sees only opaque blobs. Fetch `currentBlobKey`, three-way
+        merge against the common ancestor, and retry at `currentVersion + 1`
+        under a **new** Mutation-Id. If the merge fails, save a conflict copy.
+      properties:
+        error:
+          type: string
+          enum: [version conflict]
+        currentVersion:
+          type: integer
+          format: int64
+          description: Server-computed, so a JSON **number**.
+        currentBlobKey:
+          type: string
+          nullable: true
+
+    BlobNotStagedError:
+      type: object
+      required: [error]
+      description: |
+        The named `blob_key` is not in the `staged` ledger state — already
+        claimed by an earlier mutation, or past its 24-hour staging window.
+        Re-upload the ciphertext for a fresh key and retry under a new
+        Mutation-Id.
+      properties:
+        error:
+          type: string
+          enum: [blob is not staged]
+
+    MutationMismatchError:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          enum: [Mutation-Id reused for different intent]
+
+    BatchUploadResult:
+      oneOf:
+        - type: object
+          required: [status, object, collectionVersion]
+          properties:
+            status:
+              type: string
+              enum: [created, replayed, updated]
+              description: |
+                `created` — the create Mutation-Id committed.
+                `replayed` — it already had a retained outcome; retry
+                ciphertext was ignored.
+                `updated` — the versioned update committed.
+            object:
+              $ref: "#/components/schemas/Object"
+            collectionVersion:
+              $ref: "#/components/schemas/CollectionVersion"
+        - type: object
+          required: [status, currentVersion, currentBlobKey]
+          description: Stale update.
+          properties:
+            status:
+              type: string
+              enum: [conflict]
+            currentVersion:
+              type: integer
+              format: int64
+            currentBlobKey:
+              type: string
+              nullable: true
+        - type: object
+          required: [status]
+          description: The update target is absent or not owned by the caller.
+          properties:
+            status:
+              type: string
+              enum: [not_found]
+        - type: object
+          required: [status]
+          description: This entry's blob exceeds `MAX_BLOB_BYTES`.
+          properties:
+            status:
+              type: string
+              enum: [too_large]
+        - type: object
+          required: [status, error]
+          description: |
+            This entry failed operationally; later entries were still
+            attempted. Also covers a batch create whose Mutation-Id was reused
+            for a different intent (`mutation id reused for different intent`),
+            which is an entry-level error here rather than a request-level 409.
+          properties:
+            status:
+              type: string
+              enum: [error]
+            error:
+              type: string
