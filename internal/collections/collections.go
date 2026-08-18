@@ -110,6 +110,49 @@ func Get(ctx context.Context, database *sql.DB, userID, id string) (*Collection,
 	return &c, nil
 }
 
+// Delete removes the collection and reports whether it existed for this user.
+// Objects cascade via FK. Claimed and retained blobs become purgeable for
+// asynchronous maintenance to remove — staged blobs age out on their own and
+// legacy_shared is never cleaned. Mutation results scoped to the collection
+// are deleted, because that sync namespace no longer exists.
+func Delete(ctx context.Context, database *sql.DB, userID, id string) (bool, error) {
+	if !isUUID(id) {
+		return false, nil
+	}
+
+	tx, err := database.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	var lockedID string
+	err = tx.QueryRowContext(ctx,
+		`SELECT id FROM collections WHERE id = $1 AND user_id = $2 FOR UPDATE`, id, userID).Scan(&lockedID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE blob_ledger SET state = 'purgeable', state_changed_at = now()
+		 WHERE collection_id = $1 AND state IN ('claimed', 'retained')`, id); err != nil {
+		return false, err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM mutation_results WHERE collection_id = $1 AND user_id = $2`, id, userID); err != nil {
+		return false, err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM collections WHERE id = $1`, id); err != nil {
+		return false, err
+	}
+
+	return true, tx.Commit()
+}
+
 // isUUID reports whether s is in canonical 8-4-4-4-12 form, which is what
 // Postgres will accept as a uuid parameter without a cast error.
 func isUUID(s string) bool {

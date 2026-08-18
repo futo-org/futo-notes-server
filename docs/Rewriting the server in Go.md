@@ -353,3 +353,4 @@ The goal is to have this be a painless, invisble transition. We could build a ha
 * SSE is nice, but not a requirement
 * there are two paths to doing notes updates and we could probably consolidate
 * delete path is somewhat odd. we bump the version number for the object? hm.
+* creating a collection and claiming its key could be a single call

@@ -118,6 +118,7 @@ func main() {
 	api.HandleFunc("POST /api/collections", handleClaimCollection(database))
 	api.HandleFunc("GET /api/collections", handleListCollections(database))
 	api.HandleFunc("GET /api/collections/{id}", handleGetCollection(database))
+	api.HandleFunc("DELETE /api/collections/{id}", handleDeleteCollection(database))
 	api.HandleFunc("GET /api/collections/{id}/key", handleGetCollectionKey(database))
 	api.HandleFunc("PUT /api/collections/{id}/key", handlePutCollectionKey(database))
 

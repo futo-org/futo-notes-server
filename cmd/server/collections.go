@@ -54,6 +54,22 @@ func handleGetCollection(database *sql.DB) http.HandlerFunc {
 	}
 }
 
+func handleDeleteCollection(database *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		found, err := collections.Delete(r.Context(), database, sessionFrom(r).User.ID, r.PathValue("id"))
+		if err != nil {
+			log.Printf("deleting collection: %v", err)
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		if !found {
+			writeError(w, http.StatusNotFound, "not found")
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
 func handleGetCollectionKey(database *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		found, key, err := collections.GetKey(r.Context(), database, sessionFrom(r).User.ID, r.PathValue("id"))

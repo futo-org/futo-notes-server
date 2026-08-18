@@ -135,6 +135,11 @@ const endpoints = [
     pathFor: v => `/api/collections/${encodeURIComponent(v)}`,
   },
   {
+    method: 'DELETE', path: '/api/collections/:id', desc: 'delete a collection; objects cascade, blobs become purgeable',
+    input: { type: 'text', placeholder: 'collection id' },
+    pathFor: v => `/api/collections/${encodeURIComponent(v)}`,
+  },
+  {
     method: 'GET', path: '/api/collections/:id/key', desc: 'vault key material; {"key": null} before first claim',
     input: { type: 'text', placeholder: 'collection id' },
     pathFor: v => `/api/collections/${encodeURIComponent(v)}/key`,
