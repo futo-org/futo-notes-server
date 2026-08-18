@@ -122,6 +122,13 @@ const endpoints = [
   },
   { method: 'GET', path: '/api/auth', desc: 'current user for this session' },
   { method: 'POST', path: '/api/auth/logout', desc: 'delete this session; clears the cookie', refreshesSession: true },
+  { method: 'POST', path: '/api/collections', desc: 'claim the vault: 201 first time, 200 with the existing one after' },
+  { method: 'GET', path: '/api/collections', desc: 'list collections, oldest first' },
+  {
+    method: 'GET', path: '/api/collections/:id', desc: 'one collection by id; 404 if absent or not yours',
+    input: { type: 'text', placeholder: 'collection id' },
+    pathFor: v => `/api/collections/${encodeURIComponent(v)}`,
+  },
 ];
 
 const cards = document.getElementById('cards');
@@ -133,7 +140,7 @@ for (const ep of endpoints) {
     <div class="row">
       <span class="method">${ep.method}</span>
       <span class="path">${ep.path}</span>
-      ${ep.input ? `<input type="password" placeholder="${ep.input.placeholder}" data-1p-ignore autocomplete="off">` : ''}
+      ${ep.input ? `<input type="${ep.input.type ?? 'password'}" placeholder="${ep.input.placeholder}" data-1p-ignore autocomplete="off">` : ''}
       <button>Send</button>
     </div>
     <p class="desc">${ep.desc}</p>
@@ -149,6 +156,8 @@ for (const ep of endpoints) {
 
 async function send(ep, card) {
   const opts = { method: ep.method };
+  let path = ep.path;
+  if (ep.pathFor) path = ep.pathFor(card.querySelector('input').value);
   if (ep.body) {
     opts.headers = { 'Content-Type': 'application/json' };
     opts.body = JSON.stringify(ep.body(card.querySelector('input').value));
@@ -162,7 +171,7 @@ async function send(ep, card) {
 
   const start = performance.now();
   try {
-    const res = await fetch(ep.path, opts);
+    const res = await fetch(path, opts);
     const elapsed = Math.round(performance.now() - start);
     const text = await res.text();
 
