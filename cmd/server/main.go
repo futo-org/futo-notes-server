@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -152,6 +154,28 @@ func handleCurrentUser(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"user": sessionFrom(r).User})
 }
 
+// rateLimited rejects over-limit requests with a 429 before next runs,
+// keyed on the connection's remote IP.
+func rateLimited(limiter *auth.RateLimiter, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ip, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			ip = r.RemoteAddr
+		}
+		ok, retryAfter := limiter.Allow(ip, time.Now())
+		if !ok {
+			secs := int((retryAfter + time.Second - 1) / time.Second)
+			if secs < 1 {
+				secs = 1
+			}
+			w.Header().Set("Retry-After", strconv.Itoa(secs))
+			writeError(w, http.StatusTooManyRequests, "too many requests")
+			return
+		}
+		next(w, r)
+	}
+}
+
 func handlePasswordLogin(cfg config.Config, database *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
@@ -259,7 +283,8 @@ func main() {
 
 	api := http.NewServeMux()
 	if cfg.AuthMode == "password" {
-		api.HandleFunc("POST /api/auth/password/login", handlePasswordLogin(cfg, database))
+		api.HandleFunc("POST /api/auth/password/login",
+			rateLimited(auth.NewRateLimiter(), handlePasswordLogin(cfg, database)))
 	}
 	api.HandleFunc("GET /api/auth", handleCurrentUser)
 	api.HandleFunc("POST /api/auth/logout", handleLogout(cfg, database))
