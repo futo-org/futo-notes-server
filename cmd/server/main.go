@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"futo-notes-server/internal/auth"
 	"futo-notes-server/internal/config"
 	"futo-notes-server/internal/db"
+	"futo-notes-server/internal/uuidv7"
 )
 
 const (
@@ -83,7 +85,53 @@ func handleHealth(database *sql.DB) http.HandlerFunc {
 	}
 }
 
-func handlePasswordLogin(cfg config.Config) http.HandlerFunc {
+// The singleton user in password mode. All E2EE data is owned by this row.
+const (
+	singletonSub   = "local"
+	singletonEmail = "local@futo-notes.local"
+	singletonName  = "FUTO Notes"
+)
+
+type user struct {
+	ID    string `json:"id"`
+	Email string `json:"email"`
+	Name  string `json:"name"`
+}
+
+// upsertLocalUser returns the singleton user, creating it on first login.
+// ON CONFLICT DO NOTHING plus a re-select keeps two concurrent first logins
+// from failing on the sub unique constraint.
+func upsertLocalUser(ctx context.Context, database *sql.DB) (user, error) {
+	var u user
+	err := database.QueryRowContext(ctx,
+		`SELECT id, email, name FROM users WHERE sub = $1`, singletonSub).
+		Scan(&u.ID, &u.Email, &u.Name)
+	if err == nil {
+		return u, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return user{}, err
+	}
+
+	err = database.QueryRowContext(ctx,
+		`INSERT INTO users (id, sub, email, name) VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (sub) DO NOTHING
+		 RETURNING id, email, name`,
+		uuidv7.New(), singletonSub, singletonEmail, singletonName).
+		Scan(&u.ID, &u.Email, &u.Name)
+	if errors.Is(err, sql.ErrNoRows) {
+		// Lost the race; the row exists now.
+		err = database.QueryRowContext(ctx,
+			`SELECT id, email, name FROM users WHERE sub = $1`, singletonSub).
+			Scan(&u.ID, &u.Email, &u.Name)
+	}
+	if err != nil {
+		return user{}, err
+	}
+	return u, nil
+}
+
+func handlePasswordLogin(cfg config.Config, database *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Password string `json:"password"`
@@ -98,7 +146,9 @@ func handlePasswordLogin(cfg config.Config) http.HandlerFunc {
 		}
 
 		var ok bool
-		if cfg.PasswordHash != "" {
+		if cfg.Password != "" {
+			ok = auth.VerifyPlaintext(body.Password, cfg.Password)
+		} else {
 			var err error
 			ok, err = auth.VerifyScrypt(body.Password, cfg.PasswordHash)
 			if err != nil {
@@ -106,15 +156,20 @@ func handlePasswordLogin(cfg config.Config) http.HandlerFunc {
 				http.Error(w, "error: internal server error", http.StatusInternalServerError)
 				return
 			}
-		} else {
-			ok = auth.VerifyPlaintext(body.Password, cfg.Password)
 		}
 
 		if !ok {
 			http.Error(w, "no", http.StatusUnauthorized)
 			return
 		}
-		fmt.Fprintln(w, "you're in")
+
+		u, err := upsertLocalUser(r.Context(), database)
+		if err != nil {
+			log.Printf("password login: upserting user: %v", err)
+			http.Error(w, "error: internal server error", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"user": u})
 	}
 }
 
@@ -143,7 +198,7 @@ func main() {
 	mux.HandleFunc("GET /{$}", handleCapability(cfg.AuthMode))
 	mux.HandleFunc("GET /health", handleHealth(database))
 	if cfg.AuthMode == "password" {
-		mux.HandleFunc("POST /api/auth/password/login", handlePasswordLogin(cfg))
+		mux.HandleFunc("POST /api/auth/password/login", handlePasswordLogin(cfg, database))
 	}
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
