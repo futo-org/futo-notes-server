@@ -1,10 +1,14 @@
 package auth
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"time"
+
+	"futo-notes-server/internal/uuidv7"
 )
 
 const SessionTTL = 7 * 24 * time.Hour
@@ -21,4 +25,17 @@ func GenerateToken() string {
 func HashToken(raw string) []byte {
 	sum := sha256.Sum256([]byte(raw))
 	return sum[:]
+}
+
+// CreateSession opens a session for the user and returns the raw token the
+// client authenticates with. Only the token's SHA-256 hash is stored.
+func CreateSession(ctx context.Context, database *sql.DB, userID string) (string, error) {
+	rawToken := GenerateToken()
+	_, err := database.ExecContext(ctx,
+		`INSERT INTO sessions (id, user_id, access_token_hash, expires_at) VALUES ($1, $2, $3, $4)`,
+		uuidv7.New(), userID, HashToken(rawToken), time.Now().Add(SessionTTL))
+	if err != nil {
+		return "", err
+	}
+	return rawToken, nil
 }

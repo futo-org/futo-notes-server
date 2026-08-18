@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -14,7 +13,6 @@ import (
 	"futo-notes-server/internal/auth"
 	"futo-notes-server/internal/config"
 	"futo-notes-server/internal/db"
-	"futo-notes-server/internal/uuidv7"
 )
 
 const (
@@ -89,65 +87,6 @@ func handleHealth(database *sql.DB) http.HandlerFunc {
 	}
 }
 
-// The singleton user in password mode. All E2EE data is owned by this row.
-const (
-	singletonSub   = "local"
-	singletonEmail = "local@futo-notes.local"
-	singletonName  = "FUTO Notes"
-)
-
-type user struct {
-	ID    string `json:"id"`
-	Email string `json:"email"`
-	Name  string `json:"name"`
-}
-
-// upsertLocalUser returns the singleton user, creating it on first login.
-// ON CONFLICT DO NOTHING plus a re-select keeps two concurrent first logins
-// from failing on the sub unique constraint.
-func upsertLocalUser(ctx context.Context, database *sql.DB) (user, error) {
-	var u user
-	err := database.QueryRowContext(ctx,
-		`SELECT id, email, name FROM users WHERE sub = $1`, singletonSub).
-		Scan(&u.ID, &u.Email, &u.Name)
-	if err == nil {
-		return u, nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return user{}, err
-	}
-
-	err = database.QueryRowContext(ctx,
-		`INSERT INTO users (id, sub, email, name) VALUES ($1, $2, $3, $4)
-		 ON CONFLICT (sub) DO NOTHING
-		 RETURNING id, email, name`,
-		uuidv7.New(), singletonSub, singletonEmail, singletonName).
-		Scan(&u.ID, &u.Email, &u.Name)
-	if errors.Is(err, sql.ErrNoRows) {
-		// Lost the race; the row exists now.
-		err = database.QueryRowContext(ctx,
-			`SELECT id, email, name FROM users WHERE sub = $1`, singletonSub).
-			Scan(&u.ID, &u.Email, &u.Name)
-	}
-	if err != nil {
-		return user{}, err
-	}
-	return u, nil
-}
-
-// createSession opens a session for the user and returns the raw token the
-// client authenticates with. Only the token's SHA-256 hash is stored.
-func createSession(ctx context.Context, database *sql.DB, userID string) (string, error) {
-	rawToken := auth.GenerateToken()
-	_, err := database.ExecContext(ctx,
-		`INSERT INTO sessions (id, user_id, access_token_hash, expires_at) VALUES ($1, $2, $3, $4)`,
-		uuidv7.New(), userID, auth.HashToken(rawToken), time.Now().Add(auth.SessionTTL))
-	if err != nil {
-		return "", err
-	}
-	return rawToken, nil
-}
-
 func handlePasswordLogin(cfg config.Config, database *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
@@ -184,14 +123,14 @@ func handlePasswordLogin(cfg config.Config, database *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		u, err := upsertLocalUser(r.Context(), database)
+		u, err := auth.UpsertLocalUser(r.Context(), database)
 		if err != nil {
 			log.Printf("password login: upserting user: %v", err)
 			writeError(w, http.StatusInternalServerError, "internal server error")
 			return
 		}
 
-		rawToken, err := createSession(r.Context(), database, u.ID)
+		token, err := auth.CreateSession(r.Context(), database, u.ID)
 		if err != nil {
 			log.Printf("password login: creating session: %v", err)
 			writeError(w, http.StatusInternalServerError, "internal server error")
@@ -200,14 +139,14 @@ func handlePasswordLogin(cfg config.Config, database *sql.DB) http.HandlerFunc {
 
 		http.SetCookie(w, &http.Cookie{
 			Name:     "session",
-			Value:    rawToken,
+			Value:    token,
 			Path:     "/",
 			MaxAge:   int(auth.SessionTTL.Seconds()),
 			HttpOnly: true,
 			Secure:   cfg.CookieSecure,
 			SameSite: http.SameSiteLaxMode,
 		})
-		writeJSON(w, http.StatusOK, map[string]any{"user": u, "token": rawToken})
+		writeJSON(w, http.StatusOK, map[string]any{"user": u, "token": token})
 	}
 }
 
