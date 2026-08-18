@@ -133,7 +133,7 @@ for (const ep of endpoints) {
     <div class="row">
       <span class="method">${ep.method}</span>
       <span class="path">${ep.path}</span>
-      ${ep.input ? `<input type="password" placeholder="${ep.input.placeholder}">` : ''}
+      ${ep.input ? `<input type="password" placeholder="${ep.input.placeholder}" data-1p-ignore autocomplete="off">` : ''}
       <button>Send</button>
     </div>
     <p class="desc">${ep.desc}</p>
