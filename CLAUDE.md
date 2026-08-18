@@ -1,7 +1,7 @@
 This is a rethink of the FUTO Notes server, which was previously written in TypeScript.
 
-Migration plan is at @docs/...
-OpenAPI spec for the old server lives at @docs/...
+Migration plan is at `docs/Rewriting the server in Go.md`.
+OpenAPI spec for the old server lives at `docs/openapi.yaml`.
 
 To the client, this rewrite should be invisible. It is ok for this rewrite to result in different internal behavior, but old contracts need to be honored.
 
