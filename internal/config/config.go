@@ -14,6 +14,7 @@ type Config struct {
 	AuthMode          string
 	Password          string // FUTO_NOTES_PASSWORD, plaintext
 	PasswordHash      string // FUTO_NOTES_PASSWORD_HASH, scrypt self-describing form
+	CookieSecure      bool   // COOKIE_SECURE, Secure cookie flag; on unless "false"
 	DBPoolMax         int
 	DBPoolIdleTimeout time.Duration
 }
@@ -28,6 +29,7 @@ func Load() (Config, error) {
 		AuthMode:     getDefault("AUTH_MODE", "password"),
 		Password:     os.Getenv("FUTO_NOTES_PASSWORD"),
 		PasswordHash: os.Getenv("FUTO_NOTES_PASSWORD_HASH"),
+		CookieSecure: os.Getenv("COOKIE_SECURE") != "false",
 	}
 
 	if cfg.DatabaseURL == "" {

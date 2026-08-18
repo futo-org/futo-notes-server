@@ -41,6 +41,10 @@ type mutationIDs struct {
 	SuccessfulCreateOutcomes string `json:"successful_create_outcomes"`
 }
 
+func writeError(w http.ResponseWriter, status int, msg string) {
+	writeJSON(w, status, map[string]string{"error": msg})
+}
+
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -131,21 +135,34 @@ func upsertLocalUser(ctx context.Context, database *sql.DB) (user, error) {
 	return u, nil
 }
 
+// createSession opens a session for the user and returns the raw token the
+// client authenticates with. Only the token's SHA-256 hash is stored.
+func createSession(ctx context.Context, database *sql.DB, userID string) (string, error) {
+	rawToken := auth.GenerateToken()
+	_, err := database.ExecContext(ctx,
+		`INSERT INTO sessions (id, user_id, access_token_hash, expires_at) VALUES ($1, $2, $3, $4)`,
+		uuidv7.New(), userID, auth.HashToken(rawToken), time.Now().Add(auth.SessionTTL))
+	if err != nil {
+		return "", err
+	}
+	return rawToken, nil
+}
+
 func handlePasswordLogin(cfg config.Config, database *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Password string `json:"password"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, "error: invalid json", http.StatusBadRequest)
+			writeError(w, http.StatusBadRequest, "invalid json")
 			return
 		}
 		if body.Password == "" {
-			http.Error(w, "error: password required", http.StatusBadRequest)
+			writeError(w, http.StatusBadRequest, "password is required")
 			return
 		}
 		if cfg.Password == "" && cfg.PasswordHash == "" {
-			http.Error(w, "error: no password set", http.StatusInternalServerError)
+			writeError(w, http.StatusInternalServerError, "no password set")
 			return
 		}
 
@@ -157,23 +174,40 @@ func handlePasswordLogin(cfg config.Config, database *sql.DB) http.HandlerFunc {
 			ok, err = auth.VerifyScrypt(body.Password, cfg.PasswordHash)
 			if err != nil {
 				log.Printf("password login: %v", err)
-				http.Error(w, "error: internal server error", http.StatusInternalServerError)
+				writeError(w, http.StatusInternalServerError, "internal server error")
 				return
 			}
 		}
 
 		if !ok {
-			http.Error(w, "no", http.StatusUnauthorized)
+			writeError(w, http.StatusUnauthorized, "invalid password")
 			return
 		}
 
 		u, err := upsertLocalUser(r.Context(), database)
 		if err != nil {
 			log.Printf("password login: upserting user: %v", err)
-			http.Error(w, "error: internal server error", http.StatusInternalServerError)
+			writeError(w, http.StatusInternalServerError, "internal server error")
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"user": u})
+
+		rawToken, err := createSession(r.Context(), database, u.ID)
+		if err != nil {
+			log.Printf("password login: creating session: %v", err)
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+
+		http.SetCookie(w, &http.Cookie{
+			Name:     "session",
+			Value:    rawToken,
+			Path:     "/",
+			MaxAge:   int(auth.SessionTTL.Seconds()),
+			HttpOnly: true,
+			Secure:   cfg.CookieSecure,
+			SameSite: http.SameSiteLaxMode,
+		})
+		writeJSON(w, http.StatusOK, map[string]any{"user": u, "token": rawToken})
 	}
 }
 
