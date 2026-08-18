@@ -60,6 +60,13 @@ func ValidateSession(ctx context.Context, database *sql.DB, rawToken string) (*S
 	return &s, nil
 }
 
+// DeleteSession removes a session row by id. Deleting an already-gone
+// session is not an error.
+func DeleteSession(ctx context.Context, database *sql.DB, sessionID string) error {
+	_, err := database.ExecContext(ctx, `DELETE FROM sessions WHERE id = $1`, sessionID)
+	return err
+}
+
 // CreateSession opens a session for the user and returns the raw token the
 // client authenticates with. Only the token's SHA-256 hash is stored.
 func CreateSession(ctx context.Context, database *sql.DB, userID string) (string, error) {

@@ -215,6 +215,27 @@ func handlePasswordLogin(cfg config.Config, database *sql.DB) http.HandlerFunc {
 	}
 }
 
+func handleLogout(cfg config.Config, database *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := auth.DeleteSession(r.Context(), database, sessionFrom(r).ID); err != nil {
+			log.Printf("logout: deleting session: %v", err)
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+
+		http.SetCookie(w, &http.Cookie{
+			Name:     "session",
+			Value:    "",
+			Path:     "/",
+			MaxAge:   -1,
+			HttpOnly: true,
+			Secure:   cfg.CookieSecure,
+			SameSite: http.SameSiteLaxMode,
+		})
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
@@ -241,11 +262,16 @@ func main() {
 		api.HandleFunc("POST /api/auth/password/login", handlePasswordLogin(cfg, database))
 	}
 	api.HandleFunc("GET /api/auth", handleCurrentUser)
+	api.HandleFunc("POST /api/auth/logout", handleLogout(cfg, database))
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", handleCapability(cfg.AuthMode))
 	mux.HandleFunc("GET /health", handleHealth(database))
 	mux.Handle("/api/", requireAuth(cfg, database, api))
+	if cfg.DevUI {
+		mux.HandleFunc("GET /dev", handleDevUI)
+		log.Print("dev UI enabled at /dev")
+	}
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	log.Printf("listening on %s", addr)
