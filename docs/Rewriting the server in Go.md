@@ -35,6 +35,8 @@ The token expires after 7 days. No automatic renewal - paswords are stored on th
 
 Invalid or missing tokens results in a `401`.
 
+Go deviation: a malformed `Authorization` header (wrong scheme, or no space after `Bearer`) is treated as *no credentials* and gets `401 {"error":"unauthorized"}`. The TS server instead hashed the whole header string, found no session, and answered `invalid_session` with a `WWW-Authenticate` header. No known client sends malformed headers. Accepted.
+
 ## Collection Keys
 Each collection has its own key to encrypt its contents. The key is a random AES-256-GCM, then wrapped client-side by a salt + password. The salt per collection is stored in the database.
 

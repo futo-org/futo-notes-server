@@ -87,6 +87,71 @@ func handleHealth(database *sql.DB) http.HandlerFunc {
 	}
 }
 
+type sessionCtxKey struct{}
+
+// sessionFrom returns the session the auth middleware attached. Only call it
+// from handlers mounted behind requireAuth.
+func sessionFrom(r *http.Request) *auth.Session {
+	return r.Context().Value(sessionCtxKey{}).(*auth.Session)
+}
+
+// bearerToken extracts the token from an Authorization header, or returns ""
+// if the header is not "Bearer <token>". Deviation from the TS server, which
+// passed a malformed header through to token validation: see the migration
+// plan's How Authentication Works section.
+func bearerToken(header string) string {
+	if len(header) >= 7 && strings.EqualFold(header[:7], "Bearer ") {
+		return strings.TrimSpace(header[7:])
+	}
+	return ""
+}
+
+// requireAuth guards every /api/* route except the login path for the active
+// auth mode. The session cookie is checked before the Authorization header.
+func requireAuth(cfg config.Config, database *sql.DB, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if cfg.AuthMode == "password" && r.URL.Path == "/api/auth/password/login" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		var token string
+		if cookie, err := r.Cookie("session"); err == nil {
+			token = cookie.Value
+		} else if header := r.Header.Get("Authorization"); header != "" {
+			token = bearerToken(header)
+		}
+		if token == "" {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+
+		session, err := auth.ValidateSession(r.Context(), database, token)
+		if err != nil {
+			log.Printf("validating session: %v", err)
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		if session == nil {
+			// Distinguish a dead bearer session from a request that supplied
+			// no credentials, so clients re-login without treating this as a
+			// password change or wiping their sync cursor.
+			w.Header().Set("WWW-Authenticate", `Bearer realm="futo-notes", error="invalid_token"`)
+			writeJSON(w, http.StatusUnauthorized, map[string]string{
+				"error": "session expired or invalid",
+				"code":  "invalid_session",
+			})
+			return
+		}
+
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), sessionCtxKey{}, session)))
+	})
+}
+
+func handleCurrentUser(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"user": sessionFrom(r).User})
+}
+
 func handlePasswordLogin(cfg config.Config, database *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
@@ -171,12 +236,16 @@ func main() {
 		log.Printf("applied %d migration(s): %s", len(applied), strings.Join(applied, ", "))
 	}
 
+	api := http.NewServeMux()
+	if cfg.AuthMode == "password" {
+		api.HandleFunc("POST /api/auth/password/login", handlePasswordLogin(cfg, database))
+	}
+	api.HandleFunc("GET /api/auth", handleCurrentUser)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", handleCapability(cfg.AuthMode))
 	mux.HandleFunc("GET /health", handleHealth(database))
-	if cfg.AuthMode == "password" {
-		mux.HandleFunc("POST /api/auth/password/login", handlePasswordLogin(cfg, database))
-	}
+	mux.Handle("/api/", requireAuth(cfg, database, api))
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	log.Printf("listening on %s", addr)
