@@ -136,7 +136,11 @@ func handlePasswordLogin(cfg config.Config, database *sql.DB) http.HandlerFunc {
 		var body struct {
 			Password string `json:"password"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Password == "" {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "error: invalid json", http.StatusBadRequest)
+			return
+		}
+		if body.Password == "" {
 			http.Error(w, "error: password required", http.StatusBadRequest)
 			return
 		}
