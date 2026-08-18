@@ -15,6 +15,7 @@ func Open(cfg config.Config) (*sql.DB, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(cfg.DBPoolMax)
+	db.SetMaxIdleConns(cfg.DBPoolMax)
 	db.SetConnMaxIdleTime(cfg.DBPoolIdleTimeout)
 	return db, nil
 }

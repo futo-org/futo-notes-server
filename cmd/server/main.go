@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"futo-notes-server/internal/config"
@@ -90,6 +91,16 @@ func main() {
 	database, err := db.Open(cfg)
 	if err != nil {
 		log.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	applied, err := db.Migrate(ctx, database)
+	cancel()
+	if err != nil {
+		log.Fatal(err)
+	}
+	if len(applied) > 0 {
+		log.Printf("applied %d migration(s): %s", len(applied), strings.Join(applied, ", "))
 	}
 
 	mux := http.NewServeMux()
