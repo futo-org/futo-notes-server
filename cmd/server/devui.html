@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>futo-notes dev</title>
+<style>
+  :root {
+    --bg: #16181d;
+    --card: #1e2128;
+    --border: #2c303a;
+    --text: #d7dae0;
+    --muted: #8a90a0;
+    --accent: #6aa1ff;
+    --ok: #4cc38a;
+    --warn: #e5b567;
+    --err: #e5726a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    background: var(--bg);
+  }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  #session-pill {
+    padding: 2px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    color: var(--muted);
+  }
+  #session-pill.in { color: var(--ok); border-color: var(--ok); }
+  #session-pill.out { color: var(--muted); }
+  main {
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 20px;
+    display: grid;
+    gap: 16px;
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+  }
+  .card .row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .method { color: var(--accent); font-weight: 600; }
+  .path { color: var(--text); }
+  .desc { color: var(--muted); margin: 4px 0 0; font-size: 13px; }
+  button {
+    margin-left: auto;
+    background: var(--accent);
+    color: #10131a;
+    border: 0;
+    border-radius: 6px;
+    padding: 5px 14px;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button:hover { filter: brightness(1.1); }
+  input[type=password] {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font: inherit;
+    padding: 5px 10px;
+  }
+  .result { margin-top: 10px; display: none; }
+  .result.shown { display: block; }
+  .status { font-weight: 600; }
+  .status.s2 { color: var(--ok); }
+  .status.s4 { color: var(--warn); }
+  .status.s5 { color: var(--err); }
+  .ms { color: var(--muted); margin-left: 8px; }
+  pre {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 12px;
+    margin: 6px 0 0;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>futo-notes dev</h1>
+  <span id="session-pill">checking…</span>
+</header>
+<main id="cards"></main>
+
+<script>
+const endpoints = [
+  { method: 'GET', path: '/', desc: 'capability document' },
+  { method: 'GET', path: '/health', desc: 'server + database health' },
+  {
+    method: 'POST', path: '/api/auth/password/login', desc: 'password login; sets the session cookie',
+    input: { name: 'password', placeholder: 'password' },
+    body: v => ({ password: v }),
+    refreshesSession: true,
+  },
+  { method: 'GET', path: '/api/auth', desc: 'current user for this session' },
+  { method: 'POST', path: '/api/auth/logout', desc: 'delete this session; clears the cookie', refreshesSession: true },
+];
+
+const cards = document.getElementById('cards');
+
+for (const ep of endpoints) {
+  const card = document.createElement('div');
+  card.className = 'card';
+  card.innerHTML = `
+    <div class="row">
+      <span class="method">${ep.method}</span>
+      <span class="path">${ep.path}</span>
+      ${ep.input ? `<input type="password" placeholder="${ep.input.placeholder}">` : ''}
+      <button>Send</button>
+    </div>
+    <p class="desc">${ep.desc}</p>
+    <div class="result">
+      <span class="status"></span><span class="ms"></span>
+      <pre></pre>
+    </div>`;
+  card.querySelector('button').addEventListener('click', () => send(ep, card));
+  const input = card.querySelector('input');
+  if (input) input.addEventListener('keydown', e => { if (e.key === 'Enter') send(ep, card); });
+  cards.appendChild(card);
+}
+
+async function send(ep, card) {
+  const opts = { method: ep.method };
+  if (ep.body) {
+    opts.headers = { 'Content-Type': 'application/json' };
+    opts.body = JSON.stringify(ep.body(card.querySelector('input').value));
+  }
+
+  const result = card.querySelector('.result');
+  const status = card.querySelector('.status');
+  const ms = card.querySelector('.ms');
+  const pre = card.querySelector('pre');
+  result.classList.add('shown');
+
+  const start = performance.now();
+  try {
+    const res = await fetch(ep.path, opts);
+    const elapsed = Math.round(performance.now() - start);
+    const text = await res.text();
+
+    status.textContent = `${res.status} ${res.statusText}`.trim();
+    status.className = `status s${Math.floor(res.status / 100)}`;
+    ms.textContent = `${elapsed} ms`;
+    try {
+      pre.textContent = text ? JSON.stringify(JSON.parse(text), null, 2) : '(empty body)';
+    } catch {
+      pre.textContent = text;
+    }
+  } catch (err) {
+    status.textContent = 'network error';
+    status.className = 'status s5';
+    ms.textContent = '';
+    pre.textContent = String(err);
+  }
+
+  if (ep.refreshesSession) refreshSession();
+}
+
+async function refreshSession() {
+  const pill = document.getElementById('session-pill');
+  try {
+    const res = await fetch('/api/auth');
+    if (res.ok) {
+      const data = await res.json();
+      pill.textContent = `logged in · ${data.user?.email ?? '?'}`;
+      pill.className = 'in';
+    } else {
+      pill.textContent = 'logged out';
+      pill.className = 'out';
+    }
+  } catch {
+    pill.textContent = 'server unreachable';
+    pill.className = 'out';
+  }
+}
+
+refreshSession();
+</script>
+</body>
+</html>

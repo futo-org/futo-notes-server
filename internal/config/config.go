@@ -15,6 +15,7 @@ type Config struct {
 	Password          string // FUTO_NOTES_PASSWORD, plaintext
 	PasswordHash      string // FUTO_NOTES_PASSWORD_HASH, scrypt self-describing form
 	CookieSecure      bool   // COOKIE_SECURE, Secure cookie flag; on unless "false"
+	DevUI             bool   // DEV_UI, serves the dev test page at /dev when "true"
 	DBPoolMax         int
 	DBPoolIdleTimeout time.Duration
 }
@@ -30,6 +31,7 @@ func Load() (Config, error) {
 		Password:     os.Getenv("FUTO_NOTES_PASSWORD"),
 		PasswordHash: os.Getenv("FUTO_NOTES_PASSWORD_HASH"),
 		CookieSecure: os.Getenv("COOKIE_SECURE") != "false",
+		DevUI:        os.Getenv("DEV_UI") == "true",
 	}
 
 	if cfg.DatabaseURL == "" {
