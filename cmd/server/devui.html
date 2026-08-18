@@ -76,13 +76,18 @@
     cursor: pointer;
   }
   button:hover { filter: brightness(1.1); }
-  input[type=password] {
+  input[type=password], input[type=text], textarea {
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: 6px;
     color: var(--text);
     font: inherit;
     padding: 5px 10px;
+  }
+  textarea {
+    width: 100%;
+    margin-top: 10px;
+    resize: vertical;
   }
   .result { margin-top: 10px; display: none; }
   .result.shown { display: block; }
@@ -129,6 +134,17 @@ const endpoints = [
     input: { type: 'text', placeholder: 'collection id' },
     pathFor: v => `/api/collections/${encodeURIComponent(v)}`,
   },
+  {
+    method: 'GET', path: '/api/collections/:id/key', desc: 'vault key material; {"key": null} before first claim',
+    input: { type: 'text', placeholder: 'collection id' },
+    pathFor: v => `/api/collections/${encodeURIComponent(v)}/key`,
+  },
+  {
+    method: 'PUT', path: '/api/collections/:id/key', desc: 'claim or rotate key material; add previous_key_updated_at to rotate',
+    input: { type: 'text', placeholder: 'collection id' },
+    pathFor: v => `/api/collections/${encodeURIComponent(v)}/key`,
+    rawBody: '{"key_salt": "c2FsdA", "key_kdf": {"name": "scrypt"}, "encrypted_vault_key": "d3JhcHBlZA"}',
+  },
 ];
 
 const cards = document.getElementById('cards');
@@ -143,6 +159,7 @@ for (const ep of endpoints) {
       ${ep.input ? `<input type="${ep.input.type ?? 'password'}" placeholder="${ep.input.placeholder}" data-1p-ignore autocomplete="off">` : ''}
       <button>Send</button>
     </div>
+    ${ep.rawBody !== undefined ? `<textarea rows="3" spellcheck="false">${ep.rawBody}</textarea>` : ''}
     <p class="desc">${ep.desc}</p>
     <div class="result">
       <span class="status"></span><span class="ms"></span>
@@ -161,6 +178,9 @@ async function send(ep, card) {
   if (ep.body) {
     opts.headers = { 'Content-Type': 'application/json' };
     opts.body = JSON.stringify(ep.body(card.querySelector('input').value));
+  } else if (ep.rawBody !== undefined) {
+    opts.headers = { 'Content-Type': 'application/json' };
+    opts.body = card.querySelector('textarea').value;
   }
 
   const result = card.querySelector('.result');
