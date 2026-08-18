@@ -12,6 +12,8 @@ type Config struct {
 	DatabaseURL       string
 	Port              int
 	AuthMode          string
+	Password          string // FUTO_NOTES_PASSWORD, plaintext
+	PasswordHash      string // FUTO_NOTES_PASSWORD_HASH, scrypt self-describing form
 	DBPoolMax         int
 	DBPoolIdleTimeout time.Duration
 }
@@ -22,8 +24,10 @@ func Load() (Config, error) {
 	}
 
 	cfg := Config{
-		DatabaseURL: os.Getenv("DATABASE_URL"),
-		AuthMode:    getDefault("AUTH_MODE", "password"),
+		DatabaseURL:  os.Getenv("DATABASE_URL"),
+		AuthMode:     getDefault("AUTH_MODE", "password"),
+		Password:     os.Getenv("FUTO_NOTES_PASSWORD"),
+		PasswordHash: os.Getenv("FUTO_NOTES_PASSWORD_HASH"),
 	}
 
 	if cfg.DatabaseURL == "" {

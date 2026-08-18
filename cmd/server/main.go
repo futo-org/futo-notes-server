@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"futo-notes-server/internal/auth"
 	"futo-notes-server/internal/config"
 	"futo-notes-server/internal/db"
 )
@@ -82,6 +83,41 @@ func handleHealth(database *sql.DB) http.HandlerFunc {
 	}
 }
 
+func handlePasswordLogin(cfg config.Config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Password string `json:"password"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Password == "" {
+			http.Error(w, "error: password required", http.StatusBadRequest)
+			return
+		}
+		if cfg.Password == "" && cfg.PasswordHash == "" {
+			http.Error(w, "error: no password set", http.StatusInternalServerError)
+			return
+		}
+
+		var ok bool
+		if cfg.PasswordHash != "" {
+			var err error
+			ok, err = auth.VerifyScrypt(body.Password, cfg.PasswordHash)
+			if err != nil {
+				log.Printf("password login: %v", err)
+				http.Error(w, "error: internal server error", http.StatusInternalServerError)
+				return
+			}
+		} else {
+			ok = auth.VerifyPlaintext(body.Password, cfg.Password)
+		}
+
+		if !ok {
+			http.Error(w, "no", http.StatusUnauthorized)
+			return
+		}
+		fmt.Fprintln(w, "you're in")
+	}
+}
+
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
@@ -106,6 +142,9 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", handleCapability(cfg.AuthMode))
 	mux.HandleFunc("GET /health", handleHealth(database))
+	if cfg.AuthMode == "password" {
+		mux.HandleFunc("POST /api/auth/password/login", handlePasswordLogin(cfg))
+	}
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	log.Printf("listening on %s", addr)
