@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"futo-notes-server/internal/auth"
+	"futo-notes-server/internal/blobs"
 	"futo-notes-server/internal/config"
 	"futo-notes-server/internal/db"
 )
@@ -121,6 +122,7 @@ func main() {
 	api.HandleFunc("DELETE /api/collections/{id}", handleDeleteCollection(database))
 	api.HandleFunc("GET /api/collections/{id}/key", handleGetCollectionKey(database))
 	api.HandleFunc("PUT /api/collections/{id}/key", handlePutCollectionKey(database))
+	api.HandleFunc("POST /api/blobs", handleUploadBlob(database, &blobs.Store{Dir: cfg.BlobDir}))
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", handleCapability(cfg.AuthMode))

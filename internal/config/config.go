@@ -16,6 +16,7 @@ type Config struct {
 	PasswordHash      string // FUTO_NOTES_PASSWORD_HASH, scrypt self-describing form
 	CookieSecure      bool   // COOKIE_SECURE, Secure cookie flag; on unless "false"
 	DevUI             bool   // DEV_UI, serves the dev test page at /dev when "true"
+	BlobDir           string // BLOB_DIR, root of on-disk blob storage
 	DBPoolMax         int
 	DBPoolIdleTimeout time.Duration
 }
@@ -32,6 +33,7 @@ func Load() (Config, error) {
 		PasswordHash: os.Getenv("FUTO_NOTES_PASSWORD_HASH"),
 		CookieSecure: os.Getenv("COOKIE_SECURE") != "false",
 		DevUI:        os.Getenv("DEV_UI") == "true",
+		BlobDir:      getDefault("BLOB_DIR", "./blobs"),
 	}
 
 	if cfg.DatabaseURL == "" {

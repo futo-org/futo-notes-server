@@ -150,6 +150,10 @@ const endpoints = [
     pathFor: v => `/api/collections/${encodeURIComponent(v)}/key`,
     rawBody: '{"key_salt": "c2FsdA", "key_kdf": {"name": "scrypt"}, "encrypted_vault_key": "d3JhcHBlZA"}',
   },
+  {
+    method: 'POST', path: '/api/blobs', desc: 'stage a blob: pick a file, get back its storage key; no file sends an empty body (400)',
+    file: true,
+  },
 ];
 
 const cards = document.getElementById('cards');
@@ -162,6 +166,7 @@ for (const ep of endpoints) {
       <span class="method">${ep.method}</span>
       <span class="path">${ep.path}</span>
       ${ep.input ? `<input type="${ep.input.type ?? 'password'}" placeholder="${ep.input.placeholder}" data-1p-ignore autocomplete="off">` : ''}
+      ${ep.file ? '<input type="file">' : ''}
       <button>Send</button>
     </div>
     ${ep.rawBody !== undefined ? `<textarea rows="3" spellcheck="false">${ep.rawBody}</textarea>` : ''}
@@ -186,6 +191,9 @@ async function send(ep, card) {
   } else if (ep.rawBody !== undefined) {
     opts.headers = { 'Content-Type': 'application/json' };
     opts.body = card.querySelector('textarea').value;
+  } else if (ep.file) {
+    opts.headers = { 'Content-Type': 'application/octet-stream' };
+    opts.body = card.querySelector('input[type=file]').files[0] ?? '';
   }
 
   const result = card.querySelector('.result');
