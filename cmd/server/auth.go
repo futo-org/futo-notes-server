@@ -86,10 +86,7 @@ func rateLimited(limiter *auth.RateLimiter, next http.HandlerFunc) http.HandlerF
 		}
 		ok, retryAfter := limiter.Allow(ip, time.Now())
 		if !ok {
-			secs := int((retryAfter + time.Second - 1) / time.Second)
-			if secs < 1 {
-				secs = 1
-			}
+			secs := max(int((retryAfter+time.Second-1)/time.Second), 1)
 			w.Header().Set("Retry-After", strconv.Itoa(secs))
 			writeError(w, http.StatusTooManyRequests, "too many requests")
 			return

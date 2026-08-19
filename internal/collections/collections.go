@@ -7,8 +7,7 @@ import (
 	"errors"
 	"strconv"
 	"time"
-
-	"futo-notes-server/internal/uuidv7"
+	"uuid"
 )
 
 type Collection struct {
@@ -61,7 +60,7 @@ func Claim(ctx context.Context, database *sql.DB, userID string) (Collection, bo
 	if errors.Is(err, sql.ErrNoRows) {
 		c, err = scanCollection(tx.QueryRowContext(ctx,
 			`INSERT INTO collections (id, user_id) VALUES ($1, $2)
-			 RETURNING `+selectColumns, uuidv7.New(), userID))
+			 RETURNING `+selectColumns, uuid.NewV7().String(), userID))
 		created = true
 	}
 	if err != nil {

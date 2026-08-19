@@ -8,8 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"time"
-
-	"futo-notes-server/internal/uuidv7"
+	"uuid"
 )
 
 const SessionTTL = 7 * 24 * time.Hour
@@ -73,7 +72,7 @@ func CreateSession(ctx context.Context, database *sql.DB, userID string) (string
 	rawToken := GenerateToken()
 	_, err := database.ExecContext(ctx,
 		`INSERT INTO sessions (id, user_id, access_token_hash, expires_at) VALUES ($1, $2, $3, $4)`,
-		uuidv7.New(), userID, HashToken(rawToken), time.Now().Add(SessionTTL))
+		uuid.NewV7().String(), userID, HashToken(rawToken), time.Now().Add(SessionTTL))
 	if err != nil {
 		return "", err
 	}

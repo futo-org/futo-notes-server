@@ -4,8 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-
-	"futo-notes-server/internal/uuidv7"
+	"uuid"
 )
 
 // The singleton user in password mode. All E2EE data is owned by this row.
@@ -40,7 +39,7 @@ func UpsertLocalUser(ctx context.Context, database *sql.DB) (User, error) {
 		`INSERT INTO users (id, sub, email, name) VALUES ($1, $2, $3, $4)
 		 ON CONFLICT (sub) DO NOTHING
 		 RETURNING id, email, name`,
-		uuidv7.New(), singletonSub, singletonEmail, singletonName).
+		uuid.NewV7().String(), singletonSub, singletonEmail, singletonName).
 		Scan(&u.ID, &u.Email, &u.Name)
 	if errors.Is(err, sql.ErrNoRows) {
 		// Lost the race; the row exists now.

@@ -9,7 +9,7 @@ func TestRateLimiterAllowsUpToLimit(t *testing.T) {
 	l := NewRateLimiter()
 	now := time.Now()
 
-	for i := 0; i < loginRateLimit; i++ {
+	for i := range loginRateLimit {
 		if ok, _ := l.Allow("a", now); !ok {
 			t.Fatalf("attempt %d: denied, want allowed", i+1)
 		}
@@ -27,7 +27,7 @@ func TestRateLimiterKeysAreIndependent(t *testing.T) {
 	l := NewRateLimiter()
 	now := time.Now()
 
-	for i := 0; i < loginRateLimit+1; i++ {
+	for range loginRateLimit + 1 {
 		l.Allow("a", now)
 	}
 	if ok, _ := l.Allow("b", now); !ok {
@@ -39,7 +39,7 @@ func TestRateLimiterWindowResets(t *testing.T) {
 	l := NewRateLimiter()
 	now := time.Now()
 
-	for i := 0; i < loginRateLimit+1; i++ {
+	for range loginRateLimit + 1 {
 		l.Allow("a", now)
 	}
 	if ok, _ := l.Allow("a", now.Add(loginRateWindow)); !ok {
@@ -51,7 +51,7 @@ func TestRateLimiterRetryAfterShrinks(t *testing.T) {
 	l := NewRateLimiter()
 	now := time.Now()
 
-	for i := 0; i < loginRateLimit; i++ {
+	for range loginRateLimit {
 		l.Allow("a", now)
 	}
 	_, retryAfter := l.Allow("a", now.Add(45*time.Second))
