@@ -8,3 +8,7 @@ To the client, this rewrite should be invisible. It is ok for this rewrite to re
 - This is a rethinking from spec, not a port. Don't read the TypeScript server on `main` as a template. Be explicit when you reference the TypeScript server. Otherwise, do not read it.
 - Contract facts come from the migration plan and OpenAPI spec. If a detail is missing from both, ask — don't inherit TS behavior silently.
 - Build only what the current request needs. No speculative helpers, config, or error paths.
+
+When developing a feature, make sure a corresponding demo can be found at /dev. see `cmd/server/devui.go`
+
+Always use port 3005 for local dev. Kill other processes if needed to reclaim 3005.

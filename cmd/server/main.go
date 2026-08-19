@@ -122,7 +122,17 @@ func main() {
 	api.HandleFunc("DELETE /api/collections/{id}", handleDeleteCollection(database))
 	api.HandleFunc("GET /api/collections/{id}/key", handleGetCollectionKey(database))
 	api.HandleFunc("PUT /api/collections/{id}/key", handlePutCollectionKey(database))
-	api.HandleFunc("POST /api/blobs", handleUploadBlob(database, &blobs.Store{Dir: cfg.BlobDir}))
+	blobStore := &blobs.Store{Dir: cfg.BlobDir}
+	api.HandleFunc("GET /api/collections/{id}/objects", handleListObjects(database))
+	api.HandleFunc("POST /api/collections/{id}/objects", handleCreateObject(database))
+	api.HandleFunc("GET /api/collections/{id}/objects/{objectId}", handleGetObject(database))
+	api.HandleFunc("PUT /api/collections/{id}/objects/{objectId}", handleUpdateObject(database))
+	api.HandleFunc("DELETE /api/collections/{id}/objects/{objectId}", handleDeleteObject(database))
+	api.HandleFunc("POST /api/collections/{id}/blob-objects", handleCreateBlobObject(database, blobStore))
+	api.HandleFunc("PUT /api/collections/{id}/blob-objects/{objectId}", handleUpdateBlobObject(database, blobStore))
+	api.HandleFunc("POST /api/collections/{id}/blob-objects/batch", handleBatchBlobObjects(database, blobStore))
+	api.HandleFunc("GET /api/collections/{id}/create-mutations/{mutationId}", handleRecoverCreate(database))
+	api.HandleFunc("POST /api/blobs", handleUploadBlob(database, blobStore))
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", handleCapability(cfg.AuthMode))

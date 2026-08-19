@@ -154,7 +154,75 @@ const endpoints = [
     method: 'POST', path: '/api/blobs', desc: 'stage a blob: pick a file, get back its storage key; no file sends an empty body (400)',
     file: true,
   },
+  {
+    method: 'GET', path: '/api/collections/:id/objects', desc: 'pull object metadata; optionally add sinceVersion after a comma',
+    input: { type: 'text', placeholder: 'collection id[, sinceVersion]' },
+    pathFor: v => {
+      const [cid, since] = splitValues(v);
+      return `/api/collections/${encodeURIComponent(cid)}/objects${since ? `?sinceVersion=${encodeURIComponent(since)}` : ''}`;
+    },
+  },
+  {
+    method: 'GET', path: '/api/collections/:id/objects/:objectId', desc: 'get one object metadata row',
+    input: { type: 'text', placeholder: 'collection id, object id' },
+    pathFor: v => objectPath(v),
+  },
+  {
+    method: 'POST', path: '/api/collections/:id/objects', desc: 'claim a blob staged above; size_bytes is validated while the ledger size is authoritative',
+    input: { type: 'text', placeholder: 'collection id' }, mutation: true,
+    pathFor: v => `/api/collections/${encodeURIComponent(v.trim())}/objects`,
+    rawBody: '{"blob_key": "USER_ID/BLOB_ID", "size_bytes": 1}',
+  },
+  {
+    method: 'PUT', path: '/api/collections/:id/objects/:objectId', desc: 'version-guarded replacement using a separately staged blob',
+    input: { type: 'text', placeholder: 'collection id, object id' }, mutation: true,
+    pathFor: v => objectPath(v),
+    rawBody: '{"version": 2, "blob_key": "USER_ID/BLOB_ID", "size_bytes": 1}',
+  },
+  {
+    method: 'DELETE', path: '/api/collections/:id/objects/:objectId', desc: 'soft-delete; optional third value guards the current version',
+    input: { type: 'text', placeholder: 'collection id, object id[, version]' }, mutation: true,
+    pathFor: v => {
+      const [cid, oid, version] = splitValues(v);
+      return `/api/collections/${encodeURIComponent(cid)}/objects/${encodeURIComponent(oid)}${version ? `?version=${encodeURIComponent(version)}` : ''}`;
+    },
+  },
+  {
+    method: 'POST', path: '/api/collections/:id/blob-objects', desc: 'create an object from the selected ciphertext in one round trip',
+    input: { type: 'text', placeholder: 'collection id' }, mutation: true, file: true,
+    pathFor: v => `/api/collections/${encodeURIComponent(v.trim())}/blob-objects`,
+  },
+  {
+    method: 'PUT', path: '/api/collections/:id/blob-objects/:objectId', desc: 'replace an object with selected ciphertext; version is the next object version',
+    input: { type: 'text', placeholder: 'collection id, object id, version' }, mutation: true, file: true,
+    pathFor: v => {
+      const [cid, oid, version] = splitValues(v);
+      return `/api/collections/${encodeURIComponent(cid)}/blob-objects/${encodeURIComponent(oid)}?version=${encodeURIComponent(version)}`;
+    },
+  },
+  {
+    method: 'POST', path: '/api/collections/:id/blob-objects/batch', desc: 'send a file containing the documented binary batch frames',
+    input: { type: 'text', placeholder: 'collection id' }, file: true,
+    pathFor: v => `/api/collections/${encodeURIComponent(v.trim())}/blob-objects/batch`,
+  },
+  {
+    method: 'GET', path: '/api/collections/:id/create-mutations/:mutationId', desc: 'recover a durable create result after an ambiguous response',
+    input: { type: 'text', placeholder: 'collection id, mutation id' },
+    pathFor: v => {
+      const [cid, mID] = splitValues(v);
+      return `/api/collections/${encodeURIComponent(cid)}/create-mutations/${encodeURIComponent(mID)}`;
+    },
+  },
 ];
+
+function splitValues(value) {
+  return value.split(',').map(part => part.trim());
+}
+
+function objectPath(value) {
+  const [cid, oid] = splitValues(value);
+  return `/api/collections/${encodeURIComponent(cid)}/objects/${encodeURIComponent(oid)}`;
+}
 
 const cards = document.getElementById('cards');
 
@@ -166,6 +234,7 @@ for (const ep of endpoints) {
       <span class="method">${ep.method}</span>
       <span class="path">${ep.path}</span>
       ${ep.input ? `<input type="${ep.input.type ?? 'password'}" placeholder="${ep.input.placeholder}" data-1p-ignore autocomplete="off">` : ''}
+      ${ep.mutation ? '<input class="mutation-id" type="text" placeholder="Mutation-Id (optional)" data-1p-ignore autocomplete="off">' : ''}
       ${ep.file ? '<input type="file">' : ''}
       <button>Send</button>
     </div>
@@ -182,17 +251,19 @@ for (const ep of endpoints) {
 }
 
 async function send(ep, card) {
-  const opts = { method: ep.method };
+  const opts = { method: ep.method, headers: {} };
   let path = ep.path;
-  if (ep.pathFor) path = ep.pathFor(card.querySelector('input').value);
+  if (ep.pathFor) path = ep.pathFor(card.querySelector('input:not(.mutation-id)[type="text"], input[type="password"]').value);
+  const mutationId = card.querySelector('.mutation-id')?.value;
+  if (mutationId) opts.headers['Mutation-Id'] = mutationId;
   if (ep.body) {
-    opts.headers = { 'Content-Type': 'application/json' };
+    opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(ep.body(card.querySelector('input').value));
   } else if (ep.rawBody !== undefined) {
-    opts.headers = { 'Content-Type': 'application/json' };
+    opts.headers['Content-Type'] = 'application/json';
     opts.body = card.querySelector('textarea').value;
   } else if (ep.file) {
-    opts.headers = { 'Content-Type': 'application/octet-stream' };
+    opts.headers['Content-Type'] = 'application/octet-stream';
     opts.body = card.querySelector('input[type=file]').files[0] ?? '';
   }
 
