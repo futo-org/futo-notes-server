@@ -9,8 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"time"
-
-	"futo-notes-server/internal/uuidv7"
+	"uuid"
 )
 
 const objectColumns = `id, collection_id, version, change_seq, deleted,
@@ -470,7 +469,7 @@ func Create(ctx context.Context, db *sql.DB, userID, collectionID, mutationID, b
 		WHERE id = $1 RETURNING current_version`, collectionID).Scan(&collectionVersion); err != nil {
 		return MutationOutcome{}, err
 	}
-	objectID := uuidv7.New()
+	objectID := uuid.NewV7().String()
 	o, err := scanObject(tx.QueryRowContext(ctx, `INSERT INTO objects
 		(id, collection_id, user_id, version, change_seq, blob_key, size_bytes)
 		VALUES ($1, $2, $3, 1, $4, $5, $6) RETURNING `+objectColumns,

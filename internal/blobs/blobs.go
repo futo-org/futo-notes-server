@@ -6,8 +6,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
-
-	"futo-notes-server/internal/uuidv7"
+	"uuid"
 )
 
 // Store writes blobs under Dir using the storage key as a relative path,
@@ -30,7 +29,7 @@ func (s *Store) Put(key string, data []byte) error {
 // fails, the row is a staged entry with no bytes behind it, and garbage
 // collection removes it after 24 hours.
 func Stage(ctx context.Context, database *sql.DB, store *Store, userID string, data []byte) (string, error) {
-	key := userID + "/" + uuidv7.New()
+	key := userID + "/" + uuid.NewV7().String()
 	if _, err := database.ExecContext(ctx,
 		`INSERT INTO blob_ledger (blob_key, user_id, size_bytes, state)
 		 VALUES ($1, $2, $3, 'staged')`, key, userID, len(data)); err != nil {

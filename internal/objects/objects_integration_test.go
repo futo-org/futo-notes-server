@@ -9,7 +9,7 @@ import (
 	"futo-notes-server/internal/blobs"
 	databasepkg "futo-notes-server/internal/db"
 	"futo-notes-server/internal/objects"
-	"futo-notes-server/internal/uuidv7"
+	"uuid"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
@@ -29,7 +29,7 @@ func TestObjectMutationLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	userID, collectionID := uuidv7.New(), uuidv7.New()
+	userID, collectionID := uuid.NewV7().String(), uuid.NewV7().String()
 	if _, err := database.ExecContext(ctx, `INSERT INTO users (id, sub, name, email)
 		VALUES ($1, $2, 'objects test', $3)`, userID, "objects-test-"+userID, userID+"@example.invalid"); err != nil {
 		t.Fatal(err)
