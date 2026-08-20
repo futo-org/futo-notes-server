@@ -133,6 +133,9 @@ func main() {
 	api.HandleFunc("POST /api/collections/{id}/blob-objects/batch", handleBatchBlobObjects(database, blobStore))
 	api.HandleFunc("GET /api/collections/{id}/create-mutations/{mutationId}", handleRecoverCreate(database))
 	api.HandleFunc("POST /api/blobs", handleUploadBlob(database, blobStore))
+	api.HandleFunc("POST /api/blobs/batch", handleBatchFetchBlobs(blobStore))
+	api.HandleFunc("GET /api/blobs/{userId}/{blobId}", handleDownloadBlob(blobStore))
+	api.HandleFunc("DELETE /api/blobs/{userId}/{blobId}", handleDeleteBlob(database, blobStore))
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", handleCapability(cfg.AuthMode))

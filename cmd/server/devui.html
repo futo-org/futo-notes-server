@@ -155,6 +155,23 @@ const endpoints = [
     file: true,
   },
   {
+    method: 'GET', path: '/api/blobs/:userId/:blobId', desc: 'download ciphertext; another user\'s key or an unknown one is a 404',
+    input: { type: 'text', placeholder: 'USER_ID/BLOB_ID' },
+    pathFor: v => `/api/blobs/${v.trim().split('/').map(encodeURIComponent).join('/')}`,
+    binary: true,
+  },
+  {
+    method: 'POST', path: '/api/blobs/batch', desc: 'fetch up to 200 keys as binary frames; comma-separated',
+    input: { type: 'text', placeholder: 'USER_ID/BLOB_ID, USER_ID/BLOB_ID' },
+    bodyFor: v => JSON.stringify({ keys: splitValues(v).filter(Boolean) }),
+    frames: true,
+  },
+  {
+    method: 'DELETE', path: '/api/blobs/:userId/:blobId', desc: 'delete a staged blob; 204 when absent, 409 once an object claims it',
+    input: { type: 'text', placeholder: 'USER_ID/BLOB_ID' },
+    pathFor: v => `/api/blobs/${v.trim().split('/').map(encodeURIComponent).join('/')}`,
+  },
+  {
     method: 'GET', path: '/api/collections/:id/objects', desc: 'pull object metadata; optionally add sinceVersion after a comma',
     input: { type: 'text', placeholder: 'collection id[, sinceVersion]' },
     pathFor: v => {
@@ -262,6 +279,9 @@ async function send(ep, card) {
   } else if (ep.rawBody !== undefined) {
     opts.headers['Content-Type'] = 'application/json';
     opts.body = card.querySelector('textarea').value;
+  } else if (ep.bodyFor) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = ep.bodyFor(card.querySelector('input[type="text"]').value);
   } else if (ep.file) {
     opts.headers['Content-Type'] = 'application/octet-stream';
     opts.body = card.querySelector('input[type=file]').files[0] ?? '';
@@ -277,15 +297,23 @@ async function send(ep, card) {
   try {
     const res = await fetch(path, opts);
     const elapsed = Math.round(performance.now() - start);
-    const text = await res.text();
+    const octets = (ep.binary || ep.frames) && res.ok;
+    const buffer = octets ? await res.arrayBuffer() : null;
+    const text = octets ? '' : await res.text();
 
     status.textContent = `${res.status} ${res.statusText}`.trim();
     status.className = `status s${Math.floor(res.status / 100)}`;
     ms.textContent = `${elapsed} ms`;
-    try {
-      pre.textContent = text ? JSON.stringify(JSON.parse(text), null, 2) : '(empty body)';
-    } catch {
-      pre.textContent = text;
+    if (ep.frames && octets) {
+      pre.textContent = decodeFrames(buffer);
+    } else if (octets) {
+      pre.textContent = describeBytes(new Uint8Array(buffer));
+    } else {
+      try {
+        pre.textContent = text ? JSON.stringify(JSON.parse(text), null, 2) : '(empty body)';
+      } catch {
+        pre.textContent = text;
+      }
     }
   } catch (err) {
     status.textContent = 'network error';
@@ -295,6 +323,30 @@ async function send(ep, card) {
   }
 
   if (ep.refreshesSession) refreshSession();
+}
+
+const FRAME_STATUS = ['ok', 'missing', 'omitted'];
+
+function describeBytes(bytes) {
+  const head = [...bytes.slice(0, 32)].map(b => b.toString(16).padStart(2, '0')).join(' ');
+  return `${bytes.length} bytes\n${head}${bytes.length > 32 ? ' …' : ''}`;
+}
+
+// [u16 keyLen][key utf8][u8 status][u32 blobLen][bytes], repeated to EOF.
+function decodeFrames(buffer) {
+  const view = new DataView(buffer);
+  const decoder = new TextDecoder();
+  const lines = [];
+  let offset = 0;
+  while (offset < buffer.byteLength) {
+    const keyLen = view.getUint16(offset);
+    const key = decoder.decode(new Uint8Array(buffer, offset + 2, keyLen));
+    const status = view.getUint8(offset + 2 + keyLen);
+    const blobLen = view.getUint32(offset + 3 + keyLen);
+    lines.push(`${key}  ${FRAME_STATUS[status] ?? status}  ${blobLen} bytes`);
+    offset += 7 + keyLen + blobLen;
+  }
+  return `${lines.length} frame(s), ${buffer.byteLength} bytes\n${lines.join('\n')}`;
 }
 
 async function refreshSession() {

@@ -4,8 +4,10 @@ package blobs
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"uuid"
 )
 
@@ -39,4 +41,61 @@ func Stage(ctx context.Context, database *sql.DB, store *Store, userID string, d
 		return "", err
 	}
 	return key, nil
+}
+
+func (s *Store) Open(key string) (*os.File, error) {
+	return os.Open(filepath.Join(s.Dir, filepath.FromSlash(key)))
+}
+
+// Remove reports success when the file is already gone, so callers can treat
+// deletion as idempotent.
+func (s *Store) Remove(key string) error {
+	err := os.Remove(filepath.Join(s.Dir, filepath.FromSlash(key)))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
+// Delete removes a blob that is still staged, along with its ledger row. It
+// reports false when the ledger holds the key in any other state, whoever the
+// row names as owner: those are owned by object and collection lifetime, not
+// by the client. A key with no
+// ledger row is a legacy or reconciled file and is deleted outright. A key
+// outside the caller's namespace is refused before any file is touched.
+//
+// The row goes first. If the file removal then fails, storage reconciliation
+// re-adopts the file as staged and garbage collection purges it later.
+func Delete(ctx context.Context, database *sql.DB, store *Store, userID, key string) (bool, error) {
+	if !strings.HasPrefix(key, userID+"/") {
+		return false, nil
+	}
+	tx, err := database.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	// Keyed on blob_key alone. The namespace prefix already establishes who
+	// owns the key, and a row recorded against a different user_id — which
+	// migration 010 can produce for a legacy_shared key — has to block the
+	// delete rather than read as absent.
+	var state string
+	err = tx.QueryRowContext(ctx,
+		`SELECT state FROM blob_ledger WHERE blob_key = $1 FOR UPDATE`, key).Scan(&state)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+	case err != nil:
+		return false, err
+	case state != "staged":
+		return false, nil
+	default:
+		if _, err := tx.ExecContext(ctx, `DELETE FROM blob_ledger WHERE blob_key = $1`, key); err != nil {
+			return false, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, store.Remove(key)
 }
