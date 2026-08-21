@@ -3,14 +3,19 @@ package objects_test
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"errors"
 	"os"
 	"testing"
+	"time"
 
 	"futo-notes-server/internal/blobs"
 	databasepkg "futo-notes-server/internal/db"
+	"futo-notes-server/internal/events"
 	"futo-notes-server/internal/objects"
 	"uuid"
 
+	"github.com/jackc/pgx/v5"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
@@ -26,6 +31,14 @@ func TestObjectMutationLifecycle(t *testing.T) {
 	defer database.Close()
 	ctx := context.Background()
 	if _, err := databasepkg.Migrate(ctx, database); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := pgx.Connect(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close(ctx)
+	if _, err := listener.Exec(ctx, "LISTEN "+events.Channel); err != nil {
 		t.Fatal(err)
 	}
 
@@ -51,6 +64,7 @@ func TestObjectMutationLifecycle(t *testing.T) {
 	if created.Code != objects.OK || created.Response.Object.Version != "1" || created.Response.CollectionVersion != 1 {
 		t.Fatalf("unexpected create: %#v", created)
 	}
+	waitForObjectNotification(t, listener, userID, collectionID, 1)
 	replayed, err := objects.Create(ctx, database, userID, collectionID, "create-1", firstKey)
 	if err != nil {
 		t.Fatal(err)
@@ -58,6 +72,7 @@ func TestObjectMutationLifecycle(t *testing.T) {
 	if replayed.Response.Replayed == nil || !*replayed.Response.Replayed || replayed.Response.Object.ID != created.Response.Object.ID {
 		t.Fatalf("unexpected replay: %#v", replayed)
 	}
+	assertNoObjectNotification(t, listener, userID, collectionID)
 
 	secondKey, err := blobs.Stage(ctx, database, store, userID, []byte("second"))
 	if err != nil {
@@ -70,6 +85,7 @@ func TestObjectMutationLifecycle(t *testing.T) {
 	if updated.Code != objects.OK || updated.Response.Object.Version != "2" || updated.Response.CollectionVersion != 2 {
 		t.Fatalf("unexpected update: %#v", updated)
 	}
+	waitForObjectNotification(t, listener, userID, collectionID, 2)
 	conflict, err := objects.Update(ctx, database, userID, collectionID, created.Response.Object.ID, "update-stale", firstKey, 2)
 	if err != nil {
 		t.Fatal(err)
@@ -77,6 +93,7 @@ func TestObjectMutationLifecycle(t *testing.T) {
 	if conflict.Code != objects.VersionConflict || conflict.Conflict.CurrentVersion != 2 {
 		t.Fatalf("unexpected conflict: %#v", conflict)
 	}
+	assertNoObjectNotification(t, listener, userID, collectionID)
 
 	deleted, err := objects.Delete(ctx, database, userID, collectionID, created.Response.Object.ID, "delete-1", nil)
 	if err != nil {
@@ -85,6 +102,7 @@ func TestObjectMutationLifecycle(t *testing.T) {
 	if deleted.Code != objects.OK || deleted.Response.Object.Version != "3" || deleted.Response.CollectionVersion != 3 {
 		t.Fatalf("unexpected delete: %#v", deleted)
 	}
+	waitForObjectNotification(t, listener, userID, collectionID, 3)
 	rows, _, err := objects.List(ctx, database, userID, collectionID, 2, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -100,6 +118,7 @@ func TestObjectMutationLifecycle(t *testing.T) {
 	if redeleted.Code != objects.OK || redeleted.Response.Object.Version != "4" || redeleted.Response.CollectionVersion != 4 {
 		t.Fatalf("unexpected tombstone re-delete: %#v", redeleted)
 	}
+	waitForObjectNotification(t, listener, userID, collectionID, 4)
 	thirdKey, err := blobs.Stage(ctx, database, store, userID, []byte("third"))
 	if err != nil {
 		t.Fatal(err)
@@ -111,11 +130,55 @@ func TestObjectMutationLifecycle(t *testing.T) {
 	if tombstoneUpdate.Code != objects.OK || !tombstoneUpdate.Response.Object.Deleted {
 		t.Fatalf("update should not revive tombstone: %#v", tombstoneUpdate)
 	}
+	waitForObjectNotification(t, listener, userID, collectionID, 5)
 	recovered, err := objects.RecoverCreate(ctx, database, userID, collectionID, "create-1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if recovered.Code != objects.OK || recovered.Response.Object.ID != created.Response.Object.ID {
 		t.Fatalf("unexpected recovery: %#v", recovered)
+	}
+}
+
+func waitForObjectNotification(t *testing.T, listener *pgx.Conn, userID, collectionID string, version int64) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	for {
+		notification, err := listener.WaitForNotification(ctx)
+		if err != nil {
+			t.Fatalf("waiting for object notification: %v", err)
+		}
+		var payload events.Notification
+		if err := json.Unmarshal([]byte(notification.Payload), &payload); err != nil {
+			continue
+		}
+		if payload.UserID != userID || payload.CollectionID != collectionID {
+			continue
+		}
+		if payload.CurrentVersion != version {
+			t.Fatalf("notification version = %d, want %d", payload.CurrentVersion, version)
+		}
+		return
+	}
+}
+
+func assertNoObjectNotification(t *testing.T, listener *pgx.Conn, userID, collectionID string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	for {
+		notification, err := listener.WaitForNotification(ctx)
+		if errors.Is(err, context.DeadlineExceeded) {
+			return
+		}
+		if err != nil {
+			t.Fatalf("checking for object notification: %v", err)
+		}
+		var payload events.Notification
+		if json.Unmarshal([]byte(notification.Payload), &payload) == nil &&
+			payload.UserID == userID && payload.CollectionID == collectionID {
+			t.Fatalf("unexpected notification: %#v", payload)
+		}
 	}
 }

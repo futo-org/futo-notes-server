@@ -106,6 +106,7 @@
     white-space: pre-wrap;
     word-break: break-word;
   }
+  #sse-log { max-height: 240px; overflow-y: auto; }
 </style>
 </head>
 <body>
@@ -242,6 +243,62 @@ function objectPath(value) {
 }
 
 const cards = document.getElementById('cards');
+
+const sseCard = document.createElement('div');
+sseCard.className = 'card';
+sseCard.innerHTML = `
+  <div class="row">
+    <span class="method">SSE</span>
+    <span class="path">/api/sync/events</span>
+    <button>Connect</button>
+  </div>
+  <p class="desc">live sync doorbell; object mutations appear as collection change events</p>
+  <div class="result shown">
+    <span class="status">disconnected</span>
+    <pre id="sse-log">(no events)</pre>
+  </div>`;
+cards.appendChild(sseCard);
+
+let eventSource = null;
+const sseButton = sseCard.querySelector('button');
+const sseStatus = sseCard.querySelector('.status');
+const sseLog = sseCard.querySelector('#sse-log');
+
+function appendSSE(event, data = '') {
+  if (sseLog.textContent === '(no events)') sseLog.textContent = '';
+  const stamp = new Date().toLocaleTimeString();
+  sseLog.textContent += `${stamp}  ${event}${data ? `  ${data}` : ''}\n`;
+  sseLog.scrollTop = sseLog.scrollHeight;
+}
+
+sseButton.addEventListener('click', () => {
+  if (eventSource) {
+    eventSource.close();
+    eventSource = null;
+    sseButton.textContent = 'Connect';
+    sseStatus.textContent = 'disconnected';
+    sseStatus.className = 'status';
+    appendSSE('closed');
+    return;
+  }
+
+  eventSource = new EventSource('/api/sync/events');
+  sseButton.textContent = 'Disconnect';
+  sseStatus.textContent = 'connecting…';
+  sseStatus.className = 'status s4';
+  for (const name of ['ready', 'change', 'ping']) {
+    eventSource.addEventListener(name, event => {
+      sseStatus.textContent = 'connected';
+      sseStatus.className = 'status s2';
+      appendSSE(name, event.data);
+    });
+  }
+  eventSource.onerror = () => {
+    sseStatus.textContent = 'reconnecting…';
+    sseStatus.className = 'status s4';
+    appendSSE('connection lost');
+  };
+});
 
 for (const ep of endpoints) {
   const card = document.createElement('div');

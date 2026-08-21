@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"time"
 	"uuid"
+
+	"futo-notes-server/internal/events"
 )
 
 const objectColumns = `id, collection_id, version, change_seq, deleted,
@@ -486,6 +488,9 @@ func Create(ctx context.Context, db *sql.DB, userID, collectionID, mutationID, b
 	if err := saveResult(ctx, tx, userID, mutationID, intent, 201, response, &objectID); err != nil {
 		return MutationOutcome{}, err
 	}
+	if err := events.Publish(ctx, tx, userID, collectionID, collectionVersion); err != nil {
+		return MutationOutcome{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return MutationOutcome{}, err
 	}
@@ -603,6 +608,9 @@ func Update(ctx context.Context, db *sql.DB, userID, collectionID, objectID, mut
 	if err := saveResult(ctx, tx, userID, mutationID, intent, 200, response, nil); err != nil {
 		return MutationOutcome{}, err
 	}
+	if err := events.Publish(ctx, tx, userID, collectionID, collectionVersion); err != nil {
+		return MutationOutcome{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return MutationOutcome{}, err
 	}
@@ -717,6 +725,9 @@ func Delete(ctx context.Context, db *sql.DB, userID, collectionID, objectID, mut
 	}
 	response := DeleteResponse{Object: deleted, CollectionVersion: collectionVersion}
 	if err := saveResult(ctx, tx, userID, mutationID, intent, 200, response, nil); err != nil {
+		return DeleteOutcome{}, err
+	}
+	if err := events.Publish(ctx, tx, userID, collectionID, collectionVersion); err != nil {
 		return DeleteOutcome{}, err
 	}
 	if err := tx.Commit(); err != nil {

@@ -14,6 +14,7 @@ import (
 	"futo-notes-server/internal/blobs"
 	"futo-notes-server/internal/config"
 	"futo-notes-server/internal/db"
+	"futo-notes-server/internal/events"
 )
 
 const (
@@ -108,6 +109,8 @@ func main() {
 	if len(applied) > 0 {
 		log.Printf("applied %d migration(s): %s", len(applied), strings.Join(applied, ", "))
 	}
+	eventHub := events.NewHub()
+	go events.Listen(context.Background(), cfg.DatabaseURL, eventHub)
 
 	api := http.NewServeMux()
 	if cfg.AuthMode == "password" {
@@ -136,6 +139,7 @@ func main() {
 	api.HandleFunc("POST /api/blobs/batch", handleBatchFetchBlobs(blobStore))
 	api.HandleFunc("GET /api/blobs/{userId}/{blobId}", handleDownloadBlob(blobStore))
 	api.HandleFunc("DELETE /api/blobs/{userId}/{blobId}", handleDeleteBlob(database, blobStore))
+	api.HandleFunc("GET /api/sync/events", handleSyncEvents(eventHub))
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", handleCapability(cfg.AuthMode))
