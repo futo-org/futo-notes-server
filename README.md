@@ -9,6 +9,8 @@ End-to-end encrypted sync server for the [FUTO Notes](https://gitlab.futo.org/fu
 
 The only thing you need installed is **Docker** (with the Compose v2 plugin). You don't need to clone this repo or install any language toolchain — everything runs from a prebuilt image.
 
+The image is published on Docker Hub as [`futotech/notes-server`](https://hub.docker.com/r/futotech/notes-server), built for both `linux/amd64` and `linux/arm64` — so x86 servers and arm boards (Raspberry Pi 4/5, Ampere VPS) both work with no extra configuration.
+
 The guided installer asks for an admin password and install location, writes a
 private configuration file, and starts the server:
 

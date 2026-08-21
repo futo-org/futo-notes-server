@@ -101,6 +101,12 @@ build:image:
     - docker:27-dind
   variables:
     DOCKER_TLS_CERTDIR: "/certs"
+    # Docker Hub is the primary registry. The GitLab registry keeps receiving the
+    # same manifest so self-hosters who pinned the old FUTO_NOTES_IMAGE still get
+    # updates; drop the GitLab tags once the docs-default path has had a release
+    # or two to propagate.
+    DOCKERHUB_IMAGE: docker.io/futotech/notes-server
+    BUILD_PLATFORMS: linux/amd64,linux/arm64
   before_script: []
   needs:
     - job: test
@@ -108,26 +114,49 @@ build:image:
     - job: test:docker
   script:
     - |
-      docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+      if [ -z "${DOCKERHUB_USERNAME:-}" ] || [ -z "${DOCKERHUB_TOKEN:-}" ]; then
+        echo "DOCKERHUB_USERNAME and DOCKERHUB_TOKEN must be set as CI/CD variables." >&2
+        echo "If they are marked Protected, this ref has to be protected too." >&2
+        exit 1
+      fi
+      printf '%s' "$CI_REGISTRY_PASSWORD" | docker login --username "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+      printf '%s' "$DOCKERHUB_TOKEN"      | docker login --username "$DOCKERHUB_USERNAME" --password-stdin docker.io
+    - |
+      # This runner is amd64, so the arm64 leg is cross-built under QEMU. buildx
+      # also needs the container driver: the default docker driver cannot emit a
+      # multi-platform manifest list.
+      docker run --privileged --rm tonistiigi/binfmt:qemu-v10.2.3 --install arm64
+      docker buildx create --use --name futo-notes --driver docker-container
     - |
       # Tag semantics:
-      #   tagged release -> push ${CI_COMMIT_TAG} + :stable
-      #   main branch    -> push ${CI_COMMIT_SHORT_SHA} + :latest
-      IMAGE="${CI_REGISTRY_IMAGE}/server"
-      docker build -t "${IMAGE}:build" .
+      #   tagged release -> ${CI_COMMIT_TAG} + :stable
+      #   main branch    -> ${CI_COMMIT_SHORT_SHA} + :latest
+      GITLAB_IMAGE="${CI_REGISTRY_IMAGE}/server"
       if [ -n "$CI_COMMIT_TAG" ]; then
-        docker tag "${IMAGE}:build" "${IMAGE}:${CI_COMMIT_TAG}"
-        docker tag "${IMAGE}:build" "${IMAGE}:stable"
-        docker push "${IMAGE}:${CI_COMMIT_TAG}"
-        docker push "${IMAGE}:stable"
-        echo "Pushed ${IMAGE}:${CI_COMMIT_TAG} and ${IMAGE}:stable"
+        VERSION_TAG="$CI_COMMIT_TAG"
+        TRACK_TAG="stable"
       else
-        docker tag "${IMAGE}:build" "${IMAGE}:${CI_COMMIT_SHORT_SHA}"
-        docker tag "${IMAGE}:build" "${IMAGE}:latest"
-        docker push "${IMAGE}:${CI_COMMIT_SHORT_SHA}"
-        docker push "${IMAGE}:latest"
-        echo "Pushed ${IMAGE}:${CI_COMMIT_SHORT_SHA} and ${IMAGE}:latest"
+        VERSION_TAG="$CI_COMMIT_SHORT_SHA"
+        TRACK_TAG="latest"
       fi
+      # One build, four tags, two registries: buildx pushes the same manifest
+      # list to each, so digests match everywhere. It also pushes nothing until
+      # both architectures build, so a broken arm64 leg cannot publish a
+      # half-populated tag.
+      #
+      # --provenance=false keeps the manifest list to the two real platforms;
+      # buildx would otherwise attach an attestation that shows up as a bogus
+      # "unknown/unknown" entry in registry UIs and confuses older clients.
+      docker buildx build \
+        --platform "$BUILD_PLATFORMS" \
+        --provenance=false \
+        --tag "${DOCKERHUB_IMAGE}:${VERSION_TAG}" \
+        --tag "${DOCKERHUB_IMAGE}:${TRACK_TAG}" \
+        --tag "${GITLAB_IMAGE}:${VERSION_TAG}" \
+        --tag "${GITLAB_IMAGE}:${TRACK_TAG}" \
+        --push .
+      echo "Pushed ${VERSION_TAG} and ${TRACK_TAG} to ${DOCKERHUB_IMAGE} and ${GITLAB_IMAGE}"
+      docker buildx imagetools inspect "${DOCKERHUB_IMAGE}:${VERSION_TAG}"
   rules:
     - if: $CI_COMMIT_TAG
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH

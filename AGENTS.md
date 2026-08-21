@@ -67,7 +67,37 @@ Every data-affecting migration MUST have a real-Postgres upgrade regression that
 
 GitLab CI. Pipeline: type-check → test (against Postgres service) → build bundle → Docker image → push.
 
-**Image tags:** `build:image` pushes `server:${CI_COMMIT_TAG}` + `server:stable` on tagged releases, and `server:${CI_COMMIT_SHORT_SHA}` + `server:latest` on main branch pushes.
+**Registries:** `docker.io/futotech/notes-server` is the published image and the
+default in `docker-compose.production.yml`, `install.sh`, and
+`.env.production.example`. `build:image` pushes the same manifest to the GitLab
+registry (`${CI_REGISTRY_IMAGE}/server`) as well, so self-hosters who pinned the
+old `FUTO_NOTES_IMAGE` keep getting updates; those tags are meant to be dropped
+after the Docker Hub default has had a release or two to propagate.
+
+Pushing needs the `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` CI/CD variables. If
+they are marked Protected, the ref has to be protected too or the job fails with
+an explicit message rather than a login error.
+
+The credential is a Docker Hub **organization** access token, so
+`DOCKERHUB_USERNAME` is the org name (`futotech`), not a person. The token needs
+per-repo Image Push/Image Pull on `notes-server` **and** the blanket "Read public
+repositories" scope: once the job is logged in, buildx authenticates every
+registry request with that token, including pulling the `oven/bun` base image
+from another namespace. Without the public-read scope that pull fails
+`401 ... access token has insufficient scopes` before anything is pushed, even
+though an anonymous pull of the same image would succeed.
+
+**Image tags:** `build:image` pushes `${CI_COMMIT_TAG}` + `stable` on tagged
+releases, and `${CI_COMMIT_SHORT_SHA}` + `latest` on main branch pushes — to both
+registries, from one build.
+
+**Architectures:** images are multi-platform manifest lists covering
+`linux/amd64` and `linux/arm64`. The runner is amd64, so arm64 is cross-built
+under QEMU (`tonistiigi/binfmt`) with buildx's `docker-container` driver — the
+default driver cannot emit a manifest list. One `buildx build --push` produces
+every tag, so a failing arm64 leg publishes nothing rather than a half-populated
+tag. `test:docker` still builds amd64-only for fast MR feedback; arm64 is first
+exercised on main.
 
 **Monitoring pipelines:** `$GITLAB_TOKEN` env var holds a PAT for `gitlab.futo.org`. Before using it (with `glab` or `curl`), verify it's not revoked — tokens get rotated:
 
