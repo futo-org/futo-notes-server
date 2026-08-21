@@ -1,13 +1,11 @@
 services:
   server:
-    profiles: ["server"]
-    build: .
-    image: ${FUTO_NOTES_IMAGE:-futo-notes-server:local}
+    image: ${FUTO_NOTES_IMAGE:-futotech/notes-server:stable}
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgres://futo_notes:futo_notes@postgres:5432/futo_notes
+      DATABASE_URL: postgres://futo_notes:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/futo_notes
       PORT: "3000"
-      AUTH_MODE: ${AUTH_MODE:-password}
+      AUTH_MODE: password
       FUTO_NOTES_PASSWORD: ${FUTO_NOTES_PASSWORD:-}
       FUTO_NOTES_PASSWORD_HASH: ${FUTO_NOTES_PASSWORD_HASH:-}
       COOKIE_SECURE: ${COOKIE_SECURE:-true}
@@ -16,28 +14,22 @@ services:
     ports:
       - "${FUTO_NOTES_PORT:-3005}:3000"
     volumes:
-      - ${FUTO_NOTES_BLOB_DIR:-./blobs}:/data/blobs
+      - ${FUTO_NOTES_DATA_DIR:-./futo-notes-data}/blobs:/data/blobs
     depends_on:
       postgres:
         condition: service_healthy
 
   postgres:
     image: postgres:16
-    container_name: futo-notes-postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: futo_notes
-      POSTGRES_PASSWORD: futo_notes
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       POSTGRES_DB: futo_notes
-    ports:
-      - "5433:5432"
     volumes:
-      - futo-notes-pg-data:/var/lib/postgresql/data
+      - ${FUTO_NOTES_DATA_DIR:-./futo-notes-data}/postgres:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U futo_notes -d futo_notes"]
-      interval: 2s
+      interval: 5s
       timeout: 3s
       retries: 15
-
-volumes:
-  futo-notes-pg-data:

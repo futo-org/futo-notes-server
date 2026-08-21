@@ -20,9 +20,11 @@ import (
 )
 
 const (
-	serverName    = "futo-notes"
-	serverVersion = "0.1.0"
+	serverName = "futo-notes"
 )
+
+// Overridden by release builds with -X main.serverVersion=<tag>.
+var serverVersion = "0.1.0"
 
 // capability is the discovery document served at GET /. Clients call it once
 // when adding a server, to learn which login flow to drive and whether
@@ -100,6 +102,9 @@ func main() {
 		slog.Error("loading config", "err", err)
 		os.Exit(1)
 	}
+	for _, warning := range config.DroppedEnvWarnings() {
+		slog.Warn(warning)
+	}
 
 	database, err := db.Open(cfg)
 	if err != nil {
@@ -120,7 +125,7 @@ func main() {
 	blobStore := &blobs.Store{Dir: cfg.BlobDir}
 	eventHub := events.NewHub()
 	go events.Listen(context.Background(), cfg.DatabaseURL, eventHub)
-	go jobs.Run(context.Background(), database, blobStore, jobs.DefaultSchedule)
+	go jobs.Run(context.Background(), database, blobStore, jobs.DefaultSchedule, cfg.BlobGCEnabled)
 
 	api := http.NewServeMux()
 	if cfg.AuthMode == "dev" {

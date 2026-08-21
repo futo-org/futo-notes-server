@@ -22,6 +22,28 @@ func TestReconcileStorageMissingDirectoryIsEmpty(t *testing.T) {
 	}
 }
 
+func TestBlobGCRegistrationCanBeDisabled(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		enabled      bool
+		wantJobCount int
+		wantLastJob  string
+	}{
+		{name: "enabled", enabled: true, wantJobCount: 3, wantLastJob: "blob GC"},
+		{name: "disabled", enabled: false, wantJobCount: 2, wantLastJob: "mutation results"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			jobs := maintenanceJobs(nil, nil, test.enabled)
+			if len(jobs) != test.wantJobCount {
+				t.Fatalf("job count = %d, want %d", len(jobs), test.wantJobCount)
+			}
+			if got := jobs[len(jobs)-1].name; got != test.wantLastJob {
+				t.Fatalf("last job = %q, want %q", got, test.wantLastJob)
+			}
+		})
+	}
+}
+
 func TestRunnerRepeatsAndContinuesAfterJobErrors(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

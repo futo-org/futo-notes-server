@@ -17,6 +17,9 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 ts_repo=${FUTO_TS_SERVER_REPO:-/home/justin/Developer/futo-notes-server}
 client_repo=${FUTO_NOTES_CLIENT_REPO:-/home/justin/Developer/futo-notes}
 postgres_container=${FUTO_POSTGRES_CONTAINER:-futo-notes-postgres}
+postgres_host=${FUTO_POSTGRES_HOST:-localhost}
+postgres_port=${FUTO_POSTGRES_PORT:-5433}
+postgres_password=${FUTO_POSTGRES_PASSWORD:-futo_notes}
 run_id="$(date +%s)_$$"
 database="futo_notes_rust_accept_${target}_${run_id}"
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/futo-notes-rust-accept.XXXXXX")
@@ -25,6 +28,15 @@ server_log="$scratch/server.log"
 server_pid=
 
 mkdir -p "$blob_dir"
+
+admin_psql() {
+  if [[ "$postgres_container" == direct ]]; then
+    PGPASSWORD="$postgres_password" psql -h "$postgres_host" -p "$postgres_port" \
+      -v ON_ERROR_STOP=1 -U futo_notes -d futo_notes "$@"
+  else
+    docker exec "$postgres_container" psql -v ON_ERROR_STOP=1 -U futo_notes -d futo_notes "$@"
+  fi
+}
 
 cleanup() {
   status=$?
@@ -38,7 +50,7 @@ cleanup() {
     kill -KILL "$server_pid" 2>/dev/null || true
     wait "$server_pid" 2>/dev/null || true
   fi
-  docker exec "$postgres_container" psql -v ON_ERROR_STOP=1 -U futo_notes -d futo_notes \
+  admin_psql \
     -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$database' AND pid <> pg_backend_pid()" \
     -c "DROP DATABASE IF EXISTS \"$database\"" >/dev/null || true
   if [[ $status -ne 0 ]]; then
@@ -55,10 +67,10 @@ if curl --silent --fail --max-time 1 http://127.0.0.1:3055/health >/dev/null 2>&
   exit 1
 fi
 
-docker exec "$postgres_container" psql -v ON_ERROR_STOP=1 -U futo_notes -d futo_notes \
+admin_psql \
   -c "CREATE DATABASE \"$database\"" >/dev/null
 
-database_url="postgres://futo_notes:futo_notes@localhost:5433/$database"
+database_url="postgres://futo_notes:$postgres_password@$postgres_host:$postgres_port/$database"
 if [[ "$target" == go ]]; then
   (cd "$repo_root" && GOTOOLCHAIN=auto go build -o "$scratch/server" ./cmd/server)
   (
