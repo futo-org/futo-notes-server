@@ -15,6 +15,7 @@ import (
 	"futo-notes-server/internal/config"
 	"futo-notes-server/internal/db"
 	"futo-notes-server/internal/events"
+	"futo-notes-server/internal/jobs"
 )
 
 const (
@@ -109,8 +110,10 @@ func main() {
 	if len(applied) > 0 {
 		log.Printf("applied %d migration(s): %s", len(applied), strings.Join(applied, ", "))
 	}
+	blobStore := &blobs.Store{Dir: cfg.BlobDir}
 	eventHub := events.NewHub()
 	go events.Listen(context.Background(), cfg.DatabaseURL, eventHub)
+	go jobs.Run(context.Background(), database, blobStore, jobs.DefaultSchedule)
 
 	api := http.NewServeMux()
 	if cfg.AuthMode == "password" {
@@ -125,7 +128,6 @@ func main() {
 	api.HandleFunc("DELETE /api/collections/{id}", handleDeleteCollection(database))
 	api.HandleFunc("GET /api/collections/{id}/key", handleGetCollectionKey(database))
 	api.HandleFunc("PUT /api/collections/{id}/key", handlePutCollectionKey(database))
-	blobStore := &blobs.Store{Dir: cfg.BlobDir}
 	api.HandleFunc("GET /api/collections/{id}/objects", handleListObjects(database))
 	api.HandleFunc("POST /api/collections/{id}/objects", handleCreateObject(database))
 	api.HandleFunc("GET /api/collections/{id}/objects/{objectId}", handleGetObject(database))
@@ -147,6 +149,7 @@ func main() {
 	mux.Handle("/api/", requireAuth(cfg, database, api))
 	if cfg.DevUI {
 		mux.HandleFunc("GET /dev", handleDevUI)
+		registerDevJobHandlers(mux, database, blobStore)
 		log.Print("dev UI enabled at /dev")
 	}
 

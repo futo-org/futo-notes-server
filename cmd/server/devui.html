@@ -61,6 +61,11 @@
     gap: 10px;
     flex-wrap: wrap;
   }
+  .job {
+    border-top: 1px solid var(--border);
+    margin-top: 10px;
+    padding-top: 10px;
+  }
   .method { color: var(--accent); font-weight: 600; }
   .path { color: var(--text); }
   .desc { color: var(--muted); margin: 4px 0 0; font-size: 13px; }
@@ -243,6 +248,36 @@ function objectPath(value) {
 }
 
 const cards = document.getElementById('cards');
+
+const jobEndpoints = [
+  { method: 'POST', path: '/dev/jobs/sessions', name: 'session reaper', desc: 'delete expired sessions' },
+  { method: 'POST', path: '/dev/jobs/reconciliation', name: 'storage reconciliation', desc: 'adopt up to 500 untracked files from BLOB_DIR' },
+  { method: 'POST', path: '/dev/jobs/mutation-results', name: 'mutation-results expiry', desc: 'expire old pending, failed, update, and delete outcomes' },
+  { method: 'POST', path: '/dev/jobs/blob-gc', name: 'blob garbage collection', desc: 'purge eligible staged, retained, and purgeable blobs' },
+];
+
+const jobsCard = document.createElement('div');
+jobsCard.className = 'card';
+jobsCard.innerHTML = `
+  <div class="row"><span class="method">JOBS</span><span class="path">run now</span></div>
+  <p class="desc">the same recurring jobs used by the hourly and six-hour timers</p>`;
+for (const job of jobEndpoints) {
+  const row = document.createElement('div');
+  row.className = 'job';
+  row.innerHTML = `
+    <div class="row">
+      <span class="path">${job.name}</span>
+      <button>Run now</button>
+    </div>
+    <p class="desc">${job.desc}</p>
+    <div class="result">
+      <span class="status"></span><span class="ms"></span>
+      <pre></pre>
+    </div>`;
+  row.querySelector('button').addEventListener('click', () => send(job, row));
+  jobsCard.appendChild(row);
+}
+cards.appendChild(jobsCard);
 
 const sseCard = document.createElement('div');
 sseCard.className = 'card';
