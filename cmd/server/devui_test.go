@@ -19,6 +19,8 @@ func TestDevUIIncludesRecurringJobPanel(t *testing.T) {
 	}
 	body := response.Body.String()
 	for _, text := range []string{
+		"/api/auth/dev/login",
+		"passwordless login",
 		"/dev/panic",
 		"Connection",
 		"the same recurring jobs used by the hourly and six-hour timers",

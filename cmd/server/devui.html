@@ -130,6 +130,12 @@ const endpoints = [
     responseHeaders: ['Connection'],
   },
   {
+    method: 'POST', path: '/api/auth/dev/login', desc: 'passwordless login; available only when AUTH_MODE=dev',
+    input: { name: 'email', type: 'text', placeholder: 'developer@example.com' },
+    body: v => ({ email: v }),
+    refreshesSession: true,
+  },
+  {
     method: 'POST', path: '/api/auth/password/login', desc: 'password login; sets the session cookie',
     input: { name: 'password', placeholder: 'password' },
     body: v => ({ password: v }),

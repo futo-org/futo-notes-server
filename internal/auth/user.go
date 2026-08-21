@@ -52,3 +52,19 @@ func UpsertLocalUser(ctx context.Context, database *sql.DB) (User, error) {
 	}
 	return u, nil
 }
+
+// UpsertUserByEmail returns the development user for email, creating it on
+// first login and updating its display name on later logins.
+func UpsertUserByEmail(ctx context.Context, database *sql.DB, email, name string) (User, error) {
+	var u User
+	err := database.QueryRowContext(ctx,
+		`INSERT INTO users (id, sub, email, name) VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name
+		 RETURNING id, email, name`,
+		uuid.NewV7().String(), "dev:"+email, email, name).
+		Scan(&u.ID, &u.Email, &u.Name)
+	if err != nil {
+		return User{}, err
+	}
+	return u, nil
+}

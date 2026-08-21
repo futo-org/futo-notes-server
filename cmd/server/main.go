@@ -123,12 +123,15 @@ func main() {
 	go jobs.Run(context.Background(), database, blobStore, jobs.DefaultSchedule)
 
 	api := http.NewServeMux()
+	if cfg.AuthMode == "dev" {
+		api.HandleFunc("POST /api/auth/dev/login", handleDevLogin(cfg, database))
+	}
 	if cfg.AuthMode == "password" {
 		api.HandleFunc("POST /api/auth/password/login",
 			rateLimited(auth.NewRateLimiter(), handlePasswordLogin(cfg, database)))
 	}
 	api.HandleFunc("GET /api/auth", handleCurrentUser)
-	api.HandleFunc("POST /api/auth/logout", handleLogout(cfg, database))
+	api.HandleFunc("POST /api/auth/logout", handleLogout(database))
 	api.HandleFunc("POST /api/collections", handleClaimCollection(database))
 	api.HandleFunc("GET /api/collections", handleListCollections(database))
 	api.HandleFunc("GET /api/collections/{id}", handleGetCollection(database))
@@ -149,6 +152,11 @@ func main() {
 	api.HandleFunc("GET /api/blobs/{userId}/{blobId}", handleDownloadBlob(blobStore))
 	api.HandleFunc("DELETE /api/blobs/{userId}/{blobId}", handleDeleteBlob(database, blobStore))
 	api.HandleFunc("GET /api/sync/events", handleSyncEvents(eventHub))
+	api.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("404 Not Found"))
+	})
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", handleCapability(cfg.AuthMode))

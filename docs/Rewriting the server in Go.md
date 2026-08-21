@@ -37,6 +37,12 @@ Invalid or missing tokens results in a `401`.
 
 Go deviation: a malformed `Authorization` header (wrong scheme, or no space after `Bearer`) is treated as *no credentials* and gets `401 {"error":"unauthorized"}`. The TS server instead hashed the whole header string, found no session, and answered `invalid_session` with a `WWW-Authenticate` header. No known client sends malformed headers. Accepted.
 
+Compatibility details confirmed by the differential harness:
+
+* Logout clears the `session` cookie with the same name and `/` path used at login, but the clearing `Set-Cookie` omits `HttpOnly`, `Secure`, and `SameSite`, matching the legacy server. Those attributes are not part of a cookie's identity; name, domain, and path determine which cookie is removed. Accepted.
+* An authenticated request to an unmatched `/api/*` route returns `404 Not Found` as `text/plain; charset=utf-8`, with no trailing newline, matching the legacy server. Accepted.
+* The capability document's `version` describes the server implementation and is expected to differ between the TypeScript and Go binaries. The comparison harness reports that field as an accepted deviation while requiring every other capability field to match. Accepted.
+
 ## Collection Keys
 Each collection has its own key to encrypt its contents. The key is a random AES-256-GCM, then wrapped client-side by a salt + password. The salt per collection is stored in the database.
 
@@ -229,6 +235,8 @@ Clients can hit limits - they exist.
 * AUTH_RATE_LIMIT - 10 per 60s
 * session TTL - 7 days
 
+With the fixed v1 defaults, a batch-upload entry cannot reach the per-entry `too_large` result: the 32 MiB whole-request cap rejects the request before an entry can exceed the 100 MiB blob cap. The response variant remains in the wire schema for a future configuration where `MAX_BATCH_BYTES` is higher, but the v1 comparison gate does not claim to exercise an unreachable branch.
+
 ## Cursors
 There are two cursors - one for objects, one for collections.
 
@@ -324,6 +332,7 @@ Blobs on-disk aren't immediately deleted.
 4. check for and lock the collections row
 5. check for and lock the objects row
 6. If the object has already been deleted, return the current tombstone as a successful no-op without changing the object version, collection cursor, or publishing an event. Otherwise, if the client requested deletion of a specific version, check that version and return 409 when it does not match.
+   Go deviation: the legacy TS server increments the tombstone and collection cursor again on every re-delete. The OpenAPI contract now specifies a successful no-op, which avoids spurious sync work and makes retries stable. A client receives an older version/cursor than it would from TS only when it deletes an object that is already a tombstone. Accepted.
 7. Update the collection row's version to +=1, return the value
 8. Update `objects` table, set deleted to true, bump the object version number and change_seq
 9. Update blob_ledger to have object_version be the new one, state stays claimed

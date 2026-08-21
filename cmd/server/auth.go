@@ -41,6 +41,10 @@ func requireAuth(cfg config.Config, database *sql.DB, next http.Handler) http.Ha
 			next.ServeHTTP(w, r)
 			return
 		}
+		if cfg.AuthMode == "dev" && r.URL.Path == "/api/auth/dev/login" {
+			next.ServeHTTP(w, r)
+			return
+		}
 
 		var token string
 		if cookie, err := r.Cookie("session"); err == nil {
@@ -72,6 +76,62 @@ func requireAuth(cfg config.Config, database *sql.DB, next http.Handler) http.Ha
 
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), sessionCtxKey{}, session)))
 	})
+}
+
+type devLoginRequest struct {
+	Email string `json:"email"`
+	Name  string `json:"name"`
+}
+
+func decodeDevLogin(r *http.Request) (devLoginRequest, string) {
+	var body devLoginRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		return devLoginRequest{}, "invalid json"
+	}
+	body.Email = strings.ToLower(strings.TrimSpace(body.Email))
+	body.Name = strings.TrimSpace(body.Name)
+	if body.Email == "" {
+		return devLoginRequest{}, "email is required"
+	}
+	if body.Name == "" {
+		body.Name = strings.SplitN(body.Email, "@", 2)[0]
+	}
+	if body.Name == "" {
+		return devLoginRequest{}, "email is required"
+	}
+	return body, ""
+}
+
+func handleDevLogin(cfg config.Config, database *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		body, validationError := decodeDevLogin(r)
+		if validationError != "" {
+			writeError(w, http.StatusBadRequest, validationError)
+			return
+		}
+
+		u, err := auth.UpsertUserByEmail(r.Context(), database, body.Email, body.Name)
+		if err != nil {
+			serverError(w, r, "dev login: upserting user", err)
+			return
+		}
+		token, err := auth.CreateSession(r.Context(), database, u.ID)
+		if err != nil {
+			serverError(w, r, "dev login: creating session", err)
+			return
+		}
+
+		http.SetCookie(w, &http.Cookie{
+			Name:     "session",
+			Value:    token,
+			Path:     "/",
+			MaxAge:   int(auth.SessionTTL.Seconds()),
+			HttpOnly: true,
+			Secure:   cfg.CookieSecure,
+			SameSite: http.SameSiteLaxMode,
+		})
+		writeJSON(w, http.StatusOK, map[string]any{"user": u, "token": token})
+	}
 }
 
 // rateLimited rejects over-limit requests with a 429 before next runs,
@@ -157,7 +217,7 @@ func handlePasswordLogin(cfg config.Config, database *sql.DB) http.HandlerFunc {
 	}
 }
 
-func handleLogout(cfg config.Config, database *sql.DB) http.HandlerFunc {
+func handleLogout(database *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if err := auth.DeleteSession(r.Context(), database, sessionFrom(r).ID); err != nil {
 			serverError(w, r, "logout: deleting session", err)
@@ -165,13 +225,10 @@ func handleLogout(cfg config.Config, database *sql.DB) http.HandlerFunc {
 		}
 
 		http.SetCookie(w, &http.Cookie{
-			Name:     "session",
-			Value:    "",
-			Path:     "/",
-			MaxAge:   -1,
-			HttpOnly: true,
-			Secure:   cfg.CookieSecure,
-			SameSite: http.SameSiteLaxMode,
+			Name:   "session",
+			Value:  "",
+			Path:   "/",
+			MaxAge: -1,
 		})
 		w.WriteHeader(http.StatusNoContent)
 	}
