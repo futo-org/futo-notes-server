@@ -5,8 +5,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -50,7 +51,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(v); err != nil {
-		log.Printf("writeJSON: %v", err)
+		slog.Error("writing JSON response", "err", err)
 	}
 }
 
@@ -91,24 +92,30 @@ func handleHealth(database *sql.DB) http.HandlerFunc {
 }
 
 func main() {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	slog.SetDefault(logger)
+
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatal(err)
+		slog.Error("loading config", "err", err)
+		os.Exit(1)
 	}
 
 	database, err := db.Open(cfg)
 	if err != nil {
-		log.Fatal(err)
+		slog.Error("opening database", "err", err)
+		os.Exit(1)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	applied, err := db.Migrate(ctx, database)
 	cancel()
 	if err != nil {
-		log.Fatal(err)
+		slog.Error("applying database migrations", "err", err)
+		os.Exit(1)
 	}
 	if len(applied) > 0 {
-		log.Printf("applied %d migration(s): %s", len(applied), strings.Join(applied, ", "))
+		slog.Info("applied database migrations", "count", len(applied), "migrations", strings.Join(applied, ", "))
 	}
 	blobStore := &blobs.Store{Dir: cfg.BlobDir}
 	eventHub := events.NewHub()
@@ -149,11 +156,15 @@ func main() {
 	mux.Handle("/api/", requireAuth(cfg, database, api))
 	if cfg.DevUI {
 		mux.HandleFunc("GET /dev", handleDevUI)
+		mux.HandleFunc("POST /dev/panic", handleDevPanic)
 		registerDevJobHandlers(mux, database, blobStore)
-		log.Print("dev UI enabled at /dev")
+		slog.Info("dev UI enabled", "path", "/dev")
 	}
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
-	log.Printf("listening on %s", addr)
-	log.Fatal(http.ListenAndServe(addr, mux))
+	slog.Info("listening", "addr", addr)
+	if err := http.ListenAndServe(addr, recoverPanic(mux)); err != nil {
+		slog.Error("serving HTTP", "err", err)
+		os.Exit(1)
+	}
 }

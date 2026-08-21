@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
-	"log"
 	"net/http"
 
 	"futo-notes-server/internal/collections"
@@ -14,8 +13,7 @@ func handleClaimCollection(database *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		c, created, err := collections.Claim(r.Context(), database, sessionFrom(r).User.ID)
 		if err != nil {
-			log.Printf("claiming collection: %v", err)
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			serverError(w, r, "claiming collection", err)
 			return
 		}
 		status := http.StatusOK
@@ -30,8 +28,7 @@ func handleListCollections(database *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		cs, err := collections.List(r.Context(), database, sessionFrom(r).User.ID)
 		if err != nil {
-			log.Printf("listing collections: %v", err)
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			serverError(w, r, "listing collections", err)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"collections": cs})
@@ -42,8 +39,7 @@ func handleGetCollection(database *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		c, err := collections.Get(r.Context(), database, sessionFrom(r).User.ID, r.PathValue("id"))
 		if err != nil {
-			log.Printf("getting collection: %v", err)
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			serverError(w, r, "getting collection", err)
 			return
 		}
 		if c == nil {
@@ -58,8 +54,7 @@ func handleDeleteCollection(database *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		found, err := collections.Delete(r.Context(), database, sessionFrom(r).User.ID, r.PathValue("id"))
 		if err != nil {
-			log.Printf("deleting collection: %v", err)
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			serverError(w, r, "deleting collection", err)
 			return
 		}
 		if !found {
@@ -74,8 +69,7 @@ func handleGetCollectionKey(database *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		found, key, err := collections.GetKey(r.Context(), database, sessionFrom(r).User.ID, r.PathValue("id"))
 		if err != nil {
-			log.Printf("getting collection key: %v", err)
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			serverError(w, r, "getting collection key", err)
 			return
 		}
 		if !found {
@@ -130,8 +124,7 @@ func handlePutCollectionKey(database *sql.DB) http.HandlerFunc {
 		outcome, key, err := collections.PutKey(r.Context(), database,
 			sessionFrom(r).User.ID, r.PathValue("id"), in, body.PreviousKeyUpdatedAt)
 		if err != nil {
-			log.Printf("putting collection key: %v", err)
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			serverError(w, r, "putting collection key", err)
 			return
 		}
 		switch outcome {

@@ -18,6 +18,10 @@ func handleDevUI(w http.ResponseWriter, r *http.Request) {
 	w.Write(devUIHTML)
 }
 
+func handleDevPanic(http.ResponseWriter, *http.Request) {
+	panic("intentional dev panic")
+}
+
 func registerDevJobHandlers(mux *http.ServeMux, database *sql.DB, store *blobs.Store) {
 	mux.HandleFunc("POST /dev/jobs/sessions", handleDevJob(func(ctx context.Context) (jobs.SessionReapResult, error) {
 		return jobs.ReapSessions(ctx, database)

@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"unicode/utf8"
@@ -74,7 +74,7 @@ func handleListObjects(database *sql.DB) http.HandlerFunc {
 				writeError(w, http.StatusNotFound, "not found")
 				return
 			}
-			internalObjectError(w, "listing objects", err)
+			serverError(w, r, "listing objects", err)
 			return
 		}
 		response := map[string]any{"objects": rows}
@@ -94,7 +94,7 @@ func handleGetObject(database *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		o, err := objects.Get(r.Context(), database, sessionFrom(r).User.ID, r.PathValue("id"), r.PathValue("objectId"))
 		if err != nil {
-			internalObjectError(w, "getting object", err)
+			serverError(w, r, "getting object", err)
 			return
 		}
 		if o == nil {
@@ -131,7 +131,7 @@ func handleCreateObject(database *sql.DB) http.HandlerFunc {
 		}
 		outcome, err := objects.Create(r.Context(), database, userID, r.PathValue("id"), mID, *body.BlobKey)
 		if err != nil {
-			internalObjectError(w, "creating object", err)
+			serverError(w, r, "creating object", err)
 			return
 		}
 		writeMutationOutcome(w, http.StatusCreated, outcome)
@@ -170,7 +170,7 @@ func handleUpdateObject(database *sql.DB) http.HandlerFunc {
 		outcome, err := objects.Update(r.Context(), database, userID, r.PathValue("id"),
 			r.PathValue("objectId"), mID, *body.BlobKey, *body.Version)
 		if err != nil {
-			internalObjectError(w, "updating object", err)
+			serverError(w, r, "updating object", err)
 			return
 		}
 		writeMutationOutcome(w, http.StatusOK, outcome)
@@ -196,7 +196,7 @@ func handleDeleteObject(database *sql.DB) http.HandlerFunc {
 		outcome, err := objects.Delete(r.Context(), database, sessionFrom(r).User.ID,
 			r.PathValue("id"), r.PathValue("objectId"), mID, expected)
 		if err != nil {
-			internalObjectError(w, "deleting object", err)
+			serverError(w, r, "deleting object", err)
 			return
 		}
 		switch outcome.Code {
@@ -248,12 +248,12 @@ func handleCreateBlobObject(database *sql.DB, store *blobs.Store) http.HandlerFu
 		userID := sessionFrom(r).User.ID
 		key, err := blobs.Stage(r.Context(), database, store, userID, body)
 		if err != nil {
-			internalObjectError(w, "staging inline create blob", err)
+			serverError(w, r, "staging inline create blob", err)
 			return
 		}
 		outcome, err := objects.Create(r.Context(), database, userID, r.PathValue("id"), mID, key)
 		if err != nil {
-			internalObjectError(w, "creating inline blob object", err)
+			serverError(w, r, "creating inline blob object", err)
 			return
 		}
 		writeMutationOutcome(w, http.StatusCreated, outcome)
@@ -279,13 +279,13 @@ func handleUpdateBlobObject(database *sql.DB, store *blobs.Store) http.HandlerFu
 		userID := sessionFrom(r).User.ID
 		key, err := blobs.Stage(r.Context(), database, store, userID, body)
 		if err != nil {
-			internalObjectError(w, "staging inline update blob", err)
+			serverError(w, r, "staging inline update blob", err)
 			return
 		}
 		outcome, err := objects.Update(r.Context(), database, userID, r.PathValue("id"),
 			r.PathValue("objectId"), mID, key, version)
 		if err != nil {
-			internalObjectError(w, "updating inline blob object", err)
+			serverError(w, r, "updating inline blob object", err)
 			return
 		}
 		writeMutationOutcome(w, http.StatusOK, outcome)
@@ -301,7 +301,7 @@ func handleRecoverCreate(database *sql.DB) http.HandlerFunc {
 		}
 		outcome, err := objects.RecoverCreate(r.Context(), database, sessionFrom(r).User.ID, r.PathValue("id"), mID)
 		if err != nil {
-			internalObjectError(w, "recovering create mutation", err)
+			serverError(w, r, "recovering create mutation", err)
 			return
 		}
 		switch outcome.Code {
@@ -334,11 +334,6 @@ func writeMutationOutcome(w http.ResponseWriter, successStatus int, outcome obje
 	default:
 		writeError(w, http.StatusInternalServerError, "internal server error")
 	}
-}
-
-func internalObjectError(w http.ResponseWriter, action string, err error) {
-	log.Printf("%s: %v", action, err)
-	writeError(w, http.StatusInternalServerError, "internal server error")
 }
 
 type batchEntry struct {
@@ -433,7 +428,7 @@ func handleBatchBlobObjects(database *sql.DB, store *blobs.Store) http.HandlerFu
 		userID, collectionID := sessionFrom(r).User.ID, r.PathValue("id")
 		found, err := objects.Exists(r.Context(), database, userID, collectionID)
 		if err != nil {
-			internalObjectError(w, "checking collection for blob object batch", err)
+			serverError(w, r, "checking collection for blob object batch", err)
 			return
 		}
 		if !found {
@@ -448,7 +443,7 @@ func handleBatchBlobObjects(database *sql.DB, store *blobs.Store) http.HandlerFu
 			}
 			key, err := blobs.Stage(r.Context(), database, store, userID, entry.Blob)
 			if err != nil {
-				log.Printf("staging batch blob: %v", err)
+				slog.Error("staging batch blob", "err", err, "method", r.Method, "path", r.URL.Path)
 				results = append(results, map[string]any{"status": "error", "error": "internal server error"})
 				continue
 			}
@@ -459,7 +454,7 @@ func handleBatchBlobObjects(database *sql.DB, store *blobs.Store) http.HandlerFu
 				outcome, err = objects.Update(r.Context(), database, userID, collectionID, entry.Identifier, "", key, int64(entry.Version))
 			}
 			if err != nil {
-				log.Printf("applying batch object mutation: %v", err)
+				slog.Error("applying batch object mutation", "err", err, "method", r.Method, "path", r.URL.Path)
 				results = append(results, map[string]any{"status": "error", "error": "internal server error"})
 				continue
 			}

@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -69,7 +69,7 @@ func ReconcileStorage(ctx context.Context, database *sql.DB, store *blobs.Store)
 		owner, _, ok := strings.Cut(key, "/")
 		if !ok || !validUUID(owner) {
 			result.Skipped++
-			log.Printf("storage reconciliation: skipping %q: invalid owner", key)
+			slog.Info("storage reconciliation: skipping file", "key", key, "reason", "invalid owner")
 			return nil
 		}
 
@@ -93,7 +93,7 @@ func ReconcileStorage(ctx context.Context, database *sql.DB, store *blobs.Store)
 		}
 		if !ownerExists {
 			result.Skipped++
-			log.Printf("storage reconciliation: skipping %q: owner does not exist", key)
+			slog.Info("storage reconciliation: skipping file", "key", key, "reason", "owner does not exist")
 			return nil
 		}
 		if !inserted {
@@ -108,7 +108,7 @@ func ReconcileStorage(ctx context.Context, database *sql.DB, store *blobs.Store)
 	})
 
 	if errors.Is(err, errReconciliationCap) {
-		log.Printf("storage reconciliation: reached %d-file adoption cap", reconciliationLimit)
+		slog.Info("storage reconciliation: adoption cap reached", "limit", reconciliationLimit)
 		return result, nil
 	}
 	if errors.Is(err, os.ErrNotExist) {

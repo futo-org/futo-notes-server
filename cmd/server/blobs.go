@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"unicode/utf8"
@@ -42,8 +42,7 @@ func handleUploadBlob(database *sql.DB, store *blobs.Store) http.HandlerFunc {
 
 		key, err := blobs.Stage(r.Context(), database, store, sessionFrom(r).User.ID, body)
 		if err != nil {
-			log.Printf("staging blob: %v", err)
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			serverError(w, r, "staging blob", err)
 			return
 		}
 		writeJSON(w, http.StatusCreated, map[string]string{"key": key})
@@ -73,15 +72,13 @@ func handleDownloadBlob(store *blobs.Store) http.HandlerFunc {
 				writeError(w, http.StatusNotFound, "not found")
 				return
 			}
-			log.Printf("opening blob: %v", err)
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			serverError(w, r, "opening blob", err)
 			return
 		}
 		defer file.Close()
 		info, err := file.Stat()
 		if err != nil {
-			log.Printf("stating blob: %v", err)
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			serverError(w, r, "stating blob", err)
 			return
 		}
 		w.Header().Set("Content-Type", "application/octet-stream")
@@ -98,8 +95,7 @@ func handleDeleteBlob(database *sql.DB, store *blobs.Store) http.HandlerFunc {
 		}
 		deleted, err := blobs.Delete(r.Context(), database, store, sessionFrom(r).User.ID, key)
 		if err != nil {
-			log.Printf("deleting blob: %v", err)
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			serverError(w, r, "deleting blob", err)
 			return
 		}
 		if !deleted {
@@ -155,7 +151,7 @@ func handleBatchFetchBlobs(store *blobs.Store) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.WriteHeader(http.StatusOK)
 		if err := streamBlobBatch(w, store, sessionFrom(r).User.ID, keys); err != nil {
-			log.Printf("streaming blob batch: %v", err)
+			slog.Error("streaming blob batch", "err", err, "method", r.Method, "path", r.URL.Path)
 			// The status line is already out, so there is no error frame to
 			// send. Drop the connection and let the client retry a transfer it
 			// sees as truncated.

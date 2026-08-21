@@ -3,7 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -32,7 +32,7 @@ func handleSyncEventsWithInterval(hub *events.Hub, pingInterval time.Duration) h
 			return
 		}
 		if err := controller.Flush(); err != nil {
-			log.Printf("sync events: response does not support flushing: %v", err)
+			slog.Error("flushing sync events response", "err", err, "method", r.Method, "path", r.URL.Path)
 			return
 		}
 
@@ -51,7 +51,7 @@ func handleSyncEventsWithInterval(hub *events.Hub, pingInterval time.Duration) h
 				for _, change := range changes {
 					data, err := json.Marshal(change)
 					if err != nil {
-						log.Printf("sync events: encoding change: %v", err)
+						slog.Error("encoding sync event change", "err", err, "method", r.Method, "path", r.URL.Path)
 						return
 					}
 					if _, err := fmt.Fprintf(w, "event: change\ndata: %s\n\n", data); err != nil {

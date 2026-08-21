@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"log"
 	"net"
 	"net/http"
 	"strconv"
@@ -56,8 +55,7 @@ func requireAuth(cfg config.Config, database *sql.DB, next http.Handler) http.Ha
 
 		session, err := auth.ValidateSession(r.Context(), database, token)
 		if err != nil {
-			log.Printf("validating session: %v", err)
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			serverError(w, r, "validating session", err)
 			return
 		}
 		if session == nil {
@@ -124,8 +122,7 @@ func handlePasswordLogin(cfg config.Config, database *sql.DB) http.HandlerFunc {
 			var err error
 			ok, err = auth.VerifyScrypt(body.Password, cfg.PasswordHash)
 			if err != nil {
-				log.Printf("password login: %v", err)
-				writeError(w, http.StatusInternalServerError, "internal server error")
+				serverError(w, r, "password login", err)
 				return
 			}
 		}
@@ -137,15 +134,13 @@ func handlePasswordLogin(cfg config.Config, database *sql.DB) http.HandlerFunc {
 
 		u, err := auth.UpsertLocalUser(r.Context(), database)
 		if err != nil {
-			log.Printf("password login: upserting user: %v", err)
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			serverError(w, r, "password login: upserting user", err)
 			return
 		}
 
 		token, err := auth.CreateSession(r.Context(), database, u.ID)
 		if err != nil {
-			log.Printf("password login: creating session: %v", err)
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			serverError(w, r, "password login: creating session", err)
 			return
 		}
 
@@ -165,8 +160,7 @@ func handlePasswordLogin(cfg config.Config, database *sql.DB) http.HandlerFunc {
 func handleLogout(cfg config.Config, database *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if err := auth.DeleteSession(r.Context(), database, sessionFrom(r).ID); err != nil {
-			log.Printf("logout: deleting session: %v", err)
-			writeError(w, http.StatusInternalServerError, "internal server error")
+			serverError(w, r, "logout: deleting session", err)
 			return
 		}
 

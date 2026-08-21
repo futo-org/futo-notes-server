@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -34,7 +34,7 @@ func listen(ctx context.Context, databaseURL string, hub *Hub, appName string) {
 		if connected {
 			delay = initialReconnectDelay
 		}
-		log.Printf("sync events listener lost: %v; reconnecting in %s", err, delay)
+		slog.Info("sync events listener lost", "err", err, "reconnect_in", delay)
 
 		timer := time.NewTimer(delay)
 		select {
@@ -69,7 +69,7 @@ func listenOnce(ctx context.Context, databaseURL string, hub *Hub, appName strin
 	// backoff. They may have missed committed notifications, so close them as
 	// soon as LISTEN is restored and force their clients to pull again.
 	hub.CloseAll()
-	log.Printf("sync events listener connected on %s", Channel)
+	slog.Info("sync events listener connected", "channel", Channel)
 
 	for {
 		notification, err := conn.WaitForNotification(ctx)
@@ -81,7 +81,7 @@ func listenOnce(ctx context.Context, databaseURL string, hub *Hub, appName strin
 		}
 		var payload Notification
 		if err := json.Unmarshal([]byte(notification.Payload), &payload); err != nil {
-			log.Printf("sync events listener: dropping invalid payload: %v", err)
+			slog.Error("sync events listener: dropping invalid payload", "err", err)
 			continue
 		}
 		hub.Publish(payload)

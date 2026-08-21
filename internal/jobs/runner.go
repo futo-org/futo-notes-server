@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log"
+	"log/slog"
 	"time"
 
 	"futo-notes-server/internal/blobs"
@@ -100,9 +100,9 @@ func runJobs(ctx context.Context, jobs []scheduledJob) {
 	for _, job := range jobs {
 		summary, err := job.run(ctx)
 		if err != nil {
-			log.Printf("%s: %s: %v", job.name, summary, err)
+			slog.Error(job.name, "summary", summary, "err", err)
 			continue
 		}
-		log.Printf("%s: %s", job.name, summary)
+		slog.Info(job.name, "summary", summary)
 	}
 }

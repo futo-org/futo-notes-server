@@ -126,6 +126,10 @@ const endpoints = [
   { method: 'GET', path: '/', desc: 'capability document' },
   { method: 'GET', path: '/health', desc: 'server + database health' },
   {
+    method: 'POST', path: '/dev/panic', desc: 'trigger panic recovery; logs a stack trace and returns a JSON 500',
+    responseHeaders: ['Connection'],
+  },
+  {
     method: 'POST', path: '/api/auth/password/login', desc: 'password login; sets the session cookie',
     input: { name: 'password', placeholder: 'password' },
     body: v => ({ password: v }),
@@ -396,17 +400,22 @@ async function send(ep, card) {
     status.textContent = `${res.status} ${res.statusText}`.trim();
     status.className = `status s${Math.floor(res.status / 100)}`;
     ms.textContent = `${elapsed} ms`;
+    let rendered;
     if (ep.frames && octets) {
-      pre.textContent = decodeFrames(buffer);
+      rendered = decodeFrames(buffer);
     } else if (octets) {
-      pre.textContent = describeBytes(new Uint8Array(buffer));
+      rendered = describeBytes(new Uint8Array(buffer));
     } else {
       try {
-        pre.textContent = text ? JSON.stringify(JSON.parse(text), null, 2) : '(empty body)';
+        rendered = text ? JSON.stringify(JSON.parse(text), null, 2) : '(empty body)';
       } catch {
-        pre.textContent = text;
+        rendered = text;
       }
     }
+    const responseHeaders = (ep.responseHeaders ?? [])
+      .map(name => `${name}: ${res.headers.get(name) ?? '(not exposed)'}`)
+      .join('\n');
+    pre.textContent = responseHeaders ? `${responseHeaders}\n\n${rendered}` : rendered;
   } catch (err) {
     status.textContent = 'network error';
     status.className = 'status s5';
