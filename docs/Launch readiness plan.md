@@ -25,10 +25,11 @@ Implementation update later on 2026-08-21:
 - Step 3's build definitions and documentation are implemented: multi-arch
   Docker publishing, cross-platform binaries/checksums, production Compose, and
   `docs/UPGRADING_FROM_TYPESCRIPT.md`. Publishing awaits a release tag.
-- Step 4 is ready to start after publishing a candidate image. The current
-  manifest `master` defines `inventory/futo-notes/sync-server.yml` on the two
-  staging hosts at port 3010. Its image must be pinned to the immutable Go
-  candidate tag and its Bun-based health checks changed to `curl` for the soak.
+- Step 4 started on 2026-08-21 at 20:15 UTC. Both manifest-managed staging
+  hosts run immutable candidate `candidate-a337e5b7` on port 3010. The cutover
+  also corrected the app database route from direct replica port 5510 to the
+  Patroni-primary HAProxy port 15510. `scripts/staging-soak-check.sh` records
+  the repeatable version, health, restart, log, job, and resource checks.
 - Step 5 remains pending the dogfood soak and release tag.
 
 The wire-parity gate from the migration plan passes today:

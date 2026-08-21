@@ -65,3 +65,14 @@ GOTOOLCHAIN=auto go run ./cmd/compare -mode all
 The adoption rehearsal requires local TypeScript-server and FUTO Notes client
 checkouts; override their locations with `FUTO_TS_SERVER_REPO` and
 `FUTO_NOTES_CLIENT_REPO`.
+
+During a staging soak, audit the immutable candidate and its containers with:
+
+```bash
+CANDIDATE_TAG=candidate-abcdef12
+SOAK_START=2026-08-21T20:15:00Z
+./scripts/staging-soak-check.sh "$CANDIDATE_TAG" "$SOAK_START"
+```
+
+For the release decision, also set `FUTO_SOAK_MIN_DAYS=7` (or 14 for the full
+target) and `FUTO_SOAK_REQUIRE_JOBS=true`.
