@@ -1,6 +1,6 @@
 services:
   server:
-    image: ${FUTO_NOTES_IMAGE:-gitlab.futo.org:5050/futo-notes/futo-notes-server/server:stable}
+    image: ${FUTO_NOTES_IMAGE:-futotech/notes-server:stable}
     ports:
       - "${FUTO_NOTES_PORT:-3005}:3000"
     environment:

@@ -25,7 +25,7 @@
 
 set -eu
 
-DEFAULT_IMAGE="gitlab.futo.org:5050/futo-notes/futo-notes-server/server:stable"
+DEFAULT_IMAGE="futotech/notes-server:stable"
 DEFAULT_COMPOSE_URL="https://gitlab.futo.org/futo-notes/futo-notes-server/-/raw/main/docker-compose.production.yml"
 
 IMAGE="${FUTO_NOTES_IMAGE:-$DEFAULT_IMAGE}"
