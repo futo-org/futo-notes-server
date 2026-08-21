@@ -65,6 +65,10 @@ func listenOnce(ctx context.Context, databaseURL string, hub *Hub, appName strin
 	if _, err := conn.Exec(ctx, "LISTEN "+Channel); err != nil {
 		return false, err
 	}
+	// Subscribers can be created while the listener is in its reconnect
+	// backoff. They may have missed committed notifications, so close them as
+	// soon as LISTEN is restored and force their clients to pull again.
+	hub.CloseAll()
 	log.Printf("sync events listener connected on %s", Channel)
 
 	for {

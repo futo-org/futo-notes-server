@@ -216,7 +216,8 @@ func decodeStoredResult(raw []byte) (storedResult, error) {
 		return stored, nil
 	}
 	// Accept unwrapped result bodies so durable outcomes written by an older
-	// deployment remain recoverable after upgrading.
+	// deployment remain recoverable after upgrading. Keep this error mapping
+	// in sync with ExpireMutationResults in internal/jobs/jobs.go.
 	stored.Body = append(json.RawMessage(nil), raw...)
 	var body struct {
 		Error string `json:"error"`
@@ -692,9 +693,31 @@ func Delete(ctx context.Context, db *sql.DB, userID, collectionID, objectID, mut
 	if err != nil {
 		return DeleteOutcome{}, err
 	}
+	if current.Deleted {
+		var collectionVersion int64
+		if err := tx.QueryRowContext(ctx,
+			`SELECT current_version FROM collections WHERE id = $1`, collectionID).Scan(&collectionVersion); err != nil {
+			return DeleteOutcome{}, err
+		}
+		response := DeleteResponse{
+			Object: DeletedObject{
+				ID:        current.ID,
+				Version:   current.Version,
+				ChangeSeq: current.ChangeSeq,
+				Deleted:   true,
+			},
+			CollectionVersion: collectionVersion,
+		}
+		if err := saveResult(ctx, tx, userID, mutationID, intent, 200, response, nil); err != nil {
+			return DeleteOutcome{}, err
+		}
+		if err := tx.Commit(); err != nil {
+			return DeleteOutcome{}, err
+		}
+		return DeleteOutcome{Code: OK, Response: response}, nil
+	}
 	currentVersion, _ := strconv.ParseInt(current.Version, 10, 64)
-	// A tombstone can't lose the edit-vs-delete race, so a stale version is fine there.
-	if expectedVersion != nil && !current.Deleted && *expectedVersion != currentVersion {
+	if expectedVersion != nil && *expectedVersion != currentVersion {
 		conflict := Conflict{Error: "version conflict", CurrentVersion: currentVersion, CurrentBlobKey: current.BlobKey}
 		if err := saveResult(ctx, tx, userID, mutationID, intent, 409, conflict, nil); err != nil {
 			return DeleteOutcome{}, err

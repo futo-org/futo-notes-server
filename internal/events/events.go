@@ -100,8 +100,9 @@ func (h *Hub) Publish(notification Notification) {
 	}
 }
 
-// CloseAll terminates all current subscriptions. New subscriptions may be
-// added afterward when the Postgres listener reconnects.
+// CloseAll terminates all current subscriptions. The listener calls it again
+// after reconnecting so subscriptions opened during backoff cannot survive a
+// notification gap.
 func (h *Hub) CloseAll() {
 	h.mu.Lock()
 	all := h.subscribers

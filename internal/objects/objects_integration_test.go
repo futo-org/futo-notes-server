@@ -115,22 +115,33 @@ func TestObjectMutationLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if redeleted.Code != objects.OK || redeleted.Response.Object.Version != "4" || redeleted.Response.CollectionVersion != 4 {
+	if redeleted.Code != objects.OK || redeleted.Response.Object.Version != "3" ||
+		redeleted.Response.CollectionVersion != 3 || !redeleted.Response.Object.Deleted {
 		t.Fatalf("unexpected tombstone re-delete: %#v", redeleted)
 	}
-	waitForObjectNotification(t, listener, userID, collectionID, 4)
+	assertNoObjectNotification(t, listener, userID, collectionID)
+	unconditionalRedelete, err := objects.Delete(ctx, database, userID, collectionID,
+		created.Response.Object.ID, "delete-3", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unconditionalRedelete.Code != objects.OK || unconditionalRedelete.Response.Object.Version != "3" ||
+		unconditionalRedelete.Response.CollectionVersion != 3 || !unconditionalRedelete.Response.Object.Deleted {
+		t.Fatalf("unexpected unconditional tombstone re-delete: %#v", unconditionalRedelete)
+	}
+	assertNoObjectNotification(t, listener, userID, collectionID)
 	thirdKey, err := blobs.Stage(ctx, database, store, userID, []byte("third"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	tombstoneUpdate, err := objects.Update(ctx, database, userID, collectionID, created.Response.Object.ID, "update-2", thirdKey, 5)
+	tombstoneUpdate, err := objects.Update(ctx, database, userID, collectionID, created.Response.Object.ID, "update-2", thirdKey, 4)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if tombstoneUpdate.Code != objects.OK || !tombstoneUpdate.Response.Object.Deleted {
 		t.Fatalf("update should not revive tombstone: %#v", tombstoneUpdate)
 	}
-	waitForObjectNotification(t, listener, userID, collectionID, 5)
+	waitForObjectNotification(t, listener, userID, collectionID, 4)
 	recovered, err := objects.RecoverCreate(ctx, database, userID, collectionID, "create-1")
 	if err != nil {
 		t.Fatal(err)

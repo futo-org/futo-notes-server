@@ -669,9 +669,9 @@ paths:
 
         Supplying `?version=N` makes the delete lose to a newer concurrent edit
         (edit-vs-delete race; the edit wins). Omit it to delete
-        unconditionally. Deleting an already-deleted object is another
-        mutation: without a replayed `Mutation-Id` it advances the tombstone
-        version and the collection cursor again.
+        unconditionally. Deleting an already-deleted object is a successful
+        no-op: it returns the current tombstone without advancing either the
+        object version or collection cursor.
 
         The success body carries the compact object projection
         (`id`, `version`, `change_seq`, `deleted`), not the full row.

@@ -91,31 +91,43 @@ func TestListenerTransactionalDeliveryAndReconnect(t *testing.T) {
 		t.Fatal("listener loss did not close the subscription")
 	}
 
-	// A subscriber opened while the listener reconnects remains useful once
-	// LISTEN is active again. Publishes before then are intentionally lossy.
-	fresh := hub.Subscribe("events-user")
-	defer hub.Unsubscribe(fresh)
-	deadline := time.Now().Add(5 * time.Second)
-	for version := int64(9); time.Now().Before(deadline); version++ {
-		publishAndCommit(t, database, Notification{
-			UserID:         "events-user",
-			CollectionID:   "collection-1",
-			CurrentVersion: version,
-		})
-		select {
-		case _, open := <-fresh.Wake():
-			if !open {
-				t.Fatal("fresh subscription closed during reconnect")
-			}
-			changes, open := fresh.Drain()
-			if !open || len(changes) != 1 {
-				t.Fatalf("reconnected drain = %#v, %v", changes, open)
-			}
-			return
-		case <-time.After(200 * time.Millisecond):
-		}
+	// A stream opened during the reconnect backoff was deaf to notifications
+	// committed before LISTEN came back. It must close at reconnect so the
+	// client pulls again instead of trusting that gap.
+	duringBackoff := hub.Subscribe("events-user")
+	defer hub.Unsubscribe(duringBackoff)
+	publishAndCommit(t, database, Notification{
+		UserID:         "events-user",
+		CollectionID:   "collection-1",
+		CurrentVersion: 9,
+	})
+	select {
+	case <-duringBackoff.Wake():
+		t.Fatal("backoff subscription received a notification without a listener")
+	case <-time.After(100 * time.Millisecond):
 	}
-	t.Fatal("listener did not deliver after reconnecting")
+	waitForListener(t, database, appName)
+	select {
+	case _, open := <-duringBackoff.Wake():
+		if open {
+			t.Fatal("backoff subscription woke rather than closed at reconnect")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("backoff subscription survived listener reconnect")
+	}
+
+	// A stream opened after LISTEN is restored receives later notifications.
+	recovered := hub.Subscribe("events-user")
+	defer hub.Unsubscribe(recovered)
+	publishAndCommit(t, database, Notification{
+		UserID:         "events-user",
+		CollectionID:   "collection-1",
+		CurrentVersion: 10,
+	})
+	change = waitForChange(t, recovered, 2*time.Second)
+	if change.CollectionID != "collection-1" || change.CurrentVersion != 10 {
+		t.Fatalf("recovered change = %#v", change)
+	}
 }
 
 func waitForListener(t *testing.T, database *sql.DB, appName string) {
