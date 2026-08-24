@@ -335,7 +335,8 @@ Blobs on-disk aren't immediately deleted.
    Go deviation: the legacy TS server increments the tombstone and collection cursor again on every re-delete. The OpenAPI contract now specifies a successful no-op, which avoids spurious sync work and makes retries stable. A client receives an older version/cursor than it would from TS only when it deletes an object that is already a tombstone. Accepted.
 7. Update the collection row's version to +=1, return the value
 8. Update `objects` table, set deleted to true, bump the object version number and change_seq
-9. Update blob_ledger to have object_version be the new one, state stays claimed
+9. Release the blob: set blob_ledger state to `retained`, null out object_id and object_version, stamp state_changed_at. The bytes stay readable on disk so the blob can still serve as a merge ancestor, and the 365-day retention clock starts — the same treatment an update's superseded blob gets. This covers the blob the object held at delete time. A later update against the tombstone claims its replacement blob while leaving `deleted = true`, so a tombstone can still carry a `claimed` blob indefinitely; nothing releases those today.
+   Go deviation: this plan originally kept the blob `claimed`. A claimed blob is never eligible for garbage collection, so a tombstone held its ciphertext forever, while an updated object's old blob was reclaimed after a year. Same merge-ancestor rationale, so both now use the same bounded window. Accepted.
 10. upsert mutation_results
 11. SSE publish
 12. **COMMIT**
