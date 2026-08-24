@@ -471,7 +471,8 @@ paths:
         Returns every object in the collection whose `change_seq` is greater
         than `sinceVersion`, ordered ascending. Apply rows in order, then
         advance the cursor to the highest `change_seq` received. `deleted: true`
-        rows are tombstones.
+        rows are tombstones, and they are kept indefinitely: a pull from zero
+        reports every object the collection has ever deleted.
 
         Omitting `limit` returns `{"objects": [...]}` with no row cap. Supplying
         it adds `hasMore` and `nextCursor` to the response.
@@ -664,8 +665,11 @@ paths:
       summary: Soft delete an object
       description: |
         Sets `deleted: true` and bumps the version so peers see the tombstone.
-        The tombstone's claimed blob stays fetchable, because it may be a merge
-        ancestor.
+        The blob moves to `retained` and stays fetchable for 365 days, because
+        it may be a merge ancestor — the same treatment an update gives the
+        blob it supersedes. After that window the blob is reclaimed. The
+        tombstone row itself is kept indefinitely, so peers can always learn
+        about the deletion.
 
         Supplying `?version=N` makes the delete lose to a newer concurrent edit
         (edit-vs-delete race; the edit wins). Omit it to delete

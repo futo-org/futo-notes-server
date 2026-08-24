@@ -141,6 +141,25 @@ func TestObjectMutationLifecycle(t *testing.T) {
 	if tombstoneUpdate.Code != objects.OK || !tombstoneUpdate.Response.Object.Deleted {
 		t.Fatalf("update should not revive tombstone: %#v", tombstoneUpdate)
 	}
+	// The replacement blob is claimed even though the object stays deleted, so
+	// a tombstone can hold a claimed blob without any legacy history. The purge
+	// job is what eventually releases it.
+	var tombstoneBlobState string
+	if err := database.QueryRowContext(ctx, `SELECT state FROM blob_ledger WHERE blob_key = $1`,
+		thirdKey).Scan(&tombstoneBlobState); err != nil {
+		t.Fatal(err)
+	}
+	if tombstoneBlobState != "claimed" {
+		t.Fatalf("blob state after updating a tombstone = %q, want %q", tombstoneBlobState, "claimed")
+	}
+	var releasedState string
+	if err := database.QueryRowContext(ctx, `SELECT state FROM blob_ledger WHERE blob_key = $1`,
+		secondKey).Scan(&releasedState); err != nil {
+		t.Fatal(err)
+	}
+	if releasedState != "retained" {
+		t.Fatalf("superseded tombstone blob state = %q, want %q", releasedState, "retained")
+	}
 	waitForObjectNotification(t, listener, userID, collectionID, 4)
 	recovered, err := objects.RecoverCreate(ctx, database, userID, collectionID, "create-1")
 	if err != nil {
@@ -192,4 +211,75 @@ func assertNoObjectNotification(t *testing.T, listener *pgx.Conn, userID, collec
 			t.Fatalf("unexpected notification: %#v", payload)
 		}
 	}
+}
+
+// A tombstone's blob must stop being claimed. Claimed blobs are never eligible
+// for garbage collection, so leaving one claimed keeps the deleted object's
+// ciphertext on disk forever. Retained keeps it fetchable as a merge ancestor
+// while putting it on the same 365-day clock an update's old blob gets.
+func TestDeleteRetainsBlobForReclamation(t *testing.T) {
+	databaseURL := os.Getenv("OBJECTS_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("OBJECTS_TEST_DATABASE_URL is not set")
+	}
+	database, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	ctx := context.Background()
+	if _, err := databasepkg.Migrate(ctx, database); err != nil {
+		t.Fatal(err)
+	}
+
+	userID, collectionID := uuid.NewV7().String(), uuid.NewV7().String()
+	if _, err := database.ExecContext(ctx, `INSERT INTO users (id, sub, name, email)
+		VALUES ($1, $2, 'delete blob test', $3)`, userID, "delete-blob-"+userID, userID+"@example.invalid"); err != nil {
+		t.Fatal(err)
+	}
+	defer database.ExecContext(ctx, `DELETE FROM users WHERE id = $1`, userID)
+	if _, err := database.ExecContext(ctx, `INSERT INTO collections (id, user_id) VALUES ($1, $2)`, collectionID, userID); err != nil {
+		t.Fatal(err)
+	}
+
+	store := &blobs.Store{Dir: t.TempDir()}
+	key, err := blobs.Stage(ctx, database, store, userID, []byte("folder ciphertext"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := objects.Create(ctx, database, userID, collectionID, "create-folder", key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Code != objects.OK {
+		t.Fatalf("unexpected create: %#v", created)
+	}
+	deleted, err := objects.Delete(ctx, database, userID, collectionID, created.Response.Object.ID, "delete-folder", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted.Code != objects.OK {
+		t.Fatalf("unexpected delete: %#v", deleted)
+	}
+
+	var state string
+	var objectID sql.NullString
+	var objectVersion sql.NullInt64
+	if err := database.QueryRowContext(ctx, `SELECT state, object_id, object_version
+		FROM blob_ledger WHERE blob_key = $1`, key).Scan(&state, &objectID, &objectVersion); err != nil {
+		t.Fatal(err)
+	}
+	if state != "retained" {
+		t.Errorf("ledger state = %q, want %q: a claimed blob is never garbage collected", state, "retained")
+	}
+	if objectID.Valid || objectVersion.Valid {
+		t.Errorf("ledger still points at object %v version %v, want both NULL", objectID, objectVersion)
+	}
+
+	// Still readable: the tombstone's blob may be a merge ancestor.
+	file, err := store.Open(key)
+	if err != nil {
+		t.Fatalf("tombstone blob is not fetchable: %v", err)
+	}
+	file.Close()
 }

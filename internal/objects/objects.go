@@ -741,8 +741,13 @@ func Delete(ctx context.Context, db *sql.DB, userID, collectionID, objectID, mut
 	}
 	deleted.Version, deleted.ChangeSeq = strconv.FormatInt(version, 10), strconv.FormatInt(changeSeq, 10)
 	if current.BlobKey != nil {
-		if _, err := tx.ExecContext(ctx, `UPDATE blob_ledger SET object_version = $2, state_changed_at = now()
-			WHERE blob_key = $1 AND state = 'claimed'`, *current.BlobKey, newVersion); err != nil {
+		// Release the claim the way an update does. A claimed blob is never
+		// eligible for garbage collection, so a tombstone that kept its claim
+		// would hold its ciphertext on disk forever. Retained still reads back
+		// from disk, so the blob can serve as a merge ancestor, and it starts
+		// the same 365-day clock an update's superseded blob gets.
+		if _, err := tx.ExecContext(ctx, `UPDATE blob_ledger SET state = 'retained', object_id = NULL,
+			object_version = NULL, state_changed_at = now() WHERE blob_key = $1 AND state = 'claimed'`, *current.BlobKey); err != nil {
 			return DeleteOutcome{}, err
 		}
 	}
