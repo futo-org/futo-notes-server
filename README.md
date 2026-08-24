@@ -19,7 +19,10 @@ curl --fail http://localhost:3005/health
 ```
 
 The image is `futotech/notes-server:stable` for both `linux/amd64` and
-`linux/arm64`. PostgreSQL metadata lives under
+`linux/arm64`. While the Go rewrite is under test, every `go-rewrite` build also
+publishes `futotech/notes-server:go-candidate` (moving) alongside
+`futotech/notes-server:candidate-<short-sha>` (immutable) — pull the pinned tag
+for anything you need to reproduce. PostgreSQL metadata lives under
 `$FUTO_NOTES_DATA_DIR/postgres`; encrypted blobs live under
 `$FUTO_NOTES_DATA_DIR/blobs`.
 
@@ -60,11 +63,18 @@ GOTOOLCHAIN=auto go run ./cmd/compare -mode all
 ./scripts/rust-acceptance.sh ts
 ./scripts/rust-acceptance.sh go
 ./scripts/adoption-rehearsal.sh all
+./scripts/compose-rehearsal.sh
 ```
 
 The adoption rehearsal requires local TypeScript-server and FUTO Notes client
 checkouts; override their locations with `FUTO_TS_SERVER_REPO` and
 `FUTO_NOTES_CLIENT_REPO`.
+
+`compose-rehearsal.sh` repeats the swap and rollback at the container level: it
+builds both images, runs `docker-compose.production.yml` in a throwaway project on
+host port 3205, and swaps by re-tagging the one image tag the Compose file names.
+It needs Docker on this machine — a remote or docker-in-docker daemon cannot share
+the bind mount it inspects — so it stays out of CI and runs before a release.
 
 During a staging soak, audit the immutable candidate and its containers with:
 

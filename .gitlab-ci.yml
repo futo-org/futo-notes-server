@@ -114,19 +114,21 @@ publish:candidate-image:
     - docker:27-dind
   variables:
     DOCKER_TLS_CERTDIR: /certs
+    DOCKERHUB_IMAGE: docker.io/futotech/notes-server
     GITLAB_IMAGE: $CI_REGISTRY_IMAGE/server
   needs:
     - test:go
     - test:image
     - test:adoption
   before_script:
+    - printf '%s' "$DOCKERHUB_TOKEN" | docker login --username "$DOCKERHUB_USERNAME" --password-stdin docker.io
     - printf '%s' "$CI_REGISTRY_PASSWORD" | docker login --username "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
     - docker run --privileged --rm tonistiigi/binfmt:qemu-v10.2.3 --install arm64
     - docker buildx create --use --name futo-notes-candidate --driver docker-container
   script:
     - CANDIDATE_TAG="candidate-$CI_COMMIT_SHORT_SHA"
-    - docker buildx build --platform linux/amd64,linux/arm64 --provenance=false --build-arg VERSION="$CANDIDATE_TAG" --tag "$GITLAB_IMAGE:$CANDIDATE_TAG" --tag "$GITLAB_IMAGE:candidate" --push .
-    - docker buildx imagetools inspect "$GITLAB_IMAGE:$CANDIDATE_TAG"
+    - docker buildx build --platform linux/amd64,linux/arm64 --provenance=false --build-arg VERSION="$CANDIDATE_TAG" --tag "$DOCKERHUB_IMAGE:$CANDIDATE_TAG" --tag "$DOCKERHUB_IMAGE:go-candidate" --tag "$GITLAB_IMAGE:$CANDIDATE_TAG" --tag "$GITLAB_IMAGE:candidate" --push .
+    - docker buildx imagetools inspect "$DOCKERHUB_IMAGE:go-candidate"
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule" && $FUTO_SOAK_CHECK == "true"'
       when: never

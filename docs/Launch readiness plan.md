@@ -32,6 +32,28 @@ Implementation update later on 2026-08-21:
   the repeatable version, health, restart, log, job, and resource checks.
 - Step 5 remains pending the dogfood soak and release tag.
 
+Implementation update on 2026-08-24:
+
+- The container-level swap is now covered by `scripts/compose-rehearsal.sh`. It
+  builds both images, brings the TypeScript one up in a throwaway Compose project
+  on `docker-compose.production.yml`, seeds real traffic, then swaps by
+  re-tagging the single image tag the Compose file names and running
+  `docker compose up -d --wait` again — no Compose or `.env` edit between phases,
+  which is the closest local stand-in for `docker compose pull && up -d`. It
+  passes: 33 asserts green, TypeScript to Go to TypeScript, exit 0. Beyond what
+  the process rehearsal already proves, it establishes that Compose recreates the
+  container on the tag change, that the image healthcheck reports healthy on both
+  images, that the mapped host port serves `/health`, that blobs written by either
+  server land in the bind-mounted volume owned by uid 1000, and that the boot
+  warning for the dropped `LOG_LEVEL` reaches a self-hoster's `docker compose logs`.
+- That rehearsal is not wired into CI. The runners use docker-in-docker, where a
+  bind mount the job names is created inside the daemon container instead of being
+  shared with the job, so the volume and uid-1000 asserts would read an empty
+  directory and the published port would not be on `127.0.0.1`. Verified by
+  probing a dind daemon directly, not assumed. The script refuses to start against
+  a non-local `DOCKER_HOST` rather than failing confusingly, and it is a
+  pre-release manual gate until the runner shares a volume with its dind service.
+
 The wire-parity gate from the migration plan passes today:
 
 - `GOTOOLCHAIN=auto go test ./...` — green. (go.mod requires Go ≥ 1.27; local
@@ -41,6 +63,8 @@ The wire-parity gate from the migration plan passes today:
 - `./scripts/rust-acceptance.sh ts` then `go` — 28 + 2 tests green against both.
 - `./scripts/adoption-rehearsal.sh all` — latest-TS and migration-008 adoption,
   destructive-job auditing, Go writes, and rollback to latest TS all green.
+- `./scripts/compose-rehearsal.sh` — the same swap and rollback at the container
+  level, through one Compose project and one re-tagged image, all green.
 - `docker buildx build --platform linux/amd64,linux/arm64 ...` — both image
   architectures build successfully; the cross-platform release script also
   produces Linux, macOS, and Windows binaries plus checksums.
