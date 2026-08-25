@@ -12,6 +12,7 @@ errors since the soak epoch.
 Environment:
   FUTO_SOAK_URLS          Space-separated server origins.
   FUTO_SOAK_SSH_HOSTS     Space-separated root SSH targets, one per URL.
+  FUTO_SOAK_ENGINES       Expected engines, one per URL (postgres or sqlite).
   FUTO_SOAK_REMOTE        Set false to skip container/log checks.
   FUTO_SOAK_MIN_DAYS      Require this many complete elapsed soak days.
   FUTO_SOAK_REQUIRE_JOBS  Set true to require evidence for all four jobs.
@@ -40,6 +41,7 @@ done
 
 read -r -a urls <<<"${FUTO_SOAK_URLS:-http://100.76.177.70:3010 http://100.127.246.105:3010}"
 read -r -a ssh_hosts <<<"${FUTO_SOAK_SSH_HOSTS:-100.76.177.70 100.127.246.105}"
+read -r -a engines <<<"${FUTO_SOAK_ENGINES:-postgres sqlite}"
 remote_checks=${FUTO_SOAK_REMOTE:-true}
 require_jobs=${FUTO_SOAK_REQUIRE_JOBS:-false}
 min_days=${FUTO_SOAK_MIN_DAYS:-0}
@@ -51,6 +53,10 @@ fi
 
 if [[ ${#urls[@]} -eq 0 ]]; then
   echo "FUTO_SOAK_URLS must contain at least one origin" >&2
+  exit 2
+fi
+if [[ ${#urls[@]} -ne ${#engines[@]} ]]; then
+  echo "FUTO_SOAK_URLS and FUTO_SOAK_ENGINES must have the same number of entries" >&2
   exit 2
 fi
 
@@ -79,6 +85,11 @@ fi
 
 for index in "${!urls[@]}"; do
   url=${urls[$index]%/}
+  engine=${engines[$index]}
+  if [[ $engine != postgres && $engine != sqlite ]]; then
+    echo "FUTO_SOAK_ENGINES entries must be postgres or sqlite, got $engine" >&2
+    exit 2
+  fi
   echo "checking $url"
 
   capability=$(curl --fail --silent --show-error --max-time 15 "$url/")
@@ -108,6 +119,23 @@ for index in "${!urls[@]}"; do
     "runuser -l podman -c 'podman inspect inventory_futo-notes_sync-server --format \"started={{.State.StartedAt}}|status={{.State.Status}}|exit={{.State.ExitCode}}|restarts={{.RestartCount}}|health={{if .State.Health}}{{.State.Health.Status}}{{end}}\"'")
   echo "  $state"
   [[ $state == *'|status=running|exit=0|restarts=0|health=healthy' ]]
+
+  database_url=$(ssh "${ssh_options[@]}" "root@$host" \
+    "runuser -l podman -c 'podman inspect inventory_futo-notes_sync-server --format \"{{range .Config.Env}}{{println .}}{{end}}\"'" \
+    | while IFS= read -r setting; do
+        if [[ $setting == DATABASE_URL=* ]]; then
+          printf '%s' "${setting#DATABASE_URL=}"
+          break
+        fi
+      done)
+  case $engine:$database_url in
+    postgres:postgres://*|postgres:postgresql://*|sqlite:sqlite:*) ;;
+    *)
+      echo "database engine on $host does not match expected $engine" >&2
+      exit 1
+      ;;
+  esac
+  echo "  database_engine=$engine"
 
   started=${state#started=}
   started=${started%%|status=*}

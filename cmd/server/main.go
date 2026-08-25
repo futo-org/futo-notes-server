@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -81,7 +80,7 @@ type healthStatus struct {
 	DB     string `json:"db"`
 }
 
-func handleHealth(database *sql.DB) http.HandlerFunc {
+func handleHealth(database *db.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 		defer cancel()
@@ -93,7 +92,7 @@ func handleHealth(database *sql.DB) http.HandlerFunc {
 	}
 }
 
-func routes(cfg config.Config, database *sql.DB, blobStore *blobs.Store, eventHub *events.Hub) http.Handler {
+func routes(cfg config.Config, database *db.DB, blobStore *blobs.Store, eventHub *events.Hub, publisher events.Publisher) http.Handler {
 	api := http.NewServeMux()
 	if cfg.AuthMode == "dev" {
 		api.HandleFunc("POST /api/auth/dev/login", handleDevLogin(cfg, database))
@@ -111,13 +110,13 @@ func routes(cfg config.Config, database *sql.DB, blobStore *blobs.Store, eventHu
 	api.HandleFunc("GET /api/collections/{id}/key", handleGetCollectionKey(database))
 	api.HandleFunc("PUT /api/collections/{id}/key", handlePutCollectionKey(database))
 	api.HandleFunc("GET /api/collections/{id}/objects", handleListObjects(database))
-	api.HandleFunc("POST /api/collections/{id}/objects", handleCreateObject(database))
+	api.HandleFunc("POST /api/collections/{id}/objects", handleCreateObject(database, publisher))
 	api.HandleFunc("GET /api/collections/{id}/objects/{objectId}", handleGetObject(database))
-	api.HandleFunc("PUT /api/collections/{id}/objects/{objectId}", handleUpdateObject(database))
-	api.HandleFunc("DELETE /api/collections/{id}/objects/{objectId}", handleDeleteObject(database))
-	api.HandleFunc("POST /api/collections/{id}/blob-objects", handleCreateBlobObject(database, blobStore))
-	api.HandleFunc("PUT /api/collections/{id}/blob-objects/{objectId}", handleUpdateBlobObject(database, blobStore))
-	api.HandleFunc("POST /api/collections/{id}/blob-objects/batch", handleBatchBlobObjects(database, blobStore))
+	api.HandleFunc("PUT /api/collections/{id}/objects/{objectId}", handleUpdateObject(database, publisher))
+	api.HandleFunc("DELETE /api/collections/{id}/objects/{objectId}", handleDeleteObject(database, publisher))
+	api.HandleFunc("POST /api/collections/{id}/blob-objects", handleCreateBlobObject(database, blobStore, publisher))
+	api.HandleFunc("PUT /api/collections/{id}/blob-objects/{objectId}", handleUpdateBlobObject(database, blobStore, publisher))
+	api.HandleFunc("POST /api/collections/{id}/blob-objects/batch", handleBatchBlobObjects(database, blobStore, publisher))
 	api.HandleFunc("GET /api/collections/{id}/create-mutations/{mutationId}", handleRecoverCreate(database))
 	api.HandleFunc("POST /api/blobs", handleUploadBlob(database, blobStore))
 	api.HandleFunc("POST /api/blobs/batch", handleBatchFetchBlobs(blobStore))
@@ -135,7 +134,7 @@ func routes(cfg config.Config, database *sql.DB, blobStore *blobs.Store, eventHu
 	mux.HandleFunc("GET /health", handleHealth(database))
 	mux.Handle("/api/", requireAuth(cfg, database, api))
 	if cfg.DevUI {
-		mux.HandleFunc("GET /dev", handleDevUI)
+		mux.HandleFunc("GET /dev", handleDevUI(database))
 		mux.HandleFunc("POST /dev/panic", handleDevPanic)
 		registerDevJobHandlers(mux, database, blobStore)
 		slog.Info("dev UI enabled", "path", "/dev")
@@ -147,6 +146,9 @@ func routes(cfg config.Config, database *sql.DB, blobStore *blobs.Store, eventHu
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	slog.SetDefault(logger)
+	if len(os.Args) > 1 && os.Args[1] == "migrate-to-sqlite" {
+		os.Exit(runMigrateToSQLite(os.Args[2:], os.Stdout, os.Stderr))
+	}
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -175,12 +177,15 @@ func main() {
 	}
 	blobStore := &blobs.Store{Dir: cfg.BlobDir}
 	eventHub := events.NewHub()
-	go events.Listen(context.Background(), cfg.DatabaseURL, eventHub)
+	publisher := events.NewPublisher(database.Dialect(), eventHub)
+	if database.Dialect().Engine() == db.Postgres {
+		go events.Listen(context.Background(), cfg.DatabaseURL, eventHub)
+	}
 	go jobs.Run(context.Background(), database, blobStore, jobs.DefaultSchedule, cfg.BlobGCEnabled)
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	slog.Info("listening", "addr", addr)
-	if err := http.ListenAndServe(addr, routes(cfg, database, blobStore, eventHub)); err != nil {
+	if err := http.ListenAndServe(addr, routes(cfg, database, blobStore, eventHub, publisher)); err != nil {
 		slog.Error("serving HTTP", "err", err)
 		os.Exit(1)
 	}

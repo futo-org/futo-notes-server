@@ -2,12 +2,12 @@ package jobs
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"log/slog"
 	"time"
 
 	"futo-notes-server/internal/blobs"
+	"futo-notes-server/internal/db"
 )
 
 type Schedule struct {
@@ -24,7 +24,7 @@ var DefaultSchedule = Schedule{
 
 // Run executes recurring jobs until ctx is cancelled. Both schedules first
 // fire after InitialDelay, and an error from one job never stops later jobs.
-func Run(ctx context.Context, database *sql.DB, store *blobs.Store, schedule Schedule, collectGarbage bool) {
+func Run(ctx context.Context, database *db.DB, store *blobs.Store, schedule Schedule, collectGarbage bool) {
 	maintenance := maintenanceJobs(database, store, collectGarbage)
 
 	run(ctx, schedule, scheduledJobs{
@@ -39,7 +39,7 @@ func Run(ctx context.Context, database *sql.DB, store *blobs.Store, schedule Sch
 	})
 }
 
-func maintenanceJobs(database *sql.DB, store *blobs.Store, collectGarbage bool) []scheduledJob {
+func maintenanceJobs(database *db.DB, store *blobs.Store, collectGarbage bool) []scheduledJob {
 	maintenance := []scheduledJob{
 		{
 			name: "storage reconciliation",

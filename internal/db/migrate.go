@@ -2,7 +2,6 @@ package db
 
 import (
 	"context"
-	"database/sql"
 	"embed"
 	"fmt"
 	"path"
@@ -11,7 +10,7 @@ import (
 	"time"
 )
 
-//go:embed migrations/*.sql
+//go:embed migrations/postgres/*.sql migrations/sqlite/*.sql
 var migrationFS embed.FS
 
 // The bookkeeping tables keep their Kysely names and shapes so that a database
@@ -35,15 +34,16 @@ type migration struct {
 	sql  string
 }
 
-func loadMigrations() ([]migration, error) {
-	entries, err := migrationFS.ReadDir("migrations")
+func loadMigrations(dialect Dialect) ([]migration, error) {
+	directory := path.Join("migrations", string(dialect.Engine()))
+	entries, err := migrationFS.ReadDir(directory)
 	if err != nil {
 		return nil, err
 	}
 
 	migrations := make([]migration, 0, len(entries))
 	for _, entry := range entries {
-		body, err := migrationFS.ReadFile(path.Join("migrations", entry.Name()))
+		body, err := migrationFS.ReadFile(path.Join(directory, entry.Name()))
 		if err != nil {
 			return nil, err
 		}
@@ -62,8 +62,8 @@ func loadMigrations() ([]migration, error) {
 // of the migrations it applied. It applies nothing against a database that
 // already has every migration recorded, which is the case when swapping in for
 // the TypeScript server.
-func Migrate(ctx context.Context, database *sql.DB) ([]string, error) {
-	migrations, err := loadMigrations()
+func Migrate(ctx context.Context, database *DB) ([]string, error) {
+	migrations, err := loadMigrations(database.Dialect())
 	if err != nil {
 		return nil, fmt.Errorf("loading migrations: %w", err)
 	}
@@ -74,8 +74,10 @@ func Migrate(ctx context.Context, database *sql.DB) ([]string, error) {
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.ExecContext(ctx, `select pg_advisory_xact_lock($1)`, advisoryLockKey); err != nil {
-		return nil, fmt.Errorf("acquiring migration lock: %w", err)
+	if database.Dialect().Engine() == Postgres {
+		if _, err := tx.ExecContext(ctx, `select pg_advisory_xact_lock($1)`, advisoryLockKey); err != nil {
+			return nil, fmt.Errorf("acquiring migration lock: %w", err)
+		}
 	}
 
 	if err := ensureBookkeeping(ctx, tx); err != nil {
@@ -115,7 +117,7 @@ func Migrate(ctx context.Context, database *sql.DB) ([]string, error) {
 	return names, nil
 }
 
-func ensureBookkeeping(ctx context.Context, tx *sql.Tx) error {
+func ensureBookkeeping(ctx context.Context, tx *Tx) error {
 	stmts := []string{
 		`create table if not exists ` + migrationTable + ` (
 			name varchar(255) primary key,
@@ -136,7 +138,7 @@ func ensureBookkeeping(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
-func appliedMigrations(ctx context.Context, tx *sql.Tx) (map[string]bool, error) {
+func appliedMigrations(ctx context.Context, tx *Tx) (map[string]bool, error) {
 	rows, err := tx.QueryContext(ctx, `select name from `+migrationTable)
 	if err != nil {
 		return nil, fmt.Errorf("reading applied migrations: %w", err)

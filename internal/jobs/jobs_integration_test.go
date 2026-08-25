@@ -23,10 +23,15 @@ func TestRecurringJobs(t *testing.T) {
 	if databaseURL == "" {
 		t.Skip("JOBS_TEST_DATABASE_URL is not set")
 	}
-	database, err := sql.Open("pgx", databaseURL)
+	rawDatabase, err := sql.Open("pgx", databaseURL)
 	if err != nil {
 		t.Fatal(err)
 	}
+	dialect, err := databasepkg.ParseDialect(databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	database := databasepkg.Wrap(rawDatabase, dialect)
 	defer database.Close()
 	ctx := context.Background()
 	if _, err := databasepkg.Migrate(ctx, database); err != nil {
@@ -284,7 +289,7 @@ func TestRecurringJobs(t *testing.T) {
 	})
 }
 
-func assertRowCount(t *testing.T, database *sql.DB, query string, want int, args ...any) {
+func assertRowCount(t *testing.T, database *databasepkg.DB, query string, want int, args ...any) {
 	t.Helper()
 	var got int
 	if err := database.QueryRow(query, args...).Scan(&got); err != nil {

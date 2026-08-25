@@ -67,10 +67,14 @@ type responsePair struct {
 }
 
 func newRunner(name string, opts options, env *environment) *runner {
+	referenceName, candidateName := "ts", "go"
+	if opts.engineParity {
+		referenceName, candidateName = "postgres", "sqlite"
+	}
 	return &runner{
 		name: name, opts: opts, env: env, startedAt: time.Now(),
-		ts:       &target{name: "ts", baseURL: fmt.Sprintf("http://127.0.0.1:%d", opts.tsPort), client: &http.Client{Timeout: 3 * time.Minute}, identities: map[string]string{}, reverse: map[string]string{}},
-		goTarget: &target{name: "go", baseURL: fmt.Sprintf("http://127.0.0.1:%d", opts.goPort), client: &http.Client{Timeout: 3 * time.Minute}, identities: map[string]string{}, reverse: map[string]string{}},
+		ts:       &target{name: referenceName, baseURL: fmt.Sprintf("http://127.0.0.1:%d", opts.tsPort), client: &http.Client{Timeout: 3 * time.Minute}, identities: map[string]string{}, reverse: map[string]string{}},
+		goTarget: &target{name: candidateName, baseURL: fmt.Sprintf("http://127.0.0.1:%d", opts.goPort), client: &http.Client{Timeout: 3 * time.Minute}, identities: map[string]string{}, reverse: map[string]string{}},
 	}
 }
 
@@ -86,7 +90,7 @@ func (r *runner) step(ctx context.Context, scenario, name string, spec requestSp
 
 func (r *runner) stepNamed(ctx context.Context, label string, spec requestSpec) responsePair {
 	type namedOutcome struct {
-		name     string
+		target   *target
 		response wireResponse
 		err      error
 	}
@@ -94,7 +98,7 @@ func (r *runner) stepNamed(ctx context.Context, label string, spec requestSpec) 
 	for _, tgt := range []*target{r.ts, r.goTarget} {
 		go func(t *target) {
 			response, err := t.do(ctx, spec)
-			results <- namedOutcome{name: t.name, response: response, err: err}
+			results <- namedOutcome{target: t, response: response, err: err}
 		}(tgt)
 	}
 	var pair responsePair
@@ -102,9 +106,9 @@ func (r *runner) stepNamed(ctx context.Context, label string, spec requestSpec) 
 	for range 2 {
 		outcome := <-results
 		if outcome.err != nil {
-			requestErrors = append(requestErrors, outcome.name+": "+outcome.err.Error())
+			requestErrors = append(requestErrors, outcome.target.name+": "+outcome.err.Error())
 		}
-		if outcome.name == "ts" {
+		if outcome.target == r.ts {
 			pair.TS = outcome.response
 		} else {
 			pair.Go = outcome.response
@@ -118,23 +122,24 @@ func (r *runner) stepNamed(ctx context.Context, label string, spec requestSpec) 
 	var problems []string
 	if spec.WantStatus != 0 {
 		if pair.TS.Status != spec.WantStatus || pair.Go.Status != spec.WantStatus {
-			problems = append(problems, fmt.Sprintf("expected status %d, got ts=%d go=%d", spec.WantStatus, pair.TS.Status, pair.Go.Status))
+			problems = append(problems, fmt.Sprintf("expected status %d, got %s=%d %s=%d",
+				spec.WantStatus, r.ts.name, pair.TS.Status, r.goTarget.name, pair.Go.Status))
 		}
 	}
 	if pair.TS.Status != pair.Go.Status {
-		problems = append(problems, fmt.Sprintf("status ts=%d go=%d", pair.TS.Status, pair.Go.Status))
+		problems = append(problems, fmt.Sprintf("status %s=%d %s=%d", r.ts.name, pair.TS.Status, r.goTarget.name, pair.Go.Status))
 	}
 	if tsType, goType := mediaType(pair.TS.Header.Get("Content-Type")), mediaType(pair.Go.Header.Get("Content-Type")); tsType != goType {
-		problems = append(problems, fmt.Sprintf("Content-Type ts=%q go=%q", tsType, goType))
+		problems = append(problems, fmt.Sprintf("Content-Type %s=%q %s=%q", r.ts.name, tsType, r.goTarget.name, goType))
 	}
 	for _, header := range []string{"Retry-After", "WWW-Authenticate"} {
 		tsPresent, goPresent := pair.TS.Header.Get(header) != "", pair.Go.Header.Get(header) != ""
 		if tsPresent != goPresent {
-			problems = append(problems, fmt.Sprintf("%s presence ts=%t go=%t", header, tsPresent, goPresent))
+			problems = append(problems, fmt.Sprintf("%s presence %s=%t %s=%t", header, r.ts.name, tsPresent, r.goTarget.name, goPresent))
 		}
 	}
 	if tsCookie, goCookie := cookieShape(pair.TS), cookieShape(pair.Go); !reflect.DeepEqual(tsCookie, goCookie) {
-		problems = append(problems, fmt.Sprintf("Set-Cookie shape ts=%v go=%v", tsCookie, goCookie))
+		problems = append(problems, fmt.Sprintf("Set-Cookie shape %s=%v %s=%v", r.ts.name, tsCookie, r.goTarget.name, goCookie))
 	}
 
 	for _, bind := range spec.Binds {
@@ -162,15 +167,15 @@ func (r *runner) stepNamed(ctx context.Context, label string, spec requestSpec) 
 		tsFrames, tsErr := decodeDownloadFrames(pair.TS.Body)
 		goFrames, goErr := decodeDownloadFrames(pair.Go.Body)
 		if tsErr != nil || goErr != nil {
-			problems = append(problems, fmt.Sprintf("frame decode ts=%v go=%v", tsErr, goErr))
+			problems = append(problems, fmt.Sprintf("frame decode %s=%v %s=%v", r.ts.name, tsErr, r.goTarget.name, goErr))
 		} else if !reflect.DeepEqual(normalizeFrames(tsFrames, r.ts), normalizeFrames(goFrames, r.goTarget)) {
-			problems = append(problems, fmt.Sprintf("binary frames differ ts=%v go=%v", summarizeFrames(tsFrames), summarizeFrames(goFrames)))
+			problems = append(problems, fmt.Sprintf("binary frames differ %s=%v %s=%v", r.ts.name, summarizeFrames(tsFrames), r.goTarget.name, summarizeFrames(goFrames)))
 		}
 	} else if pair.TS.JSON != nil || pair.Go.JSON != nil {
 		for _, item := range []struct {
 			name  string
 			value any
-		}{{"ts", pair.TS.JSON}, {"go", pair.Go.JSON}} {
+		}{{r.ts.name, pair.TS.JSON}, {r.goTarget.name, pair.Go.JSON}} {
 			for _, issue := range validateTimestamps(item.value, r.startedAt) {
 				problems = append(problems, item.name+" "+issue)
 			}
@@ -178,20 +183,20 @@ func (r *runner) stepNamed(ctx context.Context, label string, spec requestSpec) 
 		tsJSON := normalizeJSON(pair.TS.JSON, r.ts, r.startedAt)
 		goJSON := normalizeJSON(pair.Go.JSON, r.goTarget, r.startedAt)
 		if !reflect.DeepEqual(tsJSON, goJSON) {
-			problems = append(problems, fmt.Sprintf("JSON differs ts=%s go=%s", compactJSON(tsJSON), compactJSON(goJSON)))
+			problems = append(problems, fmt.Sprintf("JSON differs %s=%s %s=%s", r.ts.name, compactJSON(tsJSON), r.goTarget.name, compactJSON(goJSON)))
 		}
 		if spec.CheckJSON != nil {
 			for _, item := range []struct {
 				name  string
 				value any
-			}{{"ts", pair.TS.JSON}, {"go", pair.Go.JSON}} {
+			}{{r.ts.name, pair.TS.JSON}, {r.goTarget.name, pair.Go.JSON}} {
 				for _, issue := range spec.CheckJSON(item.value) {
 					problems = append(problems, item.name+" "+issue)
 				}
 			}
 		}
 	} else if !bytes.Equal(pair.TS.Body, pair.Go.Body) {
-		problems = append(problems, fmt.Sprintf("body differs ts=%s go=%s", preview(pair.TS.Body), preview(pair.Go.Body)))
+		problems = append(problems, fmt.Sprintf("body differs %s=%s %s=%s", r.ts.name, preview(pair.TS.Body), r.goTarget.name, preview(pair.Go.Body)))
 	}
 
 	if len(problems) == 0 {

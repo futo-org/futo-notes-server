@@ -24,12 +24,18 @@ func TestObjectMutationLifecycle(t *testing.T) {
 	if databaseURL == "" {
 		t.Skip("OBJECTS_TEST_DATABASE_URL is not set")
 	}
-	database, err := sql.Open("pgx", databaseURL)
+	rawDatabase, err := sql.Open("pgx", databaseURL)
 	if err != nil {
 		t.Fatal(err)
 	}
+	dialect, err := databasepkg.ParseDialect(databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	database := databasepkg.Wrap(rawDatabase, dialect)
 	defer database.Close()
 	ctx := context.Background()
+	publisher := events.PostgresPublisher{}
 	if _, err := databasepkg.Migrate(ctx, database); err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +63,7 @@ func TestObjectMutationLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	created, err := objects.Create(ctx, database, userID, collectionID, "create-1", firstKey)
+	created, err := objects.Create(ctx, database, publisher, userID, collectionID, "create-1", firstKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +71,7 @@ func TestObjectMutationLifecycle(t *testing.T) {
 		t.Fatalf("unexpected create: %#v", created)
 	}
 	waitForObjectNotification(t, listener, userID, collectionID, 1)
-	replayed, err := objects.Create(ctx, database, userID, collectionID, "create-1", firstKey)
+	replayed, err := objects.Create(ctx, database, publisher, userID, collectionID, "create-1", firstKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +84,7 @@ func TestObjectMutationLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	updated, err := objects.Update(ctx, database, userID, collectionID, created.Response.Object.ID, "update-1", secondKey, 2)
+	updated, err := objects.Update(ctx, database, publisher, userID, collectionID, created.Response.Object.ID, "update-1", secondKey, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +92,7 @@ func TestObjectMutationLifecycle(t *testing.T) {
 		t.Fatalf("unexpected update: %#v", updated)
 	}
 	waitForObjectNotification(t, listener, userID, collectionID, 2)
-	conflict, err := objects.Update(ctx, database, userID, collectionID, created.Response.Object.ID, "update-stale", firstKey, 2)
+	conflict, err := objects.Update(ctx, database, publisher, userID, collectionID, created.Response.Object.ID, "update-stale", firstKey, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +101,7 @@ func TestObjectMutationLifecycle(t *testing.T) {
 	}
 	assertNoObjectNotification(t, listener, userID, collectionID)
 
-	deleted, err := objects.Delete(ctx, database, userID, collectionID, created.Response.Object.ID, "delete-1", nil)
+	deleted, err := objects.Delete(ctx, database, publisher, userID, collectionID, created.Response.Object.ID, "delete-1", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +117,7 @@ func TestObjectMutationLifecycle(t *testing.T) {
 		t.Fatalf("unexpected delta: %#v", rows)
 	}
 	staleVersion := int64(1)
-	redeleted, err := objects.Delete(ctx, database, userID, collectionID, created.Response.Object.ID, "delete-2", &staleVersion)
+	redeleted, err := objects.Delete(ctx, database, publisher, userID, collectionID, created.Response.Object.ID, "delete-2", &staleVersion)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +126,7 @@ func TestObjectMutationLifecycle(t *testing.T) {
 		t.Fatalf("unexpected tombstone re-delete: %#v", redeleted)
 	}
 	assertNoObjectNotification(t, listener, userID, collectionID)
-	unconditionalRedelete, err := objects.Delete(ctx, database, userID, collectionID,
+	unconditionalRedelete, err := objects.Delete(ctx, database, publisher, userID, collectionID,
 		created.Response.Object.ID, "delete-3", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -134,7 +140,7 @@ func TestObjectMutationLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tombstoneUpdate, err := objects.Update(ctx, database, userID, collectionID, created.Response.Object.ID, "update-2", thirdKey, 4)
+	tombstoneUpdate, err := objects.Update(ctx, database, publisher, userID, collectionID, created.Response.Object.ID, "update-2", thirdKey, 4)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,12 +228,18 @@ func TestDeleteRetainsBlobForReclamation(t *testing.T) {
 	if databaseURL == "" {
 		t.Skip("OBJECTS_TEST_DATABASE_URL is not set")
 	}
-	database, err := sql.Open("pgx", databaseURL)
+	rawDatabase, err := sql.Open("pgx", databaseURL)
 	if err != nil {
 		t.Fatal(err)
 	}
+	dialect, err := databasepkg.ParseDialect(databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	database := databasepkg.Wrap(rawDatabase, dialect)
 	defer database.Close()
 	ctx := context.Background()
+	publisher := events.PostgresPublisher{}
 	if _, err := databasepkg.Migrate(ctx, database); err != nil {
 		t.Fatal(err)
 	}
@@ -247,14 +259,14 @@ func TestDeleteRetainsBlobForReclamation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	created, err := objects.Create(ctx, database, userID, collectionID, "create-folder", key)
+	created, err := objects.Create(ctx, database, publisher, userID, collectionID, "create-folder", key)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if created.Code != objects.OK {
 		t.Fatalf("unexpected create: %#v", created)
 	}
-	deleted, err := objects.Delete(ctx, database, userID, collectionID, created.Response.Object.ID, "delete-folder", nil)
+	deleted, err := objects.Delete(ctx, database, publisher, userID, collectionID, created.Response.Object.ID, "delete-folder", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -5,21 +5,23 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
 type Config struct {
-	DatabaseURL       string
-	Port              int
-	AuthMode          string
-	Password          string // FUTO_NOTES_PASSWORD, plaintext
-	PasswordHash      string // FUTO_NOTES_PASSWORD_HASH, scrypt self-describing form
-	CookieSecure      bool   // COOKIE_SECURE, Secure cookie flag; on unless "false"
-	DevUI             bool   // DEV_UI, serves the dev test page at /dev when "true"
-	BlobDir           string // BLOB_DIR, root of on-disk blob storage
-	BlobGCEnabled     bool   // BLOB_GC_ENABLED, disables irreversible blob garbage collection when false
-	DBPoolMax         int
-	DBPoolIdleTimeout time.Duration
+	DatabaseURL        string
+	Port               int
+	AuthMode           string
+	Password           string // FUTO_NOTES_PASSWORD, plaintext
+	PasswordHash       string // FUTO_NOTES_PASSWORD_HASH, scrypt self-describing form
+	CookieSecure       bool   // COOKIE_SECURE, Secure cookie flag; on unless "false"
+	DevUI              bool   // DEV_UI, serves the dev test page at /dev when "true"
+	BlobDir            string // BLOB_DIR, root of on-disk blob storage
+	BlobGCEnabled      bool   // BLOB_GC_ENABLED, disables irreversible blob garbage collection when false
+	AllowFreshDatabase bool   // ALLOW_FRESH_DATABASE, overrides the SQLite/blob safety guard
+	DBPoolMax          int
+	DBPoolIdleTimeout  time.Duration
 }
 
 func Load() (Config, error) {
@@ -28,18 +30,15 @@ func Load() (Config, error) {
 	}
 
 	cfg := Config{
-		DatabaseURL:   os.Getenv("DATABASE_URL"),
-		AuthMode:      getDefault("AUTH_MODE", "password"),
-		Password:      os.Getenv("FUTO_NOTES_PASSWORD"),
-		PasswordHash:  os.Getenv("FUTO_NOTES_PASSWORD_HASH"),
-		CookieSecure:  os.Getenv("COOKIE_SECURE") != "false",
-		DevUI:         os.Getenv("DEV_UI") == "true",
-		BlobDir:       getDefault("BLOB_DIR", "./blobs"),
-		BlobGCEnabled: os.Getenv("BLOB_GC_ENABLED") != "false",
-	}
-
-	if cfg.DatabaseURL == "" {
-		return Config{}, fmt.Errorf("DATABASE_URL is required")
+		DatabaseURL:        getDefault("DATABASE_URL", "sqlite:./data/notes.db"),
+		AuthMode:           getDefault("AUTH_MODE", "password"),
+		Password:           os.Getenv("FUTO_NOTES_PASSWORD"),
+		PasswordHash:       os.Getenv("FUTO_NOTES_PASSWORD_HASH"),
+		CookieSecure:       os.Getenv("COOKIE_SECURE") != "false",
+		DevUI:              os.Getenv("DEV_UI") == "true",
+		BlobDir:            getDefault("BLOB_DIR", "./blobs"),
+		BlobGCEnabled:      os.Getenv("BLOB_GC_ENABLED") != "false",
+		AllowFreshDatabase: os.Getenv("ALLOW_FRESH_DATABASE") == "true",
 	}
 	if cfg.AuthMode != "dev" && cfg.AuthMode != "password" {
 		return Config{}, fmt.Errorf("AUTH_MODE must be dev or password, got %q", cfg.AuthMode)
@@ -57,16 +56,32 @@ func Load() (Config, error) {
 	if cfg.Port, err = getInt("PORT", 3005); err != nil {
 		return Config{}, err
 	}
-	if cfg.DBPoolMax, err = getInt("DB_POOL_MAX", 10); err != nil {
-		return Config{}, err
+	if strings.HasPrefix(cfg.DatabaseURL, "postgres://") || strings.HasPrefix(cfg.DatabaseURL, "postgresql://") {
+		if cfg.DBPoolMax, err = getInt("DB_POOL_MAX", 10); err != nil {
+			return Config{}, err
+		}
+		idleMs, err := getInt("DB_POOL_IDLE_TIMEOUT_MS", 10000)
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.DBPoolIdleTimeout = time.Duration(idleMs) * time.Millisecond
 	}
-	idleMs, err := getInt("DB_POOL_IDLE_TIMEOUT_MS", 10000)
-	if err != nil {
-		return Config{}, err
-	}
-	cfg.DBPoolIdleTimeout = time.Duration(idleMs) * time.Millisecond
 
 	return cfg, nil
+}
+
+// LoadRequiredDatabaseURL loads .env and returns the explicitly configured
+// source URL used by offline database commands. Unlike Load, it never supplies
+// the SQLite server default and does not require authentication settings.
+func LoadRequiredDatabaseURL() (string, error) {
+	if err := loadDotenv(".env"); err != nil {
+		return "", fmt.Errorf("loading .env: %w", err)
+	}
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		return "", fmt.Errorf("DATABASE_URL is required")
+	}
+	return databaseURL, nil
 }
 
 // DroppedEnvWarnings reports legacy TypeScript-server settings that the Go

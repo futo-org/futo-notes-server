@@ -31,7 +31,7 @@ default (`./blobs`) is relative to the process working directory in both
 servers, which makes an otherwise-correct upgrade appear to lose blob files.
 
 For Compose installs, replace the compose file with
-`docker-compose.production.yml` from this release and then run:
+`docker-compose.postgres.yml` from this release and then run:
 
 ```bash
 docker compose pull server
@@ -48,7 +48,7 @@ by the latest TypeScript server needs no migration.
 
 | TypeScript variable | Go behavior / replacement |
 | --- | --- |
-| `DATABASE_URL` | Honored. pgx accepts TLS options in this URL. |
+| `DATABASE_URL` | Honored. Keep the existing Postgres URL during this upgrade; pgx accepts TLS options in it. |
 | `PORT`, `AUTH_MODE`, `FUTO_NOTES_PASSWORD`, `FUTO_NOTES_PASSWORD_HASH`, `COOKIE_SECURE`, `BLOB_DIR`, `DB_POOL_MAX`, `DB_POOL_IDLE_TIMEOUT_MS` | Honored. |
 | `BLOB_GC_ENABLED` | Honored. Set exactly `false` to disable destructive blob garbage collection; reconciliation and non-blob expiry still run. |
 | `DB_SSL=true` | Add `sslmode=require` (or `verify-full`) to `DATABASE_URL`. |

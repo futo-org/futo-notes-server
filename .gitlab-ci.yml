@@ -34,15 +34,17 @@ test:go:
     JOBS_TEST_DATABASE_URL: postgres://futo_notes:ci@postgres:5432/jobs_test
     BLOBS_TEST_DATABASE_URL: postgres://futo_notes:ci@postgres:5432/blobs_test
     SERVER_TEST_DATABASE_URL: postgres://futo_notes:ci@postgres:5432/server_test
+    MIGRATION_TEST_DATABASE_URL: postgres://futo_notes:ci@postgres:5432/migration_test
   before_script:
     - apt-get update && apt-get install -y --no-install-recommends postgresql-client
     - |
-      for db in objects_test events_test jobs_test blobs_test server_test; do
+      for db in objects_test events_test jobs_test blobs_test server_test migration_test; do
         PGPASSWORD=ci createdb -h postgres -U futo_notes "$db"
       done
   script:
     - go test -race ./...
     - go vet ./...
+    - go run ./cmd/compare -engine-parity -mode dev -postgres "postgres://futo_notes:$POSTGRES_PASSWORD@postgres:5432/futo_notes"
 
 test:image:
   extends: .skip-soak-schedule
@@ -101,6 +103,8 @@ test:adoption:
     - go run ./cmd/compare -mode all -ts-repo "$FUTO_TS_SERVER_REPO" -postgres "postgres://futo_notes:$FUTO_POSTGRES_PASSWORD@$FUTO_POSTGRES_HOST:$FUTO_POSTGRES_PORT/futo_notes"
     - ./scripts/rust-acceptance.sh ts
     - ./scripts/rust-acceptance.sh go
+    - ./scripts/rust-acceptance.sh go sqlite
+    - ./scripts/sqlite-migration-rehearsal.sh
     - ./scripts/adoption-rehearsal.sh all
 
 build:binaries:

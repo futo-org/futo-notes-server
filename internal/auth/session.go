@@ -9,6 +9,8 @@ import (
 	"errors"
 	"time"
 	"uuid"
+
+	"futo-notes-server/internal/db"
 )
 
 const SessionTTL = 7 * 24 * time.Hour
@@ -36,9 +38,9 @@ type Session struct {
 // ValidateSession looks up a session by hash(rawToken) and returns the
 // attached user. Returns nil for missing or expired tokens; an expired row is
 // deleted on presentation.
-func ValidateSession(ctx context.Context, database *sql.DB, rawToken string) (*Session, error) {
+func ValidateSession(ctx context.Context, database *db.DB, rawToken string) (*Session, error) {
 	var s Session
-	var expiresAt time.Time
+	var expiresAt db.Time
 	err := database.QueryRowContext(ctx,
 		`SELECT s.id, s.expires_at, u.id, u.email, u.name
 		 FROM sessions s JOIN users u ON u.id = s.user_id
@@ -50,7 +52,7 @@ func ValidateSession(ctx context.Context, database *sql.DB, rawToken string) (*S
 	if err != nil {
 		return nil, err
 	}
-	if !expiresAt.After(time.Now()) {
+	if !expiresAt.Time.After(time.Now()) {
 		if _, err := database.ExecContext(ctx, `DELETE FROM sessions WHERE id = $1`, s.ID); err != nil {
 			return nil, err
 		}
@@ -61,18 +63,18 @@ func ValidateSession(ctx context.Context, database *sql.DB, rawToken string) (*S
 
 // DeleteSession removes a session row by id. Deleting an already-gone
 // session is not an error.
-func DeleteSession(ctx context.Context, database *sql.DB, sessionID string) error {
+func DeleteSession(ctx context.Context, database *db.DB, sessionID string) error {
 	_, err := database.ExecContext(ctx, `DELETE FROM sessions WHERE id = $1`, sessionID)
 	return err
 }
 
 // CreateSession opens a session for the user and returns the raw token the
 // client authenticates with. Only the token's SHA-256 hash is stored.
-func CreateSession(ctx context.Context, database *sql.DB, userID string) (string, error) {
+func CreateSession(ctx context.Context, database *db.DB, userID string) (string, error) {
 	rawToken := GenerateToken()
 	_, err := database.ExecContext(ctx,
 		`INSERT INTO sessions (id, user_id, access_token_hash, expires_at) VALUES ($1, $2, $3, $4)`,
-		uuid.NewV7().String(), userID, HashToken(rawToken), time.Now().Add(SessionTTL))
+		uuid.NewV7().String(), userID, HashToken(rawToken), db.Timestamp(time.Now().Add(SessionTTL)))
 	if err != nil {
 		return "", err
 	}

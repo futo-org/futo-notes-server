@@ -25,10 +25,15 @@ func TestRoutesComposePublicAuthAndRecoveryMiddleware(t *testing.T) {
 	if databaseURL == "" {
 		t.Skip("SERVER_TEST_DATABASE_URL is not set")
 	}
-	database, err := sql.Open("pgx", databaseURL)
+	rawDatabase, err := sql.Open("pgx", databaseURL)
 	if err != nil {
 		t.Fatal(err)
 	}
+	dialect, err := databasepkg.ParseDialect(databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	database := databasepkg.Wrap(rawDatabase, dialect)
 	defer database.Close()
 	if _, err := databasepkg.Migrate(context.Background(), database); err != nil {
 		t.Fatal(err)
@@ -40,7 +45,9 @@ func TestRoutesComposePublicAuthAndRecoveryMiddleware(t *testing.T) {
 		DevUI:        true,
 		BlobDir:      t.TempDir(),
 	}
-	server := httptest.NewServer(routes(cfg, database, &blobs.Store{Dir: cfg.BlobDir}, events.NewHub()))
+	hub := events.NewHub()
+	server := httptest.NewServer(routes(cfg, database, &blobs.Store{Dir: cfg.BlobDir}, hub,
+		events.NewPublisher(database.Dialect(), hub)))
 	defer server.Close()
 	client := serverClient(server)
 
@@ -112,10 +119,15 @@ func TestRoutesComposePasswordLoginRateLimit(t *testing.T) {
 	if databaseURL == "" {
 		t.Skip("SERVER_TEST_DATABASE_URL is not set")
 	}
-	database, err := sql.Open("pgx", databaseURL)
+	rawDatabase, err := sql.Open("pgx", databaseURL)
 	if err != nil {
 		t.Fatal(err)
 	}
+	dialect, err := databasepkg.ParseDialect(databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	database := databasepkg.Wrap(rawDatabase, dialect)
 	defer database.Close()
 	if _, err := databasepkg.Migrate(context.Background(), database); err != nil {
 		t.Fatal(err)
@@ -127,7 +139,9 @@ func TestRoutesComposePasswordLoginRateLimit(t *testing.T) {
 		CookieSecure: false,
 		BlobDir:      t.TempDir(),
 	}
-	server := httptest.NewServer(routes(cfg, database, &blobs.Store{Dir: cfg.BlobDir}, events.NewHub()))
+	hub := events.NewHub()
+	server := httptest.NewServer(routes(cfg, database, &blobs.Store{Dir: cfg.BlobDir}, hub,
+		events.NewPublisher(database.Dialect(), hub)))
 	defer server.Close()
 	client := serverClient(server)
 

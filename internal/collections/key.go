@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"time"
+
+	"futo-notes-server/internal/db"
 )
 
 // KeyMaterial is the client-side vault key material. Every field is opaque to
@@ -50,7 +52,7 @@ const keyColumns = `key_salt, key_kdf, encrypted_vault_key, key_updated_at`
 func scanKeyMaterial(row scanner) (*KeyMaterial, error) {
 	var salt, evk sql.NullString
 	var kdf []byte
-	var updatedAt sql.NullTime
+	var updatedAt db.NullTime
 	if err := row.Scan(&salt, &kdf, &evk, &updatedAt); err != nil {
 		return nil, err
 	}
@@ -67,7 +69,7 @@ func scanKeyMaterial(row scanner) (*KeyMaterial, error) {
 
 // GetKey reports whether the collection exists for this user and, if so,
 // returns its key material — nil when no key has been claimed yet.
-func GetKey(ctx context.Context, database *sql.DB, userID, id string) (bool, *KeyMaterial, error) {
+func GetKey(ctx context.Context, database *db.DB, userID, id string) (bool, *KeyMaterial, error) {
 	if !isUUID(id) {
 		return false, nil, nil
 	}
@@ -90,7 +92,7 @@ func GetKey(ctx context.Context, database *sql.DB, userID, id string) (bool, *Ke
 //
 // Rotation (prevToken set): replaces the material only when the token matches
 // the current revision.
-func PutKey(ctx context.Context, database *sql.DB, userID, id string, in KeyInput, prevToken *string) (PutKeyOutcome, *KeyMaterial, error) {
+func PutKey(ctx context.Context, database *db.DB, userID, id string, in KeyInput, prevToken *string) (PutKeyOutcome, *KeyMaterial, error) {
 	if !isUUID(id) {
 		return PutKeyNotFound, nil, nil
 	}
@@ -102,7 +104,7 @@ func PutKey(ctx context.Context, database *sql.DB, userID, id string, in KeyInpu
 	defer tx.Rollback()
 
 	current, err := scanKeyMaterial(tx.QueryRowContext(ctx,
-		`SELECT `+keyColumns+` FROM collections WHERE id = $1 AND user_id = $2 FOR UPDATE`, id, userID))
+		`SELECT `+keyColumns+` FROM collections WHERE id = $1 AND user_id = $2`+database.Dialect().ForUpdate(), id, userID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return PutKeyNotFound, nil, nil
 	}
@@ -125,9 +127,9 @@ func PutKey(ctx context.Context, database *sql.DB, userID, id string, in KeyInpu
 
 	stored, err := scanKeyMaterial(tx.QueryRowContext(ctx,
 		`UPDATE collections
-		 SET key_salt = $1, key_kdf = $2::jsonb, encrypted_vault_key = $3, key_updated_at = now()
+		 SET key_salt = $1, key_kdf = $2`+database.Dialect().JSONCast()+`, encrypted_vault_key = $3, key_updated_at = $5
 		 WHERE id = $4 RETURNING `+keyColumns,
-		in.KeySalt, string(in.KeyKDF), in.EncryptedVaultKey, id))
+		in.KeySalt, string(in.KeyKDF), in.EncryptedVaultKey, id, db.Timestamp(time.Now())))
 	if err != nil {
 		return 0, nil, err
 	}

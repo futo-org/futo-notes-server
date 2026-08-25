@@ -3,10 +3,11 @@ package events
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"sort"
 	"sync"
+
+	"futo-notes-server/internal/db"
 )
 
 const Channel = "notes_changes"
@@ -25,9 +26,22 @@ type Change struct {
 	CurrentVersion int64  `json:"currentVersion"`
 }
 
-// Publish queues a notification inside tx. Postgres delivers it only if tx
-// commits, which keeps the doorbell ordered after the corresponding mutation.
-func Publish(ctx context.Context, tx *sql.Tx, userID, collectionID string, currentVersion int64) error {
+// Publisher queues a sync doorbell in the mutation transaction. Both
+// implementations deliver only after the corresponding work commits.
+type Publisher interface {
+	Publish(context.Context, *db.Tx, string, string, int64) error
+}
+
+func NewPublisher(dialect db.Dialect, hub *Hub) Publisher {
+	if dialect.Engine() == db.SQLite {
+		return SQLitePublisher{Hub: hub}
+	}
+	return PostgresPublisher{}
+}
+
+type PostgresPublisher struct{}
+
+func (PostgresPublisher) Publish(ctx context.Context, tx *db.Tx, userID, collectionID string, currentVersion int64) error {
 	payload, err := json.Marshal(Notification{
 		UserID:         userID,
 		CollectionID:   collectionID,
@@ -38,6 +52,14 @@ func Publish(ctx context.Context, tx *sql.Tx, userID, collectionID string, curre
 	}
 	_, err = tx.ExecContext(ctx, `SELECT pg_notify('`+Channel+`', $1)`, string(payload))
 	return err
+}
+
+type SQLitePublisher struct{ Hub *Hub }
+
+func (p SQLitePublisher) Publish(_ context.Context, tx *db.Tx, userID, collectionID string, currentVersion int64) error {
+	notification := Notification{UserID: userID, CollectionID: collectionID, CurrentVersion: currentVersion}
+	tx.AfterCommit(func() { p.Hub.Publish(notification) })
+	return nil
 }
 
 // Hub routes notifications to subscribers for the owning user.

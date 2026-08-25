@@ -2,14 +2,14 @@ package main
 
 import (
 	"bytes"
-	"database/sql"
 	"encoding/json"
 	"net/http"
 
 	"futo-notes-server/internal/collections"
+	"futo-notes-server/internal/db"
 )
 
-func handleClaimCollection(database *sql.DB) http.HandlerFunc {
+func handleClaimCollection(database *db.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		c, created, err := collections.Claim(r.Context(), database, sessionFrom(r).User.ID)
 		if err != nil {
@@ -24,7 +24,7 @@ func handleClaimCollection(database *sql.DB) http.HandlerFunc {
 	}
 }
 
-func handleListCollections(database *sql.DB) http.HandlerFunc {
+func handleListCollections(database *db.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		cs, err := collections.List(r.Context(), database, sessionFrom(r).User.ID)
 		if err != nil {
@@ -35,7 +35,7 @@ func handleListCollections(database *sql.DB) http.HandlerFunc {
 	}
 }
 
-func handleGetCollection(database *sql.DB) http.HandlerFunc {
+func handleGetCollection(database *db.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		c, err := collections.Get(r.Context(), database, sessionFrom(r).User.ID, r.PathValue("id"))
 		if err != nil {
@@ -50,7 +50,7 @@ func handleGetCollection(database *sql.DB) http.HandlerFunc {
 	}
 }
 
-func handleDeleteCollection(database *sql.DB) http.HandlerFunc {
+func handleDeleteCollection(database *db.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		found, err := collections.Delete(r.Context(), database, sessionFrom(r).User.ID, r.PathValue("id"))
 		if err != nil {
@@ -65,7 +65,7 @@ func handleDeleteCollection(database *sql.DB) http.HandlerFunc {
 	}
 }
 
-func handleGetCollectionKey(database *sql.DB) http.HandlerFunc {
+func handleGetCollectionKey(database *db.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		found, key, err := collections.GetKey(r.Context(), database, sessionFrom(r).User.ID, r.PathValue("id"))
 		if err != nil {
@@ -87,7 +87,7 @@ func isJSONObject(raw json.RawMessage) bool {
 	return len(trimmed) > 0 && trimmed[0] == '{'
 }
 
-func handlePutCollectionKey(database *sql.DB) http.HandlerFunc {
+func handlePutCollectionKey(database *db.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			KeySalt              *string         `json:"key_salt"`

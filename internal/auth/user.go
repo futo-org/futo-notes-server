@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"uuid"
+
+	"futo-notes-server/internal/db"
 )
 
 // The singleton user in password mode. All E2EE data is owned by this row.
@@ -23,7 +25,7 @@ type User struct {
 // UpsertLocalUser returns the singleton user, creating it on first login.
 // ON CONFLICT DO NOTHING plus a re-select keeps two concurrent first logins
 // from failing on the sub unique constraint.
-func UpsertLocalUser(ctx context.Context, database *sql.DB) (User, error) {
+func UpsertLocalUser(ctx context.Context, database *db.DB) (User, error) {
 	var u User
 	err := database.QueryRowContext(ctx,
 		`SELECT id, email, name FROM users WHERE sub = $1`, singletonSub).
@@ -55,7 +57,7 @@ func UpsertLocalUser(ctx context.Context, database *sql.DB) (User, error) {
 
 // UpsertUserByEmail returns the development user for email, creating it on
 // first login and updating its display name on later logins.
-func UpsertUserByEmail(ctx context.Context, database *sql.DB, email, name string) (User, error) {
+func UpsertUserByEmail(ctx context.Context, database *db.DB, email, name string) (User, error) {
 	var u User
 	err := database.QueryRowContext(ctx,
 		`INSERT INTO users (id, sub, email, name) VALUES ($1, $2, $3, $4)

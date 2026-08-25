@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"time"
 	"uuid"
+
+	"futo-notes-server/internal/db"
 )
 
 type Collection struct {
@@ -31,18 +33,19 @@ type scanner interface {
 func scanCollection(row scanner) (Collection, error) {
 	var c Collection
 	var version int64
-	if err := row.Scan(&c.ID, &c.UserID, &version, &c.CreatedAt); err != nil {
+	var createdAt db.Time
+	if err := row.Scan(&c.ID, &c.UserID, &version, &createdAt); err != nil {
 		return Collection{}, err
 	}
 	c.CurrentVersion = strconv.FormatInt(version, 10)
-	c.CreatedAt = c.CreatedAt.UTC()
+	c.CreatedAt = createdAt.Time
 	return c, nil
 }
 
 // Claim returns the user's oldest collection, creating one if none exists,
 // and reports whether it created it. The user row is locked so two devices
 // claiming concurrently converge on one collection instead of forking.
-func Claim(ctx context.Context, database *sql.DB, userID string) (Collection, bool, error) {
+func Claim(ctx context.Context, database *db.DB, userID string) (Collection, bool, error) {
 	tx, err := database.BeginTx(ctx, nil)
 	if err != nil {
 		return Collection{}, false, err
@@ -51,7 +54,7 @@ func Claim(ctx context.Context, database *sql.DB, userID string) (Collection, bo
 
 	var lockedID string
 	if err := tx.QueryRowContext(ctx,
-		`SELECT id FROM users WHERE id = $1 FOR UPDATE`, userID).Scan(&lockedID); err != nil {
+		`SELECT id FROM users WHERE id = $1`+database.Dialect().ForUpdate(), userID).Scan(&lockedID); err != nil {
 		return Collection{}, false, err
 	}
 
@@ -59,8 +62,8 @@ func Claim(ctx context.Context, database *sql.DB, userID string) (Collection, bo
 	created := false
 	if errors.Is(err, sql.ErrNoRows) {
 		c, err = scanCollection(tx.QueryRowContext(ctx,
-			`INSERT INTO collections (id, user_id) VALUES ($1, $2)
-			 RETURNING `+selectColumns, uuid.NewV7().String(), userID))
+			`INSERT INTO collections (id, user_id, created_at) VALUES ($1, $2, $3)
+			 RETURNING `+selectColumns, uuid.NewV7().String(), userID, db.Timestamp(time.Now())))
 		created = true
 	}
 	if err != nil {
@@ -73,7 +76,7 @@ func Claim(ctx context.Context, database *sql.DB, userID string) (Collection, bo
 	return c, created, nil
 }
 
-func List(ctx context.Context, database *sql.DB, userID string) ([]Collection, error) {
+func List(ctx context.Context, database *db.DB, userID string) ([]Collection, error) {
 	rows, err := database.QueryContext(ctx,
 		`SELECT `+selectColumns+` FROM collections WHERE user_id = $1 ORDER BY created_at, id`, userID)
 	if err != nil {
@@ -94,7 +97,7 @@ func List(ctx context.Context, database *sql.DB, userID string) ([]Collection, e
 
 // Get returns nil when the collection is absent or owned by another user, so
 // the caller answers 404 either way and existence doesn't leak.
-func Get(ctx context.Context, database *sql.DB, userID, id string) (*Collection, error) {
+func Get(ctx context.Context, database *db.DB, userID, id string) (*Collection, error) {
 	if !isUUID(id) {
 		return nil, nil
 	}
@@ -114,7 +117,7 @@ func Get(ctx context.Context, database *sql.DB, userID, id string) (*Collection,
 // asynchronous maintenance to remove — staged blobs age out on their own and
 // legacy_shared is never cleaned. Mutation results scoped to the collection
 // are deleted, because that sync namespace no longer exists.
-func Delete(ctx context.Context, database *sql.DB, userID, id string) (bool, error) {
+func Delete(ctx context.Context, database *db.DB, userID, id string) (bool, error) {
 	if !isUUID(id) {
 		return false, nil
 	}
@@ -127,7 +130,7 @@ func Delete(ctx context.Context, database *sql.DB, userID, id string) (bool, err
 
 	var lockedID string
 	err = tx.QueryRowContext(ctx,
-		`SELECT id FROM collections WHERE id = $1 AND user_id = $2 FOR UPDATE`, id, userID).Scan(&lockedID)
+		`SELECT id FROM collections WHERE id = $1 AND user_id = $2`+database.Dialect().ForUpdate(), id, userID).Scan(&lockedID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -136,8 +139,8 @@ func Delete(ctx context.Context, database *sql.DB, userID, id string) (bool, err
 	}
 
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE blob_ledger SET state = 'purgeable', state_changed_at = now()
-		 WHERE collection_id = $1 AND state IN ('claimed', 'retained')`, id); err != nil {
+		`UPDATE blob_ledger SET state = 'purgeable', state_changed_at = $2
+		 WHERE collection_id = $1 AND state IN ('claimed', 'retained')`, id, db.Timestamp(time.Now())); err != nil {
 		return false, err
 	}
 	if _, err := tx.ExecContext(ctx,

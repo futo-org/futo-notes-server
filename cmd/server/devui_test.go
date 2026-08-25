@@ -7,12 +7,18 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"futo-notes-server/internal/db"
 )
 
 func TestDevUIIncludesRecurringJobPanel(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/dev", nil)
 	response := httptest.NewRecorder()
-	handleDevUI(response, request)
+	dialect, err := db.ParseDialect("sqlite:/var/lib/futo/notes.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handleDevUI(db.Wrap(nil, dialect))(response, request)
 
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", response.Code)
@@ -29,6 +35,7 @@ func TestDevUIIncludesRecurringJobPanel(t *testing.T) {
 		"/dev/jobs/mutation-results",
 		"/dev/jobs/blob-gc",
 		"Run now",
+		"sqlite: /var/lib/futo/notes.db",
 	} {
 		if !strings.Contains(body, text) {
 			t.Fatalf("dev UI does not contain %q", text)

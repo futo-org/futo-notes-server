@@ -11,6 +11,7 @@ import (
 	"time"
 	"uuid"
 
+	appdb "futo-notes-server/internal/db"
 	"futo-notes-server/internal/events"
 )
 
@@ -87,8 +88,9 @@ func scanObject(row scanner) (Object, error) {
 	var version, changeSeq int64
 	var blobKey sql.NullString
 	var size sql.NullInt64
+	var createdAt, updatedAt appdb.Time
 	if err := row.Scan(&o.ID, &o.CollectionID, &version, &changeSeq, &o.Deleted,
-		&blobKey, &size, &o.CreatedAt, &o.UpdatedAt); err != nil {
+		&blobKey, &size, &createdAt, &updatedAt); err != nil {
 		return Object{}, err
 	}
 	o.Version = strconv.FormatInt(version, 10)
@@ -100,8 +102,8 @@ func scanObject(row scanner) (Object, error) {
 		s := strconv.FormatInt(size.Int64, 10)
 		o.SizeBytes = &s
 	}
-	o.CreatedAt = o.CreatedAt.UTC()
-	o.UpdatedAt = o.UpdatedAt.UTC()
+	o.CreatedAt = createdAt.Time
+	o.UpdatedAt = updatedAt.Time
 	return o, nil
 }
 
@@ -130,7 +132,7 @@ func ValidBlobKey(userID, key string) bool {
 	return len(userID) == 36 && len(key) == 73 && key[:36] == userID && key[36] == '/' && ValidUUID(key[37:])
 }
 
-func Exists(ctx context.Context, db *sql.DB, userID, collectionID string) (bool, error) {
+func Exists(ctx context.Context, db *appdb.DB, userID, collectionID string) (bool, error) {
 	if !ValidUUID(collectionID) {
 		return false, nil
 	}
@@ -142,7 +144,7 @@ func Exists(ctx context.Context, db *sql.DB, userID, collectionID string) (bool,
 	return err == nil, err
 }
 
-func List(ctx context.Context, db *sql.DB, userID, collectionID string, since int64, limit *int) ([]Object, bool, error) {
+func List(ctx context.Context, db *appdb.DB, userID, collectionID string, since int64, limit *int) ([]Object, bool, error) {
 	found, err := Exists(ctx, db, userID, collectionID)
 	if err != nil || !found {
 		if err == nil {
@@ -180,7 +182,7 @@ func List(ctx context.Context, db *sql.DB, userID, collectionID string, since in
 	return result, hasMore, nil
 }
 
-func Get(ctx context.Context, db *sql.DB, userID, collectionID, objectID string) (*Object, error) {
+func Get(ctx context.Context, db *appdb.DB, userID, collectionID, objectID string) (*Object, error) {
 	if !ValidUUID(collectionID) || !ValidUUID(objectID) {
 		return nil, nil
 	}
@@ -243,15 +245,14 @@ type mutationIntent struct {
 	RequestedVersion *int64
 }
 
-func lockMutation(ctx context.Context, tx *sql.Tx, userID, mutationID string) error {
+func lockMutation(ctx context.Context, tx *appdb.Tx, userID, mutationID string) error {
 	if mutationID == "" {
 		return nil
 	}
-	_, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, userID+":"+mutationID)
-	return err
+	return tx.Dialect().LockMutation(ctx, tx, userID+":"+mutationID)
 }
 
-func replay(ctx context.Context, tx *sql.Tx, userID, mutationID string, intent mutationIntent) (*storedResult, bool, error) {
+func replay(ctx context.Context, tx *appdb.Tx, userID, mutationID string, intent mutationIntent) (*storedResult, bool, error) {
 	if mutationID == "" {
 		return nil, false, nil
 	}
@@ -282,7 +283,7 @@ func replay(ctx context.Context, tx *sql.Tx, userID, mutationID string, intent m
 	return &stored, false, nil
 }
 
-func prepareMutation(ctx context.Context, db *sql.DB, userID, mutationID string, intent mutationIntent) (bool, error) {
+func prepareMutation(ctx context.Context, db *appdb.DB, userID, mutationID string, intent mutationIntent) (bool, error) {
 	if mutationID == "" || !ValidUUID(intent.CollectionID) ||
 		(intent.ObjectID != nil && !ValidUUID(*intent.ObjectID)) {
 		return false, nil
@@ -297,10 +298,10 @@ func prepareMutation(ctx context.Context, db *sql.DB, userID, mutationID string,
 	}
 	var inserted int
 	err = db.QueryRowContext(ctx, `INSERT INTO mutation_results
-		(user_id, mutation_id, kind, collection_id, object_id, requested_version, result)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		(user_id, mutation_id, kind, collection_id, object_id, requested_version, result, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (user_id, mutation_id) DO NOTHING RETURNING 1`, userID, mutationID,
-		intent.Kind, intent.CollectionID, intent.ObjectID, intent.RequestedVersion, pending).Scan(&inserted)
+		intent.Kind, intent.CollectionID, intent.ObjectID, intent.RequestedVersion, pending, appdb.Timestamp(time.Now())).Scan(&inserted)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -315,7 +316,7 @@ func nullableIntEqual(got sql.NullInt64, want *int64) bool {
 	return got.Valid == (want != nil) && (!got.Valid || got.Int64 == *want)
 }
 
-func saveResult(ctx context.Context, tx *sql.Tx, userID, mutationID string, intent mutationIntent, status int, body any, resultingObjectID *string) error {
+func saveResult(ctx context.Context, tx *appdb.Tx, userID, mutationID string, intent mutationIntent, status int, body any, resultingObjectID *string) error {
 	if mutationID == "" || !ValidUUID(intent.CollectionID) ||
 		(intent.ObjectID != nil && !ValidUUID(*intent.ObjectID)) {
 		return nil
@@ -333,31 +334,31 @@ func saveResult(ctx context.Context, tx *sql.Tx, userID, mutationID string, inte
 		objectID = resultingObjectID
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO mutation_results
-		(user_id, mutation_id, kind, collection_id, object_id, requested_version, result)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		(user_id, mutation_id, kind, collection_id, object_id, requested_version, result, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (user_id, mutation_id) DO UPDATE SET object_id = EXCLUDED.object_id,
 		requested_version = EXCLUDED.requested_version, result = EXCLUDED.result`, userID, mutationID, intent.Kind,
-		intent.CollectionID, objectID, intent.RequestedVersion, storedJSON)
+		intent.CollectionID, objectID, intent.RequestedVersion, storedJSON, appdb.Timestamp(time.Now()))
 	return err
 }
 
-func lockCollection(ctx context.Context, tx *sql.Tx, userID, collectionID string) (bool, error) {
+func lockCollection(ctx context.Context, tx *appdb.Tx, userID, collectionID string) (bool, error) {
 	if !ValidUUID(collectionID) {
 		return false, nil
 	}
 	var id string
-	err := tx.QueryRowContext(ctx, `SELECT id FROM collections WHERE id = $1 AND user_id = $2 FOR UPDATE`, collectionID, userID).Scan(&id)
+	err := tx.QueryRowContext(ctx, `SELECT id FROM collections WHERE id = $1 AND user_id = $2`+tx.Dialect().ForUpdate(), collectionID, userID).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
 	return err == nil, err
 }
 
-func stagedBlobSize(ctx context.Context, tx *sql.Tx, userID, blobKey string) (int64, bool, error) {
+func stagedBlobSize(ctx context.Context, tx *appdb.Tx, userID, blobKey string) (int64, bool, error) {
 	var size int64
 	err := tx.QueryRowContext(ctx, `SELECT size_bytes FROM blob_ledger
 		WHERE blob_key = $1 AND user_id = $2 AND state = 'staged'
-		AND created_at > now() - interval '24 hours' FOR UPDATE`, blobKey, userID).Scan(&size)
+		AND created_at > $3`+tx.Dialect().ForUpdate(), blobKey, userID, appdb.Timestamp(time.Now().Add(-24*time.Hour))).Scan(&size)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, false, nil
 	}
@@ -406,7 +407,7 @@ func mutationOutcomeFromStored(stored *storedResult, create bool) (MutationOutco
 	}
 }
 
-func Create(ctx context.Context, db *sql.DB, userID, collectionID, mutationID, blobKey string) (MutationOutcome, error) {
+func Create(ctx context.Context, db *appdb.DB, publisher events.Publisher, userID, collectionID, mutationID, blobKey string) (MutationOutcome, error) {
 	intent := mutationIntent{Kind: "create", CollectionID: collectionID}
 	prepared, err := prepareMutation(ctx, db, userID, mutationID, intent)
 	if err != nil {
@@ -473,15 +474,16 @@ func Create(ctx context.Context, db *sql.DB, userID, collectionID, mutationID, b
 		return MutationOutcome{}, err
 	}
 	objectID := uuid.NewV7().String()
+	now := appdb.Timestamp(time.Now())
 	o, err := scanObject(tx.QueryRowContext(ctx, `INSERT INTO objects
-		(id, collection_id, user_id, version, change_seq, blob_key, size_bytes)
-		VALUES ($1, $2, $3, 1, $4, $5, $6) RETURNING `+objectColumns,
-		objectID, collectionID, userID, collectionVersion, blobKey, size))
+		(id, collection_id, user_id, version, change_seq, blob_key, size_bytes, created_at, updated_at)
+		VALUES ($1, $2, $3, 1, $4, $5, $6, $7, $7) RETURNING `+objectColumns,
+		objectID, collectionID, userID, collectionVersion, blobKey, size, now))
 	if err != nil {
 		return MutationOutcome{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE blob_ledger SET state = 'claimed', collection_id = $2,
-		object_id = $3, object_version = 1, state_changed_at = now() WHERE blob_key = $1`, blobKey, collectionID, objectID); err != nil {
+		object_id = $3, object_version = 1, state_changed_at = $4 WHERE blob_key = $1`, blobKey, collectionID, objectID, now); err != nil {
 		return MutationOutcome{}, err
 	}
 	replayed := false
@@ -489,7 +491,7 @@ func Create(ctx context.Context, db *sql.DB, userID, collectionID, mutationID, b
 	if err := saveResult(ctx, tx, userID, mutationID, intent, 201, response, &objectID); err != nil {
 		return MutationOutcome{}, err
 	}
-	if err := events.Publish(ctx, tx, userID, collectionID, collectionVersion); err != nil {
+	if err := publisher.Publish(ctx, tx, userID, collectionID, collectionVersion); err != nil {
 		return MutationOutcome{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -509,7 +511,7 @@ func resultCode(status int) ResultCode {
 	}
 }
 
-func Update(ctx context.Context, db *sql.DB, userID, collectionID, objectID, mutationID, blobKey string, version int64) (MutationOutcome, error) {
+func Update(ctx context.Context, db *appdb.DB, publisher events.Publisher, userID, collectionID, objectID, mutationID, blobKey string, version int64) (MutationOutcome, error) {
 	intent := mutationIntent{Kind: "update", CollectionID: collectionID, ObjectID: &objectID, RequestedVersion: &version}
 	prepared, err := prepareMutation(ctx, db, userID, mutationID, intent)
 	if err != nil {
@@ -554,7 +556,7 @@ func Update(ctx context.Context, db *sql.DB, userID, collectionID, objectID, mut
 		return finishMutationNotFound(ctx, tx, userID, mutationID, intent)
 	}
 	current, err := scanObject(tx.QueryRowContext(ctx, `SELECT `+objectColumns+` FROM objects
-		WHERE id = $1 AND collection_id = $2 AND user_id = $3 FOR UPDATE`, objectID, collectionID, userID))
+		WHERE id = $1 AND collection_id = $2 AND user_id = $3`+tx.Dialect().ForUpdate(), objectID, collectionID, userID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return finishMutationNotFound(ctx, tx, userID, mutationID, intent)
 	}
@@ -589,27 +591,28 @@ func Update(ctx context.Context, db *sql.DB, userID, collectionID, objectID, mut
 	if err := tx.QueryRowContext(ctx, `UPDATE collections SET current_version = current_version + 1 WHERE id = $1 RETURNING current_version`, collectionID).Scan(&collectionVersion); err != nil {
 		return MutationOutcome{}, err
 	}
+	now := appdb.Timestamp(time.Now())
 	o, err := scanObject(tx.QueryRowContext(ctx, `UPDATE objects SET version = $2, change_seq = $3,
-		blob_key = $4, size_bytes = $5, updated_at = now() WHERE id = $1 RETURNING `+objectColumns,
-		objectID, version, collectionVersion, blobKey, size))
+		blob_key = $4, size_bytes = $5, updated_at = $6 WHERE id = $1 RETURNING `+objectColumns,
+		objectID, version, collectionVersion, blobKey, size, now))
 	if err != nil {
 		return MutationOutcome{}, err
 	}
 	if current.BlobKey != nil {
 		if _, err := tx.ExecContext(ctx, `UPDATE blob_ledger SET state = 'retained', object_id = NULL,
-			object_version = NULL, state_changed_at = now() WHERE blob_key = $1 AND state = 'claimed'`, *current.BlobKey); err != nil {
+			object_version = NULL, state_changed_at = $2 WHERE blob_key = $1 AND state = 'claimed'`, *current.BlobKey, now); err != nil {
 			return MutationOutcome{}, err
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE blob_ledger SET state = 'claimed', collection_id = $2,
-		object_id = $3, object_version = $4, state_changed_at = now() WHERE blob_key = $1`, blobKey, collectionID, objectID, version); err != nil {
+		object_id = $3, object_version = $4, state_changed_at = $5 WHERE blob_key = $1`, blobKey, collectionID, objectID, version, now); err != nil {
 		return MutationOutcome{}, err
 	}
 	response := MutationResponse{Object: o, CollectionVersion: collectionVersion}
 	if err := saveResult(ctx, tx, userID, mutationID, intent, 200, response, nil); err != nil {
 		return MutationOutcome{}, err
 	}
-	if err := events.Publish(ctx, tx, userID, collectionID, collectionVersion); err != nil {
+	if err := publisher.Publish(ctx, tx, userID, collectionID, collectionVersion); err != nil {
 		return MutationOutcome{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -618,7 +621,7 @@ func Update(ctx context.Context, db *sql.DB, userID, collectionID, objectID, mut
 	return MutationOutcome{Code: OK, Response: response}, nil
 }
 
-func finishMutationNotFound(ctx context.Context, tx *sql.Tx, userID, mutationID string, intent mutationIntent) (MutationOutcome, error) {
+func finishMutationNotFound(ctx context.Context, tx *appdb.Tx, userID, mutationID string, intent mutationIntent) (MutationOutcome, error) {
 	if err := saveResult(ctx, tx, userID, mutationID, intent, 404, map[string]string{"error": "not found"}, nil); err != nil {
 		return MutationOutcome{}, err
 	}
@@ -628,7 +631,7 @@ func finishMutationNotFound(ctx context.Context, tx *sql.Tx, userID, mutationID 
 	return MutationOutcome{Code: NotFound}, nil
 }
 
-func Delete(ctx context.Context, db *sql.DB, userID, collectionID, objectID, mutationID string, expectedVersion *int64) (DeleteOutcome, error) {
+func Delete(ctx context.Context, db *appdb.DB, publisher events.Publisher, userID, collectionID, objectID, mutationID string, expectedVersion *int64) (DeleteOutcome, error) {
 	intent := mutationIntent{Kind: "delete", CollectionID: collectionID, ObjectID: &objectID, RequestedVersion: expectedVersion}
 	prepared, err := prepareMutation(ctx, db, userID, mutationID, intent)
 	if err != nil {
@@ -686,7 +689,7 @@ func Delete(ctx context.Context, db *sql.DB, userID, collectionID, objectID, mut
 		return finishDeleteNotFound(ctx, tx, userID, mutationID, intent)
 	}
 	current, err := scanObject(tx.QueryRowContext(ctx, `SELECT `+objectColumns+` FROM objects
-		WHERE id = $1 AND collection_id = $2 AND user_id = $3 FOR UPDATE`, objectID, collectionID, userID))
+		WHERE id = $1 AND collection_id = $2 AND user_id = $3`+tx.Dialect().ForUpdate(), objectID, collectionID, userID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return finishDeleteNotFound(ctx, tx, userID, mutationID, intent)
 	}
@@ -734,9 +737,10 @@ func Delete(ctx context.Context, db *sql.DB, userID, collectionID, objectID, mut
 	newVersion := currentVersion + 1
 	var deleted DeletedObject
 	var version, changeSeq int64
+	now := appdb.Timestamp(time.Now())
 	if err := tx.QueryRowContext(ctx, `UPDATE objects SET deleted = true, version = $2,
-		change_seq = $3, updated_at = now() WHERE id = $1 RETURNING id, version, change_seq, deleted`,
-		objectID, newVersion, collectionVersion).Scan(&deleted.ID, &version, &changeSeq, &deleted.Deleted); err != nil {
+		change_seq = $3, updated_at = $4 WHERE id = $1 RETURNING id, version, change_seq, deleted`,
+		objectID, newVersion, collectionVersion, now).Scan(&deleted.ID, &version, &changeSeq, &deleted.Deleted); err != nil {
 		return DeleteOutcome{}, err
 	}
 	deleted.Version, deleted.ChangeSeq = strconv.FormatInt(version, 10), strconv.FormatInt(changeSeq, 10)
@@ -747,7 +751,7 @@ func Delete(ctx context.Context, db *sql.DB, userID, collectionID, objectID, mut
 		// from disk, so the blob can serve as a merge ancestor, and it starts
 		// the same 365-day clock an update's superseded blob gets.
 		if _, err := tx.ExecContext(ctx, `UPDATE blob_ledger SET state = 'retained', object_id = NULL,
-			object_version = NULL, state_changed_at = now() WHERE blob_key = $1 AND state = 'claimed'`, *current.BlobKey); err != nil {
+			object_version = NULL, state_changed_at = $2 WHERE blob_key = $1 AND state = 'claimed'`, *current.BlobKey, now); err != nil {
 			return DeleteOutcome{}, err
 		}
 	}
@@ -755,7 +759,7 @@ func Delete(ctx context.Context, db *sql.DB, userID, collectionID, objectID, mut
 	if err := saveResult(ctx, tx, userID, mutationID, intent, 200, response, nil); err != nil {
 		return DeleteOutcome{}, err
 	}
-	if err := events.Publish(ctx, tx, userID, collectionID, collectionVersion); err != nil {
+	if err := publisher.Publish(ctx, tx, userID, collectionID, collectionVersion); err != nil {
 		return DeleteOutcome{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -764,7 +768,7 @@ func Delete(ctx context.Context, db *sql.DB, userID, collectionID, objectID, mut
 	return DeleteOutcome{Code: OK, Response: response}, nil
 }
 
-func finishDeleteNotFound(ctx context.Context, tx *sql.Tx, userID, mutationID string, intent mutationIntent) (DeleteOutcome, error) {
+func finishDeleteNotFound(ctx context.Context, tx *appdb.Tx, userID, mutationID string, intent mutationIntent) (DeleteOutcome, error) {
 	if err := saveResult(ctx, tx, userID, mutationID, intent, 404, map[string]string{"error": "not found"}, nil); err != nil {
 		return DeleteOutcome{}, err
 	}
@@ -774,7 +778,7 @@ func finishDeleteNotFound(ctx context.Context, tx *sql.Tx, userID, mutationID st
 	return DeleteOutcome{Code: NotFound}, nil
 }
 
-func RecoverCreate(ctx context.Context, db *sql.DB, userID, collectionID, mutationID string) (MutationOutcome, error) {
+func RecoverCreate(ctx context.Context, db *appdb.DB, userID, collectionID, mutationID string) (MutationOutcome, error) {
 	found, err := Exists(ctx, db, userID, collectionID)
 	if err != nil || !found {
 		return MutationOutcome{Code: NotFound}, err

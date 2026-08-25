@@ -1,7 +1,6 @@
 package main
 
 import (
-	"database/sql"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -12,6 +11,8 @@ import (
 	"unicode/utf8"
 
 	"futo-notes-server/internal/blobs"
+	"futo-notes-server/internal/db"
+	"futo-notes-server/internal/events"
 	"futo-notes-server/internal/objects"
 )
 
@@ -42,7 +43,7 @@ func parsePositive(value string) (int64, bool) {
 	return n, ok && n > 0
 }
 
-func handleListObjects(database *sql.DB) http.HandlerFunc {
+func handleListObjects(database *db.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		since := int64(0)
 		if value := r.URL.Query().Get("sinceVersion"); value != "" {
@@ -90,7 +91,7 @@ func handleListObjects(database *sql.DB) http.HandlerFunc {
 	}
 }
 
-func handleGetObject(database *sql.DB) http.HandlerFunc {
+func handleGetObject(database *db.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		o, err := objects.Get(r.Context(), database, sessionFrom(r).User.ID, r.PathValue("id"), r.PathValue("objectId"))
 		if err != nil {
@@ -105,7 +106,7 @@ func handleGetObject(database *sql.DB) http.HandlerFunc {
 	}
 }
 
-func handleCreateObject(database *sql.DB) http.HandlerFunc {
+func handleCreateObject(database *db.DB, publisher events.Publisher) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		mID, ok := mutationID(r)
 		if !ok {
@@ -129,7 +130,7 @@ func handleCreateObject(database *sql.DB) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "invalid size_bytes")
 			return
 		}
-		outcome, err := objects.Create(r.Context(), database, userID, r.PathValue("id"), mID, *body.BlobKey)
+		outcome, err := objects.Create(r.Context(), database, publisher, userID, r.PathValue("id"), mID, *body.BlobKey)
 		if err != nil {
 			serverError(w, r, "creating object", err)
 			return
@@ -138,7 +139,7 @@ func handleCreateObject(database *sql.DB) http.HandlerFunc {
 	}
 }
 
-func handleUpdateObject(database *sql.DB) http.HandlerFunc {
+func handleUpdateObject(database *db.DB, publisher events.Publisher) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		mID, ok := mutationID(r)
 		if !ok {
@@ -167,7 +168,7 @@ func handleUpdateObject(database *sql.DB) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "invalid size_bytes")
 			return
 		}
-		outcome, err := objects.Update(r.Context(), database, userID, r.PathValue("id"),
+		outcome, err := objects.Update(r.Context(), database, publisher, userID, r.PathValue("id"),
 			r.PathValue("objectId"), mID, *body.BlobKey, *body.Version)
 		if err != nil {
 			serverError(w, r, "updating object", err)
@@ -177,7 +178,7 @@ func handleUpdateObject(database *sql.DB) http.HandlerFunc {
 	}
 }
 
-func handleDeleteObject(database *sql.DB) http.HandlerFunc {
+func handleDeleteObject(database *db.DB, publisher events.Publisher) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		mID, ok := mutationID(r)
 		if !ok {
@@ -193,7 +194,7 @@ func handleDeleteObject(database *sql.DB) http.HandlerFunc {
 			}
 			expected = &version
 		}
-		outcome, err := objects.Delete(r.Context(), database, sessionFrom(r).User.ID,
+		outcome, err := objects.Delete(r.Context(), database, publisher, sessionFrom(r).User.ID,
 			r.PathValue("id"), r.PathValue("objectId"), mID, expected)
 		if err != nil {
 			serverError(w, r, "deleting object", err)
@@ -234,7 +235,7 @@ func readBlobBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
 	return body, true
 }
 
-func handleCreateBlobObject(database *sql.DB, store *blobs.Store) http.HandlerFunc {
+func handleCreateBlobObject(database *db.DB, store *blobs.Store, publisher events.Publisher) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		mID, ok := mutationID(r)
 		if !ok {
@@ -251,7 +252,7 @@ func handleCreateBlobObject(database *sql.DB, store *blobs.Store) http.HandlerFu
 			serverError(w, r, "staging inline create blob", err)
 			return
 		}
-		outcome, err := objects.Create(r.Context(), database, userID, r.PathValue("id"), mID, key)
+		outcome, err := objects.Create(r.Context(), database, publisher, userID, r.PathValue("id"), mID, key)
 		if err != nil {
 			serverError(w, r, "creating inline blob object", err)
 			return
@@ -260,7 +261,7 @@ func handleCreateBlobObject(database *sql.DB, store *blobs.Store) http.HandlerFu
 	}
 }
 
-func handleUpdateBlobObject(database *sql.DB, store *blobs.Store) http.HandlerFunc {
+func handleUpdateBlobObject(database *db.DB, store *blobs.Store, publisher events.Publisher) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		mID, ok := mutationID(r)
 		if !ok {
@@ -282,7 +283,7 @@ func handleUpdateBlobObject(database *sql.DB, store *blobs.Store) http.HandlerFu
 			serverError(w, r, "staging inline update blob", err)
 			return
 		}
-		outcome, err := objects.Update(r.Context(), database, userID, r.PathValue("id"),
+		outcome, err := objects.Update(r.Context(), database, publisher, userID, r.PathValue("id"),
 			r.PathValue("objectId"), mID, key, version)
 		if err != nil {
 			serverError(w, r, "updating inline blob object", err)
@@ -292,7 +293,7 @@ func handleUpdateBlobObject(database *sql.DB, store *blobs.Store) http.HandlerFu
 	}
 }
 
-func handleRecoverCreate(database *sql.DB) http.HandlerFunc {
+func handleRecoverCreate(database *db.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		mID := r.PathValue("mutationId")
 		if !objects.ValidMutationID(mID) {
@@ -408,7 +409,7 @@ func parseBatch(body []byte) ([]batchEntry, string) {
 	return entries, ""
 }
 
-func handleBatchBlobObjects(database *sql.DB, store *blobs.Store) http.HandlerFunc {
+func handleBatchBlobObjects(database *db.DB, store *blobs.Store, publisher events.Publisher) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBatchBytes))
 		if err != nil {
@@ -449,9 +450,9 @@ func handleBatchBlobObjects(database *sql.DB, store *blobs.Store) http.HandlerFu
 			}
 			var outcome objects.MutationOutcome
 			if entry.Operation == 0 {
-				outcome, err = objects.Create(r.Context(), database, userID, collectionID, entry.Identifier, key)
+				outcome, err = objects.Create(r.Context(), database, publisher, userID, collectionID, entry.Identifier, key)
 			} else {
-				outcome, err = objects.Update(r.Context(), database, userID, collectionID, entry.Identifier, "", key, int64(entry.Version))
+				outcome, err = objects.Update(r.Context(), database, publisher, userID, collectionID, entry.Identifier, "", key, int64(entry.Version))
 			}
 			if err != nil {
 				slog.Error("applying batch object mutation", "err", err, "method", r.Method, "path", r.URL.Path)

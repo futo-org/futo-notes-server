@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"futo-notes-server/internal/db"
+
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
@@ -66,7 +68,11 @@ func TestListenerTransactionalDeliveryAndReconnect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Publish(context.Background(), tx, "events-user", "collection-1", 8); err != nil {
+	dialect, err := db.ParseDialect(databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := (PostgresPublisher{}).Publish(context.Background(), db.WrapTx(tx, dialect), "events-user", "collection-1", 8); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Rollback(); err != nil {
@@ -157,10 +163,15 @@ func publishAndCommit(t *testing.T, database *sql.DB, notification Notification)
 		t.Fatal(err)
 	}
 	defer tx.Rollback()
-	if err := Publish(context.Background(), tx, notification.UserID, notification.CollectionID, notification.CurrentVersion); err != nil {
+	dialect, err := db.ParseDialect(os.Getenv("EVENTS_TEST_DATABASE_URL"))
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := tx.Commit(); err != nil {
+	wrapped := db.WrapTx(tx, dialect)
+	if err := (PostgresPublisher{}).Publish(context.Background(), wrapped, notification.UserID, notification.CollectionID, notification.CurrentVersion); err != nil {
+		t.Fatal(err)
+	}
+	if err := wrapped.Commit(); err != nil {
 		t.Fatal(err)
 	}
 }

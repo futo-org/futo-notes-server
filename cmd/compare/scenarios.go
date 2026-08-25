@@ -3,11 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
+
+	"futo-notes-server/internal/config"
+	appdb "futo-notes-server/internal/db"
 )
 
 const (
@@ -35,6 +37,9 @@ const (
 func (r *runner) run(ctx context.Context, cfg runConfig) error {
 	if err := r.validateScenarios(); err != nil {
 		return err
+	}
+	if r.opts.scenarios["concurrency"] && (!r.opts.engineParity || cfg.authMode != "dev") {
+		return fmt.Errorf("concurrency scenario requires -engine-parity -mode dev")
 	}
 	if r.enabled("capability") {
 		r.scenarioCapability(ctx)
@@ -85,6 +90,9 @@ func (r *runner) run(ctx context.Context, cfg runConfig) error {
 	if r.enabled("collections") {
 		r.scenarioCollectionDelete(ctx)
 	}
+	if r.opts.engineParity && cfg.authMode == "dev" && r.enabled("concurrency") {
+		r.scenarioSQLiteConcurrency(ctx)
+	}
 	return nil
 }
 
@@ -92,6 +100,7 @@ func (r *runner) validateScenarios() error {
 	valid := map[string]bool{
 		"capability": true, "auth": true, "collections": true, "blobs": true,
 		"objects": true, "blob-objects": true, "ownership": true, "sse": true,
+		"concurrency": true,
 	}
 	for name := range r.opts.scenarios {
 		if !valid[name] {
@@ -105,7 +114,7 @@ func (r *runner) needsDataScenarios() bool {
 	if len(r.opts.scenarios) == 0 {
 		return true
 	}
-	for _, name := range []string{"collections", "blobs", "objects", "blob-objects", "ownership", "sse"} {
+	for _, name := range []string{"collections", "blobs", "objects", "blob-objects", "ownership", "sse", "concurrency"} {
 		if r.enabled(name) {
 			return true
 		}
@@ -249,16 +258,20 @@ func (r *runner) scenarioObjects(ctx context.Context) error {
 func (r *runner) seedPullLimitFixtures(ctx context.Context) error {
 	createdAt := time.Now().UTC()
 	for _, fixture := range []struct {
-		target   *target
-		database string
-	}{{r.ts, r.env.dbTS}, {r.goTarget, r.env.dbGo}} {
+		target      *target
+		databaseURL string
+		blobDir     string
+	}{{r.ts, r.env.tsDatabaseURL, r.env.tsBlob}, {r.goTarget, r.env.goDatabaseURL, r.env.goBlob}} {
 		userID, userBound := fixture.target.identities[phUserA]
 		collectionID, collectionBound := fixture.target.identities[phCollectionA]
 		if !userBound || !collectionBound {
 			return fmt.Errorf("%s identities are not bound", fixture.target.name)
 		}
 
-		database, err := sql.Open("pgx", databaseURL(r.opts.adminURL, fixture.database))
+		database, err := appdb.Open(config.Config{
+			DatabaseURL: fixture.databaseURL,
+			BlobDir:     fixture.blobDir,
+		})
 		if err != nil {
 			return fmt.Errorf("opening %s fixture database: %w", fixture.target.name, err)
 		}
@@ -267,13 +280,21 @@ func (r *runner) seedPullLimitFixtures(ctx context.Context) error {
 			database.Close()
 			return fmt.Errorf("beginning %s fixture transaction: %w", fixture.target.name, err)
 		}
-		_, insertErr := tx.ExecContext(ctx, `
-			INSERT INTO objects
+		createdValue := any(createdAt)
+		if database.Dialect().Engine() == appdb.SQLite {
+			createdValue = appdb.Timestamp(createdAt)
+		}
+		var insertErr error
+		for sequence := 2; sequence <= 1001; sequence++ {
+			id := fmt.Sprintf("10000000-0000-0000-0000-%012x", sequence)
+			_, insertErr = tx.ExecContext(ctx, `INSERT INTO objects
 				(id, collection_id, user_id, version, deleted, blob_key, size_bytes, created_at, updated_at, change_seq)
-			SELECT
-				('10000000-0000-0000-0000-' || lpad(to_hex(sequence), 12, '0'))::uuid,
-				$1::uuid, $2::uuid, 1, false, NULL, NULL, $3, $3, sequence
-			FROM generate_series(2, 1001) AS sequence`, collectionID, userID, createdAt)
+				VALUES ($1, $2, $3, 1, false, NULL, NULL, $4, $4, $5)`,
+				id, collectionID, userID, createdValue, sequence)
+			if insertErr != nil {
+				break
+			}
+		}
 		if insertErr == nil {
 			_, insertErr = tx.ExecContext(ctx,
 				`UPDATE collections SET current_version = 1001 WHERE id = $1 AND user_id = $2`,
@@ -402,7 +423,7 @@ func (r *runner) scenarioSSE(ctx context.Context) {
 	tsCollector, tsErr := openSSE(ctx, r.ts, phTokenA)
 	goCollector, goErr := openSSE(ctx, r.goTarget, phTokenA)
 	if tsErr != nil || goErr != nil {
-		r.diverge(r.name+"/sse/connect", fmt.Sprintf("ts=%v go=%v", tsErr, goErr))
+		r.diverge(r.name+"/sse/connect", fmt.Sprintf("%s=%v %s=%v", r.ts.name, tsErr, r.goTarget.name, goErr))
 		return
 	}
 	defer tsCollector.close()
@@ -419,7 +440,7 @@ func (r *runner) scenarioSSE(ctx context.Context) {
 	label := r.name + "/sse/coalesced checkpoint"
 	r.result.Steps++
 	if tsErr != nil || goErr != nil || !mapsEqual(tsState, goState) {
-		r.diverge(label, fmt.Sprintf("ts=%v err=%v go=%v err=%v", tsState, tsErr, goState, goErr))
+		r.diverge(label, fmt.Sprintf("%s=%v err=%v %s=%v err=%v", r.ts.name, tsState, tsErr, r.goTarget.name, goState, goErr))
 	} else {
 		r.result.Matched++
 		fmt.Printf("PASS  %s\n", label)
@@ -473,7 +494,7 @@ func jsonRequestFrames(path string, keys []string, authToken string) requestSpec
 
 func (r *runner) expectBytes(name string, pair responsePair, expected []byte) {
 	if !bytes.Equal(pair.TS.Body, expected) || !bytes.Equal(pair.Go.Body, expected) {
-		r.diverge(r.name+"/"+name, fmt.Sprintf("expected %d bytes; ts=%s go=%s", len(expected), preview(pair.TS.Body), preview(pair.Go.Body)))
+		r.diverge(r.name+"/"+name, fmt.Sprintf("expected %d bytes; %s=%s %s=%s", len(expected), r.ts.name, preview(pair.TS.Body), r.goTarget.name, preview(pair.Go.Body)))
 	}
 }
 

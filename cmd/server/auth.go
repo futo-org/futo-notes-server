@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -12,6 +11,7 @@ import (
 
 	"futo-notes-server/internal/auth"
 	"futo-notes-server/internal/config"
+	"futo-notes-server/internal/db"
 )
 
 type sessionCtxKey struct{}
@@ -35,7 +35,7 @@ func bearerToken(header string) string {
 
 // requireAuth guards every /api/* route except the login path for the active
 // auth mode. The session cookie is checked before the Authorization header.
-func requireAuth(cfg config.Config, database *sql.DB, next http.Handler) http.Handler {
+func requireAuth(cfg config.Config, database *db.DB, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if cfg.AuthMode == "password" && r.URL.Path == "/api/auth/password/login" {
 			next.ServeHTTP(w, r)
@@ -102,7 +102,7 @@ func decodeDevLogin(r *http.Request) (devLoginRequest, string) {
 	return body, ""
 }
 
-func handleDevLogin(cfg config.Config, database *sql.DB) http.HandlerFunc {
+func handleDevLogin(cfg config.Config, database *db.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		body, validationError := decodeDevLogin(r)
 		if validationError != "" {
@@ -157,7 +157,7 @@ func handleCurrentUser(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"user": sessionFrom(r).User})
 }
 
-func handlePasswordLogin(cfg config.Config, database *sql.DB) http.HandlerFunc {
+func handlePasswordLogin(cfg config.Config, database *db.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Password string `json:"password"`
@@ -217,7 +217,7 @@ func handlePasswordLogin(cfg config.Config, database *sql.DB) http.HandlerFunc {
 	}
 }
 
-func handleLogout(database *sql.DB) http.HandlerFunc {
+func handleLogout(database *db.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if err := auth.DeleteSession(r.Context(), database, sessionFrom(r).ID); err != nil {
 			serverError(w, r, "logout: deleting session", err)

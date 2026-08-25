@@ -8,7 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 	"uuid"
+
+	"futo-notes-server/internal/db"
 )
 
 // Store writes blobs under Dir using the storage key as a relative path,
@@ -30,11 +33,11 @@ func (s *Store) Put(key string, data []byte) error {
 // staged, and writes the bytes. The ledger row goes first: if the file write
 // fails, the row is a staged entry with no bytes behind it, and garbage
 // collection removes it after 24 hours.
-func Stage(ctx context.Context, database *sql.DB, store *Store, userID string, data []byte) (string, error) {
+func Stage(ctx context.Context, database *db.DB, store *Store, userID string, data []byte) (string, error) {
 	key := userID + "/" + uuid.NewV7().String()
 	if _, err := database.ExecContext(ctx,
-		`INSERT INTO blob_ledger (blob_key, user_id, size_bytes, state)
-		 VALUES ($1, $2, $3, 'staged')`, key, userID, len(data)); err != nil {
+		`INSERT INTO blob_ledger (blob_key, user_id, size_bytes, state, created_at, state_changed_at)
+		 VALUES ($1, $2, $3, 'staged', $4, $4)`, key, userID, len(data), db.Timestamp(time.Now())); err != nil {
 		return "", err
 	}
 	if err := store.Put(key, data); err != nil {
@@ -66,7 +69,7 @@ func (s *Store) Remove(key string) error {
 //
 // The row goes first. If the file removal then fails, storage reconciliation
 // re-adopts the file as staged and garbage collection purges it later.
-func Delete(ctx context.Context, database *sql.DB, store *Store, userID, key string) (bool, error) {
+func Delete(ctx context.Context, database *db.DB, store *Store, userID, key string) (bool, error) {
 	if !strings.HasPrefix(key, userID+"/") {
 		return false, nil
 	}
@@ -82,7 +85,7 @@ func Delete(ctx context.Context, database *sql.DB, store *Store, userID, key str
 	// delete rather than read as absent.
 	var state string
 	err = tx.QueryRowContext(ctx,
-		`SELECT state FROM blob_ledger WHERE blob_key = $1 FOR UPDATE`, key).Scan(&state)
+		`SELECT state FROM blob_ledger WHERE blob_key = $1`+database.Dialect().ForUpdate(), key).Scan(&state)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 	case err != nil:

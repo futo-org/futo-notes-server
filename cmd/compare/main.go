@@ -1,5 +1,6 @@
-// Command compare drives the same client-visible requests against the legacy
-// TypeScript server and the Go rewrite, then reports every wire divergence.
+// Command compare drives the same client-visible requests either against the
+// legacy TypeScript server and Go rewrite or against Go on Postgres and SQLite,
+// then reports every wire divergence.
 package main
 
 import (
@@ -12,21 +13,23 @@ import (
 )
 
 type options struct {
-	mode       string
-	scenarios  map[string]bool
-	keep       bool
-	large      bool
-	tsRepo     string
-	adminURL   string
-	goPort     int
-	tsPort     int
-	healthWait time.Duration
+	mode         string
+	scenarios    map[string]bool
+	engineParity bool
+	keep         bool
+	large        bool
+	tsRepo       string
+	adminURL     string
+	goPort       int
+	tsPort       int
+	healthWait   time.Duration
 }
 
 func main() {
 	var scenarioList string
 	opts := options{}
 	flag.StringVar(&opts.mode, "mode", "all", "auth mode to compare: dev, password, or all")
+	flag.BoolVar(&opts.engineParity, "engine-parity", false, "compare Go on Postgres with Go on SQLite")
 	flag.StringVar(&scenarioList, "scenario", "", "comma-separated scenario names (default: all)")
 	flag.BoolVar(&opts.keep, "keep", false, "keep scratch databases and blob directories")
 	flag.BoolVar(&opts.large, "large", true, "run the 100 MiB and batch-cap boundary checks")

@@ -38,13 +38,17 @@ data_dir="$scratch/data"
 overlay="$scratch/compose.overlay.yml"
 env_file="$scratch/rehearsal.env"
 response_file="$scratch/response"
-base_compose="$repo_root/docker-compose.production.yml"
+base_compose="$repo_root/docker-compose.postgres.yml"
 project_started=false
 current_container=
 RESPONSE=
 
 compose() {
-  docker compose -p "$project" -f "$base_compose" -f "$overlay" --env-file "$env_file" "$@"
+  local args=(-p "$project" -f "$base_compose")
+  if [[ -n "$overlay" ]]; then
+    args+=(-f "$overlay")
+  fi
+  docker compose "${args[@]}" --env-file "$env_file" "$@"
 }
 
 cleanup() {
@@ -223,7 +227,7 @@ fi
 
 mkdir -p "$data_dir/blobs" "$data_dir/postgres"
 
-# The only divergence from the shipped docker-compose.production.yml. A hoster
+# The only divergence from the preserved docker-compose.postgres.yml. A hoster
 # upgrading in place still has the TypeScript-era Compose file on disk, and that
 # one sets LOG_LEVEL — a variable the Go server deliberately drops. Layering it
 # here rehearses the real upgrade and lets us assert the boot warning.
@@ -397,4 +401,55 @@ assert_eq "TypeScript still accepts writes after rollback" \
 assert_blob "post-rollback blob bytes round-trip" "$ts_token" "$rollback_key" "$rollback_bytes"
 
 echo
-echo "compose rehearsal passed: TypeScript -> Go -> TypeScript in project $project"
+echo "== phase 7: tear down the upgrade project and boot a shipped SQLite new install =="
+compose down -v --remove-orphans --timeout 20 >/dev/null
+project_started=false
+project="${project}-sqlite"
+base_compose="$repo_root/docker-compose.production.yml"
+overlay=
+env_file="$scratch/sqlite.env"
+data_dir="$scratch/sqlite-data"
+current_container=
+mkdir -p "$data_dir"
+cat >"$env_file" <<ENV
+FUTO_NOTES_PASSWORD=$password
+FUTO_NOTES_IMAGE=$go_image
+FUTO_NOTES_PORT=$port
+FUTO_NOTES_DATA_DIR=$data_dir
+ENV
+
+project_started=true
+bring_up_server "SQLite new install"
+assert_eq "new install image selects SQLite" \
+  "$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$current_container" | grep '^DATABASE_URL=' | cut -d= -f2-)" \
+  sqlite:/data/db/notes.db
+
+json_request POST /api/auth/password/login 200 '' "{\"password\":\"$password\"}"
+sqlite_token=$(jq -er '.token' <<<"$RESPONSE")
+json_request POST /api/collections 201 "$sqlite_token"
+sqlite_collection=$(jq -er '.collection.id' <<<"$RESPONSE")
+sqlite_bytes='sqlite new-install bytes'
+upload_blob "$sqlite_token" "$sqlite_bytes"
+sqlite_key=$(jq -er '.key' <<<"$RESPONSE")
+json_request POST "/api/collections/$sqlite_collection/objects" 201 "$sqlite_token" \
+  "{\"blob_key\":\"$sqlite_key\",\"size_bytes\":${#sqlite_bytes}}" compose-sqlite-create
+sqlite_object=$(jq -er '.object.id' <<<"$RESPONSE")
+
+assert_eq "SQLite database landed in the mounted /data volume" \
+  "$([[ -s "$data_dir/db/notes.db" ]] && echo yes || echo no)" yes
+assert_eq "SQLite blob landed in the mounted /data volume" \
+  "$([[ -f "$data_dir/blobs/$sqlite_key" ]] && echo yes || echo no)" yes
+assert_eq "SQLite database file is owned by uid 1000" \
+  "$(stat -c '%u' "$data_dir/db/notes.db")" 1000
+
+compose restart --timeout 20 server >/dev/null
+compose up -d --wait --wait-timeout "$wait_timeout" >/dev/null
+current_container=$(compose ps -q server)
+assert_health "SQLite restart"
+json_request GET /api/auth 200 "$sqlite_token"
+json_request GET "/api/collections/$sqlite_collection/objects/$sqlite_object" 200 "$sqlite_token"
+assert_eq "SQLite metadata survives restart" "$(jq -er '.object.id' <<<"$RESPONSE")" "$sqlite_object"
+assert_blob "SQLite blob survives restart" "$sqlite_token" "$sqlite_key" "$sqlite_bytes"
+
+echo
+echo "compose rehearsal passed: TypeScript -> Go -> TypeScript plus SQLite new install"

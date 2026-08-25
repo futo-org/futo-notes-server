@@ -42,6 +42,7 @@
   }
   #session-pill.in { color: var(--ok); border-color: var(--ok); }
   #session-pill.out { color: var(--muted); }
+  #database-pill { color: var(--muted); margin-left: auto; }
   main {
     max-width: 760px;
     margin: 0 auto;
@@ -118,6 +119,7 @@
 <header>
   <h1>futo-notes dev</h1>
   <span id="session-pill">checking…</span>
+  <span id="database-pill">{{DATABASE_INFO}}</span>
 </header>
 <main id="cards"></main>
 

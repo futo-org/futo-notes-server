@@ -29,15 +29,17 @@ type runConfig struct {
 }
 
 type environment struct {
-	tmpDir   string
-	db       *sql.DB
-	dbTS     string
-	dbGo     string
-	tsBlob   string
-	goBlob   string
-	goBinary string
-	ts       *managedProcess
-	goSrv    *managedProcess
+	tmpDir        string
+	db            *sql.DB
+	dbTS          string
+	dbGo          string
+	tsDatabaseURL string
+	goDatabaseURL string
+	tsBlob        string
+	goBlob        string
+	goBinary      string
+	ts            *managedProcess
+	goSrv         *managedProcess
 }
 
 type managedProcess struct {
@@ -72,19 +74,21 @@ func runComparison(ctx context.Context, opts options, cfg runConfig) (result run
 
 func startEnvironment(ctx context.Context, opts options, cfg runConfig) (*environment, error) {
 	if err := requireFreePort(opts.goPort); err != nil {
-		return nil, fmt.Errorf("Go port: %w", err)
+		return nil, fmt.Errorf("candidate port: %w", err)
 	}
 	if err := requireFreePort(opts.tsPort); err != nil {
-		return nil, fmt.Errorf("TypeScript port: %w", err)
+		return nil, fmt.Errorf("reference port: %w", err)
 	}
-	if _, err := exec.LookPath("bun"); err != nil {
-		return nil, fmt.Errorf("bun is required: %w", err)
-	}
-	if info, err := os.Stat(opts.tsRepo); err != nil || !info.IsDir() {
-		return nil, fmt.Errorf("TypeScript repo %q is unavailable", opts.tsRepo)
-	}
-	if err := warnTSDrift(ctx, opts.tsRepo); err != nil {
-		fmt.Printf("warning: unable to check TypeScript source drift: %v\n", err)
+	if !opts.engineParity {
+		if _, err := exec.LookPath("bun"); err != nil {
+			return nil, fmt.Errorf("bun is required: %w", err)
+		}
+		if info, err := os.Stat(opts.tsRepo); err != nil || !info.IsDir() {
+			return nil, fmt.Errorf("TypeScript repo %q is unavailable", opts.tsRepo)
+		}
+		if err := warnTSDrift(ctx, opts.tsRepo); err != nil {
+			fmt.Printf("warning: unable to check TypeScript source drift: %v\n", err)
+		}
 	}
 
 	tmpDir, err := os.MkdirTemp("", "futo-notes-compare-")
@@ -106,9 +110,18 @@ func startEnvironment(ctx context.Context, opts options, cfg runConfig) (*enviro
 	}
 	runID := strconv.FormatInt(time.Now().UnixNano(), 36)
 	modeName := strings.ReplaceAll(cfg.name, "/", "_")
-	env.dbTS = "futo_notes_cmp_ts_" + modeName + "_" + runID
-	env.dbGo = "futo_notes_cmp_go_" + modeName + "_" + runID
+	referenceName, candidateName := "ts", "go"
+	if opts.engineParity {
+		referenceName, candidateName = "postgres", "sqlite"
+	}
+	env.dbTS = "futo_notes_cmp_" + referenceName + "_" + modeName + "_" + runID
+	if !opts.engineParity {
+		env.dbGo = "futo_notes_cmp_" + candidateName + "_" + modeName + "_" + runID
+	}
 	for _, name := range []string{env.dbTS, env.dbGo} {
+		if name == "" {
+			continue
+		}
 		if err := createDatabase(ctx, env.db, name); err != nil {
 			return fail(err)
 		}
@@ -135,19 +148,32 @@ func startEnvironment(ctx context.Context, opts options, cfg runConfig) (*enviro
 		"FUTO_NOTES_PASSWORD_HASH": cfg.passwordHash,
 	}
 	tsEnv := cloneMap(common)
-	tsEnv["DATABASE_URL"] = databaseURL(opts.adminURL, env.dbTS)
+	env.tsDatabaseURL = databaseURL(opts.adminURL, env.dbTS)
+	tsEnv["DATABASE_URL"] = env.tsDatabaseURL
 	tsEnv["PORT"] = strconv.Itoa(opts.tsPort)
 	tsEnv["BLOB_DIR"] = env.tsBlob
 	goEnv := cloneMap(common)
-	goEnv["DATABASE_URL"] = databaseURL(opts.adminURL, env.dbGo)
+	if opts.engineParity {
+		env.goDatabaseURL = "sqlite:" + filepath.Join(tmpDir, "notes.db")
+	} else {
+		env.goDatabaseURL = databaseURL(opts.adminURL, env.dbGo)
+	}
+	goEnv["DATABASE_URL"] = env.goDatabaseURL
 	goEnv["PORT"] = strconv.Itoa(opts.goPort)
 	goEnv["BLOB_DIR"] = env.goBlob
+	if opts.engineParity {
+		goEnv["DEV_UI"] = "true"
+	}
 
-	env.ts, err = startProcess("ts", opts.tsRepo, filepath.Join(tmpDir, "ts.log"), tsEnv, "bun", "src/index.ts")
+	if opts.engineParity {
+		env.ts, err = startProcess("postgres", ".", filepath.Join(tmpDir, "postgres.log"), tsEnv, env.goBinary)
+	} else {
+		env.ts, err = startProcess("ts", opts.tsRepo, filepath.Join(tmpDir, "ts.log"), tsEnv, "bun", "src/index.ts")
+	}
 	if err != nil {
 		return fail(err)
 	}
-	env.goSrv, err = startProcess("go", ".", filepath.Join(tmpDir, "go.log"), goEnv, env.goBinary)
+	env.goSrv, err = startProcess(candidateName, ".", filepath.Join(tmpDir, candidateName+".log"), goEnv, env.goBinary)
 	if err != nil {
 		return fail(err)
 	}

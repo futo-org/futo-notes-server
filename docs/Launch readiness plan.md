@@ -36,7 +36,7 @@ Implementation update on 2026-08-24:
 
 - The container-level swap is now covered by `scripts/compose-rehearsal.sh`. It
   builds both images, brings the TypeScript one up in a throwaway Compose project
-  on `docker-compose.production.yml`, seeds real traffic, then swaps by
+  on the preserved `docker-compose.postgres.yml`, seeds real traffic, then swaps by
   re-tagging the single image tag the Compose file names and running
   `docker compose up -d --wait` again — no Compose or `.env` edit between phases,
   which is the closest local stand-in for `docker compose pull && up -d`. It
@@ -68,6 +68,38 @@ The wire-parity gate from the migration plan passes today:
 - `docker buildx build --platform linux/amd64,linux/arm64 ...` — both image
   architectures build successfully; the cross-platform release script also
   produces Linux, macOS, and Windows binaries plus checksums.
+
+SQLite-default launch gates added on 2026-08-25:
+
+- `go run ./cmd/compare -engine-parity -mode dev` runs the complete frame
+  comparison with the Go server on Postgres as the reference and the Go server
+  on SQLite as the candidate. Its final scenario hammers one SQLite file with
+  parallel mutations, live SSE subscribers, reconciliation, and blob GC; every
+  client-visible operation must succeed and no lock error may surface.
+- `MIGRATION_TEST_DATABASE_URL=... go test ./...` populates Postgres, runs the
+  built-in Postgres-to-SQLite converter, and verifies the migrated application
+  state and the converter's integrity checks. CI gives it a dedicated database.
+- `./scripts/sqlite-migration-rehearsal.sh` populates a Go/Postgres server with
+  API and Rust-client traffic, converts it while stopped, then proves on SQLite
+  that the old session and notes survive, staged blobs still claim, edits and
+  Rust sync still work, all maintenance jobs run, and the Postgres source stays
+  unchanged.
+- `./scripts/rust-acceptance.sh go sqlite` drives the native Rust sync suite
+  against a fresh SQLite-backed Go server, alongside the existing TypeScript and
+  Go-on-Postgres legs.
+- `./scripts/compose-rehearsal.sh` retains its TypeScript→Go→TypeScript Postgres
+  cutover and then boots the shipped production Compose file as a fresh SQLite
+  install, writes data, restarts it, and verifies metadata and blob persistence.
+- The staging soak remains two manifest-managed instances. The soak checker is
+  given `FUTO_SOAK_ENGINES='postgres sqlite'` and verifies each container's
+  actual `DATABASE_URL` engine before accepting its health and soak evidence.
+
+Local verification on 2026-08-25: the engine comparison passed 66/66 checks;
+the race-enabled Go suite passed with all six Postgres test databases including
+the converter; Rust acceptance passed 30/30 on TypeScript/Postgres,
+Go/Postgres, and Go/SQLite; the migration rehearsal passed; both historical
+adoption variants passed; and the Compose rehearsal passed through the new
+SQLite install's restart-persistence checks.
 
 Also verified: `internal/db/migrate.go` is built for heterogeneous adoption — it
 applies only pending migrations, refuses on history gaps, and refuses when the
@@ -158,14 +190,14 @@ The self-hoster deliverables:
 
 ## Step 5 — Ship
 
-Re-run the full gate set on the release commit (`go test`, `cmd/compare -mode all`,
-both `rust-acceptance.sh` targets, the Step 2 rehearsal), tag, publish image +
-binary + guide.
+Re-run the full gate set on the release commit: `go test`,
+`cmd/compare -mode all`, `cmd/compare -engine-parity -mode dev`,
+`rust-acceptance.sh ts`, `rust-acceptance.sh go`,
+`rust-acceptance.sh go sqlite`, `sqlite-migration-rehearsal.sh`, the Step 2
+adoption rehearsal, and the Compose rehearsal. Then tag and publish the image,
+binary, and guides.
 
 ## Optional (explicit non-gates)
 
-- **Concurrency soak**: the harness is serial and the Rust suite runs
-  `--test-threads=1`; the write path's `FOR UPDATE` + advisory locks deserve one
-  short two-client hammering. Cheap.
 - **Performance sanity check**: not a gate, but performance motivated the rewrite.
 - **Fuzz / fault injection**: documented follow-up, not needed for the swap.

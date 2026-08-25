@@ -2,16 +2,25 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 <ts|go>" >&2
+  echo "usage: $0 <ts|go> [postgres|sqlite]" >&2
   exit 2
 }
 
 target=${1:-}
+engine=${2:-postgres}
 case "$target" in
   ts|go) ;;
   *) usage ;;
 esac
-[[ $# -eq 1 ]] || usage
+case "$engine" in
+  postgres|sqlite) ;;
+  *) usage ;;
+esac
+if [[ "$target" == ts && "$engine" != postgres ]]; then
+  echo "the TypeScript server only supports postgres in this rehearsal" >&2
+  exit 2
+fi
+[[ $# -ge 1 && $# -le 2 ]] || usage
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 ts_repo=${FUTO_TS_SERVER_REPO:-/home/justin/Developer/futo-notes-server}
@@ -21,7 +30,7 @@ postgres_host=${FUTO_POSTGRES_HOST:-localhost}
 postgres_port=${FUTO_POSTGRES_PORT:-5433}
 postgres_password=${FUTO_POSTGRES_PASSWORD:-futo_notes}
 run_id="$(date +%s)_$$"
-database="futo_notes_rust_accept_${target}_${run_id}"
+database="futo_notes_rust_accept_${target}_${engine}_${run_id}"
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/futo-notes-rust-accept.XXXXXX")
 blob_dir="$scratch/blobs"
 server_log="$scratch/server.log"
@@ -50,9 +59,11 @@ cleanup() {
     kill -KILL "$server_pid" 2>/dev/null || true
     wait "$server_pid" 2>/dev/null || true
   fi
-  admin_psql \
-    -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$database' AND pid <> pg_backend_pid()" \
-    -c "DROP DATABASE IF EXISTS \"$database\"" >/dev/null || true
+  if [[ "$engine" == postgres ]]; then
+    admin_psql \
+      -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$database' AND pid <> pg_backend_pid()" \
+      -c "DROP DATABASE IF EXISTS \"$database\"" >/dev/null || true
+  fi
   if [[ $status -ne 0 ]]; then
     echo "server log ($server_log):" >&2
     tail -100 "$server_log" >&2 || true
@@ -62,15 +73,37 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+required_commands=(cargo curl)
+if [[ "$target" == go ]]; then
+  required_commands+=(go)
+else
+  required_commands+=(bun)
+fi
+if [[ "$engine" == postgres ]]; then
+  if [[ "$postgres_container" == direct ]]; then
+    required_commands+=(psql)
+  else
+    required_commands+=(docker)
+  fi
+fi
+for command in "${required_commands[@]}"; do
+  if ! command -v "$command" >/dev/null; then
+    echo "required command not found: $command" >&2
+    exit 1
+  fi
+done
+
 if curl --silent --fail --max-time 1 http://127.0.0.1:3055/health >/dev/null 2>&1; then
   echo "port 3055 is already serving a healthy process; stop it before running acceptance" >&2
   exit 1
 fi
 
-admin_psql \
-  -c "CREATE DATABASE \"$database\"" >/dev/null
-
-database_url="postgres://futo_notes:$postgres_password@$postgres_host:$postgres_port/$database"
+if [[ "$engine" == postgres ]]; then
+  admin_psql -c "CREATE DATABASE \"$database\"" >/dev/null
+  database_url="postgres://futo_notes:$postgres_password@$postgres_host:$postgres_port/$database"
+else
+  database_url="sqlite:$scratch/notes.db"
+fi
 if [[ "$target" == go ]]; then
   (cd "$repo_root" && GOTOOLCHAIN=auto go build -o "$scratch/server" ./cmd/server)
   (
@@ -104,7 +137,7 @@ if [[ "$healthy" != true ]]; then
   exit 1
 fi
 
-echo "running Rust acceptance suite against $target server"
+echo "running Rust acceptance suite against $target server on $engine"
 (
   cd "$client_repo"
   FUTO_TEST_SERVER=http://127.0.0.1:3055 \

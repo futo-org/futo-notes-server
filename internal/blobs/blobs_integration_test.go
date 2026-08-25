@@ -19,10 +19,15 @@ func TestBlobDeleteLifecycle(t *testing.T) {
 	if databaseURL == "" {
 		t.Skip("BLOBS_TEST_DATABASE_URL is not set")
 	}
-	database, err := sql.Open("pgx", databaseURL)
+	rawDatabase, err := sql.Open("pgx", databaseURL)
 	if err != nil {
 		t.Fatal(err)
 	}
+	dialect, err := databasepkg.ParseDialect(databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	database := databasepkg.Wrap(rawDatabase, dialect)
 	defer database.Close()
 	ctx := context.Background()
 	if _, err := databasepkg.Migrate(ctx, database); err != nil {

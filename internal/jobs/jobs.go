@@ -11,8 +11,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"futo-notes-server/internal/blobs"
+	appdb "futo-notes-server/internal/db"
 )
 
 const reconciliationLimit = 500
@@ -22,8 +24,10 @@ type SessionReapResult struct {
 	Reaped int64 `json:"reaped"`
 }
 
-func ReapSessions(ctx context.Context, database *sql.DB) (SessionReapResult, error) {
-	result, err := database.ExecContext(ctx, `DELETE FROM sessions WHERE expires_at < now()`)
+var clock = time.Now
+
+func ReapSessions(ctx context.Context, database *appdb.DB) (SessionReapResult, error) {
+	result, err := database.ExecContext(ctx, `DELETE FROM sessions WHERE expires_at < $1`, appdb.Timestamp(clock()))
 	if err != nil {
 		return SessionReapResult{}, err
 	}
@@ -41,7 +45,7 @@ var errReconciliationCap = errors.New("storage reconciliation cap reached")
 
 // ReconcileStorage adopts files that have no authoritative blob_ledger row.
 // A missing storage directory is equivalent to an empty one on a fresh server.
-func ReconcileStorage(ctx context.Context, database *sql.DB, store *blobs.Store) (ReconciliationResult, error) {
+func ReconcileStorage(ctx context.Context, database *appdb.DB, store *blobs.Store) (ReconciliationResult, error) {
 	var result ReconciliationResult
 	err := filepath.WalkDir(store.Dir, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -73,31 +77,40 @@ func ReconcileStorage(ctx context.Context, database *sql.DB, store *blobs.Store)
 			return nil
 		}
 
-		// The CTE distinguishes a missing owner from an existing ledger row in
-		// one statement. It also closes the race between checking the user and
-		// inserting the FK-backed row.
-		var ownerExists, inserted bool
-		err = database.QueryRowContext(ctx, `
-			WITH owner AS (
-				SELECT id FROM users WHERE id = $2
-			), inserted AS (
-				INSERT INTO blob_ledger (blob_key, user_id, size_bytes, state)
-				SELECT $1, id, $3, 'staged' FROM owner
-				ON CONFLICT (blob_key) DO NOTHING
-				RETURNING 1
-			)
-			SELECT EXISTS (SELECT 1 FROM owner), EXISTS (SELECT 1 FROM inserted)`,
-			key, owner, info.Size()).Scan(&ownerExists, &inserted)
+		tx, err := database.BeginTx(ctx, nil)
 		if err != nil {
 			return err
 		}
+		defer tx.Rollback()
+		var ownerExists bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM users WHERE id = $1)`, owner).Scan(&ownerExists); err != nil {
+			return err
+		}
 		if !ownerExists {
+			if err := tx.Commit(); err != nil {
+				return err
+			}
 			result.Skipped++
 			slog.Info("storage reconciliation: skipping file", "key", key, "reason", "owner does not exist")
 			return nil
 		}
-		if !inserted {
+		var inserted int
+		now := appdb.Timestamp(clock())
+		err = tx.QueryRowContext(ctx, `INSERT INTO blob_ledger
+			(blob_key, user_id, size_bytes, state, created_at, state_changed_at)
+			VALUES ($1, $2, $3, 'staged', $4, $4)
+			ON CONFLICT (blob_key) DO NOTHING RETURNING 1`, key, owner, info.Size(), now).Scan(&inserted)
+		if errors.Is(err, sql.ErrNoRows) {
+			if err := tx.Commit(); err != nil {
+				return err
+			}
 			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
 		}
 		result.Adopted++
 		if result.Adopted == reconciliationLimit {
@@ -122,12 +135,13 @@ type MutationExpiryResult struct {
 	OtherExpired   int64 `json:"other_expired"`
 }
 
-func ExpireMutationResults(ctx context.Context, database *sql.DB) (MutationExpiryResult, error) {
+func ExpireMutationResults(ctx context.Context, database *appdb.DB) (MutationExpiryResult, error) {
 	var result MutationExpiryResult
+	now := clock().UTC()
 	pending, err := database.ExecContext(ctx, `
 		DELETE FROM mutation_results
-		WHERE created_at < now() - interval '24 hours'
-		  AND result->>'status' IN ('102', 'pending')`)
+		WHERE created_at < $1
+		  AND result->>'status' IN ('102', 'pending')`, appdb.Timestamp(now.Add(-24*time.Hour)))
 	if err != nil {
 		return result, err
 	}
@@ -139,16 +153,16 @@ func ExpireMutationResults(ctx context.Context, database *sql.DB) (MutationExpir
 	// internal/objects/objects.go. Ambiguous legacy creates are retained.
 	other, err := database.ExecContext(ctx, `
 		DELETE FROM mutation_results
-		WHERE created_at < now() - interval '30 days'
+		WHERE created_at < $1
 		  AND (result->>'status' IS NULL
 		       OR result->>'status' NOT IN ('102', 'pending'))
 		  AND NOT (kind = 'create' AND (
-			(result->>'status' IS NOT NULL AND result->>'status' ~ '^2')
+			(result->>'status' IS NOT NULL AND result->>'status' LIKE '2%')
 			OR (result->>'status' IS NULL
 				AND (result->>'error' IS NULL OR result->>'error' NOT IN
 					('not found', 'version conflict', 'blob is not staged',
 					 'Mutation-Id reused for different intent')))
-		  ))`)
+		  ))`, appdb.Timestamp(now.Add(-30*24*time.Hour)))
 	if err != nil {
 		return result, err
 	}
@@ -163,7 +177,7 @@ type BlobGCResult struct {
 
 // GarbageCollectBlobs deletes the authoritative row before its file. If the
 // file deletion fails, reconciliation will adopt it again for a later pass.
-func GarbageCollectBlobs(ctx context.Context, database *sql.DB, store *blobs.Store) (BlobGCResult, error) {
+func GarbageCollectBlobs(ctx context.Context, database *appdb.DB, store *blobs.Store) (BlobGCResult, error) {
 	var result BlobGCResult
 	var removalErrors []error
 
@@ -211,14 +225,15 @@ func GarbageCollectBlobs(ctx context.Context, database *sql.DB, store *blobs.Sto
 	}
 }
 
-func eligibleBlobKeys(ctx context.Context, database *sql.DB) ([]string, error) {
+func eligibleBlobKeys(ctx context.Context, database *appdb.DB) ([]string, error) {
+	now := clock().UTC()
 	rows, err := database.QueryContext(ctx, `
 		SELECT blob_key FROM blob_ledger
-		WHERE (state = 'staged' AND state_changed_at < now() - interval '24 hours')
-		   OR (state = 'retained' AND state_changed_at < now() - interval '365 days')
+		WHERE (state = 'staged' AND state_changed_at < $2)
+		   OR (state = 'retained' AND state_changed_at < $3)
 		   OR state = 'purgeable'
 		ORDER BY blob_key
-		LIMIT $1`, garbageCollectionBatchSize)
+		LIMIT $1`, garbageCollectionBatchSize, appdb.Timestamp(now.Add(-24*time.Hour)), appdb.Timestamp(now.Add(-365*24*time.Hour)))
 	if err != nil {
 		return nil, err
 	}
@@ -235,7 +250,7 @@ func eligibleBlobKeys(ctx context.Context, database *sql.DB) ([]string, error) {
 	return keys, rows.Err()
 }
 
-func purgeBlobRow(ctx context.Context, database *sql.DB, key string) (bool, error) {
+func purgeBlobRow(ctx context.Context, database *appdb.DB, key string) (bool, error) {
 	tx, err := database.BeginTx(ctx, nil)
 	if err != nil {
 		return false, err
@@ -243,14 +258,15 @@ func purgeBlobRow(ctx context.Context, database *sql.DB, key string) (bool, erro
 	defer tx.Rollback()
 
 	var lockedKey string
+	now := clock().UTC()
 	err = tx.QueryRowContext(ctx, `
 		SELECT blob_key FROM blob_ledger
 		WHERE blob_key = $1 AND (
-			(state = 'staged' AND state_changed_at < now() - interval '24 hours')
-			OR (state = 'retained' AND state_changed_at < now() - interval '365 days')
+			(state = 'staged' AND state_changed_at < $2)
+			OR (state = 'retained' AND state_changed_at < $3)
 			OR state = 'purgeable'
 		)
-		FOR UPDATE SKIP LOCKED`, key).Scan(&lockedKey)
+		`+database.Dialect().ForUpdateSkipLocked(), key, appdb.Timestamp(now.Add(-24*time.Hour)), appdb.Timestamp(now.Add(-365*24*time.Hour))).Scan(&lockedKey)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"database/sql"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -13,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"futo-notes-server/internal/blobs"
+	"futo-notes-server/internal/db"
 	"futo-notes-server/internal/objects"
 )
 
@@ -33,7 +33,7 @@ const (
 	frameOverhead = 7 // u16 key length + u8 status + u32 blob length
 )
 
-func handleUploadBlob(database *sql.DB, store *blobs.Store) http.HandlerFunc {
+func handleUploadBlob(database *db.DB, store *blobs.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		body, ok := readBlobBody(w, r)
 		if !ok {
@@ -86,7 +86,7 @@ func handleDownloadBlob(store *blobs.Store) http.HandlerFunc {
 	}
 }
 
-func handleDeleteBlob(database *sql.DB, store *blobs.Store) http.HandlerFunc {
+func handleDeleteBlob(database *db.DB, store *blobs.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		key, ok := blobKeyFrom(r)
 		if !ok {

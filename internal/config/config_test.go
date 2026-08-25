@@ -29,6 +29,32 @@ func TestBlobGCEnabled(t *testing.T) {
 	}
 }
 
+func TestDatabaseDefaultsToSQLite(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("DATABASE_URL", "")
+	t.Setenv("AUTH_MODE", "dev")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DatabaseURL != "sqlite:./data/notes.db" {
+		t.Fatalf("DatabaseURL = %q", cfg.DatabaseURL)
+	}
+}
+
+func TestSQLiteIgnoresPostgresPoolSettings(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("DATABASE_URL", "sqlite:notes.db")
+	t.Setenv("AUTH_MODE", "dev")
+	t.Setenv("DB_POOL_MAX", "not-an-integer")
+	t.Setenv("DB_POOL_IDLE_TIMEOUT_MS", "also-not-an-integer")
+
+	if _, err := Load(); err != nil {
+		t.Fatalf("Load() validated ignored Postgres pool settings: %v", err)
+	}
+}
+
 func TestPasswordConfigurationRequiresExactlyOneCredential(t *testing.T) {
 	t.Chdir(t.TempDir())
 	t.Setenv("DATABASE_URL", "postgres://example.test/notes")
