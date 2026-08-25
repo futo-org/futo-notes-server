@@ -22,8 +22,26 @@ test:go:
   extends: .skip-soak-schedule
   stage: test
   image: golang:1.27-bookworm
+  services:
+    - name: postgres:16
+      alias: postgres
+  variables:
+    POSTGRES_USER: futo_notes
+    POSTGRES_PASSWORD: ci
+    POSTGRES_DB: futo_notes
+    OBJECTS_TEST_DATABASE_URL: postgres://futo_notes:ci@postgres:5432/objects_test
+    EVENTS_TEST_DATABASE_URL: postgres://futo_notes:ci@postgres:5432/events_test
+    JOBS_TEST_DATABASE_URL: postgres://futo_notes:ci@postgres:5432/jobs_test
+    BLOBS_TEST_DATABASE_URL: postgres://futo_notes:ci@postgres:5432/blobs_test
+    SERVER_TEST_DATABASE_URL: postgres://futo_notes:ci@postgres:5432/server_test
+  before_script:
+    - apt-get update && apt-get install -y --no-install-recommends postgresql-client
+    - |
+      for db in objects_test events_test jobs_test blobs_test server_test; do
+        PGPASSWORD=ci createdb -h postgres -U futo_notes "$db"
+      done
   script:
-    - go test ./...
+    - go test -race ./...
     - go vet ./...
 
 test:image:

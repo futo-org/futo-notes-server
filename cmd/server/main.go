@@ -93,40 +93,7 @@ func handleHealth(database *sql.DB) http.HandlerFunc {
 	}
 }
 
-func main() {
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	slog.SetDefault(logger)
-
-	cfg, err := config.Load()
-	if err != nil {
-		slog.Error("loading config", "err", err)
-		os.Exit(1)
-	}
-	for _, warning := range config.DroppedEnvWarnings() {
-		slog.Warn(warning)
-	}
-
-	database, err := db.Open(cfg)
-	if err != nil {
-		slog.Error("opening database", "err", err)
-		os.Exit(1)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	applied, err := db.Migrate(ctx, database)
-	cancel()
-	if err != nil {
-		slog.Error("applying database migrations", "err", err)
-		os.Exit(1)
-	}
-	if len(applied) > 0 {
-		slog.Info("applied database migrations", "count", len(applied), "migrations", strings.Join(applied, ", "))
-	}
-	blobStore := &blobs.Store{Dir: cfg.BlobDir}
-	eventHub := events.NewHub()
-	go events.Listen(context.Background(), cfg.DatabaseURL, eventHub)
-	go jobs.Run(context.Background(), database, blobStore, jobs.DefaultSchedule, cfg.BlobGCEnabled)
-
+func routes(cfg config.Config, database *sql.DB, blobStore *blobs.Store, eventHub *events.Hub) http.Handler {
 	api := http.NewServeMux()
 	if cfg.AuthMode == "dev" {
 		api.HandleFunc("POST /api/auth/dev/login", handleDevLogin(cfg, database))
@@ -174,9 +141,46 @@ func main() {
 		slog.Info("dev UI enabled", "path", "/dev")
 	}
 
+	return recoverPanic(mux)
+}
+
+func main() {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	slog.SetDefault(logger)
+
+	cfg, err := config.Load()
+	if err != nil {
+		slog.Error("loading config", "err", err)
+		os.Exit(1)
+	}
+	for _, warning := range config.DroppedEnvWarnings() {
+		slog.Warn(warning)
+	}
+
+	database, err := db.Open(cfg)
+	if err != nil {
+		slog.Error("opening database", "err", err)
+		os.Exit(1)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	applied, err := db.Migrate(ctx, database)
+	cancel()
+	if err != nil {
+		slog.Error("applying database migrations", "err", err)
+		os.Exit(1)
+	}
+	if len(applied) > 0 {
+		slog.Info("applied database migrations", "count", len(applied), "migrations", strings.Join(applied, ", "))
+	}
+	blobStore := &blobs.Store{Dir: cfg.BlobDir}
+	eventHub := events.NewHub()
+	go events.Listen(context.Background(), cfg.DatabaseURL, eventHub)
+	go jobs.Run(context.Background(), database, blobStore, jobs.DefaultSchedule, cfg.BlobGCEnabled)
+
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	slog.Info("listening", "addr", addr)
-	if err := http.ListenAndServe(addr, recoverPanic(mux)); err != nil {
+	if err := http.ListenAndServe(addr, routes(cfg, database, blobStore, eventHub)); err != nil {
 		slog.Error("serving HTTP", "err", err)
 		os.Exit(1)
 	}

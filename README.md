@@ -46,6 +46,33 @@ Release tags produce Linux amd64/arm64, macOS amd64/arm64, and Windows amd64
 binaries plus SHA-256 checksums. `scripts/build-release.sh <version>` produces
 the same files locally.
 
+## Testing
+
+`go test ./...` runs the unit tests without external dependencies; the
+database-backed tests skip when their test database variables are unset.
+
+To include the integration tests, set `OBJECTS_TEST_DATABASE_URL`,
+`EVENTS_TEST_DATABASE_URL`, `JOBS_TEST_DATABASE_URL`,
+`BLOBS_TEST_DATABASE_URL`, and `SERVER_TEST_DATABASE_URL`. Each must point to a
+scratch database that the tests may freely write to—never use the development
+database. For a convenient local run against the Compose PostgreSQL on port
+5433, all five packages can share one scratch database when package execution
+is serialized:
+
+```bash
+docker exec futo-notes-postgres createdb -U futo_notes notes_test
+URL='postgres://futo_notes:futo_notes@localhost:5433/notes_test'
+OBJECTS_TEST_DATABASE_URL=$URL EVENTS_TEST_DATABASE_URL=$URL \
+JOBS_TEST_DATABASE_URL=$URL BLOBS_TEST_DATABASE_URL=$URL \
+SERVER_TEST_DATABASE_URL=$URL go test -race -count=1 -p 1 ./...
+```
+
+CI runs the Go suite with `-race` and gives each integration package its own
+database. Fuzz targets are also available, for example
+`go test -fuzz=FuzzStreamBlobBatch ./cmd/server`. The compare harness and
+adoption rehearsal remain CI-only suite gates and are documented in
+[the migration plan](docs/Rewriting%20the%20server%20in%20Go.md).
+
 ## Development and launch gates
 
 Start only PostgreSQL for local development (port 5433):
