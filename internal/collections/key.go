@@ -84,6 +84,23 @@ func GetKey(ctx context.Context, database *db.DB, userID, id string) (bool, *Key
 	return true, key, nil
 }
 
+// nextRevision picks the key_updated_at to store. Timestamps are kept to the
+// millisecond, so wall-clock time alone lets a rotation reuse the revision
+// token it was meant to replace — two clients holding that token would then
+// both pass the staleness check and the second would overwrite the first.
+// Stepping one millisecond past the stored revision keeps the token strictly
+// increasing without changing its shape.
+func nextRevision(current *KeyMaterial) time.Time {
+	updatedAt := time.Now().UTC().Truncate(time.Millisecond)
+	if current == nil {
+		return updatedAt
+	}
+	if earliest := current.KeyUpdatedAt.Truncate(time.Millisecond).Add(time.Millisecond); updatedAt.Before(earliest) {
+		return earliest
+	}
+	return updatedAt
+}
+
 // PutKey claims or rotates the collection's key material.
 //
 // Claim (prevToken nil): stores the material if none exists; otherwise the
@@ -129,7 +146,7 @@ func PutKey(ctx context.Context, database *db.DB, userID, id string, in KeyInput
 		`UPDATE collections
 		 SET key_salt = $1, key_kdf = $2`+database.Dialect().JSONCast()+`, encrypted_vault_key = $3, key_updated_at = $5
 		 WHERE id = $4 RETURNING `+keyColumns,
-		in.KeySalt, string(in.KeyKDF), in.EncryptedVaultKey, id, db.Timestamp(time.Now())))
+		in.KeySalt, string(in.KeyKDF), in.EncryptedVaultKey, id, db.Timestamp(nextRevision(current))))
 	if err != nil {
 		return 0, nil, err
 	}
