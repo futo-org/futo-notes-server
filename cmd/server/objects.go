@@ -246,13 +246,26 @@ func handleCreateBlobObject(database *db.DB, store *blobs.Store, publisher event
 		if !ok {
 			return
 		}
-		userID := sessionFrom(r).User.ID
+		userID, collectionID := sessionFrom(r).User.ID, r.PathValue("id")
+		// The Mutation ID is claimed before any ciphertext is staged, so
+		// recovery reports a pending create rather than a missing one while
+		// this request commits, and a replay of a completed create answers
+		// from the ledger without staging a second blob.
+		reservation, err := objects.ReserveCreate(r.Context(), database, userID, collectionID, mID)
+		if err != nil {
+			serverError(w, r, "reserving inline create mutation", err)
+			return
+		}
+		if reservation.Settled {
+			writeMutationOutcome(w, http.StatusCreated, reservation.Outcome)
+			return
+		}
 		key, err := blobs.Stage(r.Context(), database, store, userID, body)
 		if err != nil {
 			serverError(w, r, "staging inline create blob", err)
 			return
 		}
-		outcome, err := objects.Create(r.Context(), database, publisher, userID, r.PathValue("id"), mID, key)
+		outcome, err := objects.CreateReserved(r.Context(), database, publisher, userID, collectionID, mID, key, reservation)
 		if err != nil {
 			serverError(w, r, "creating inline blob object", err)
 			return
@@ -442,6 +455,20 @@ func handleBatchBlobObjects(database *db.DB, store *blobs.Store, publisher event
 				results = append(results, map[string]any{"status": "too_large"})
 				continue
 			}
+			var reservation objects.Reservation
+			if entry.Operation == 0 {
+				reserved, err := objects.ReserveCreate(r.Context(), database, userID, collectionID, entry.Identifier)
+				if err != nil {
+					slog.Error("reserving batch create mutation", "err", err, "method", r.Method, "path", r.URL.Path)
+					results = append(results, map[string]any{"status": "error", "error": "internal server error"})
+					continue
+				}
+				if reserved.Settled {
+					results = append(results, batchResult(entry.Operation, reserved.Outcome))
+					continue
+				}
+				reservation = reserved
+			}
 			key, err := blobs.Stage(r.Context(), database, store, userID, entry.Blob)
 			if err != nil {
 				slog.Error("staging batch blob", "err", err, "method", r.Method, "path", r.URL.Path)
@@ -450,7 +477,7 @@ func handleBatchBlobObjects(database *db.DB, store *blobs.Store, publisher event
 			}
 			var outcome objects.MutationOutcome
 			if entry.Operation == 0 {
-				outcome, err = objects.Create(r.Context(), database, publisher, userID, collectionID, entry.Identifier, key)
+				outcome, err = objects.CreateReserved(r.Context(), database, publisher, userID, collectionID, entry.Identifier, key, reservation)
 			} else {
 				outcome, err = objects.Update(r.Context(), database, publisher, userID, collectionID, entry.Identifier, "", key, int64(entry.Version))
 			}

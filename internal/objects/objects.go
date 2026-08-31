@@ -407,12 +407,73 @@ func mutationOutcomeFromStored(stored *storedResult, create bool) (MutationOutco
 	}
 }
 
-func Create(ctx context.Context, db *appdb.DB, publisher events.Publisher, userID, collectionID, mutationID, blobKey string) (MutationOutcome, error) {
+// Reservation is the in-progress claim a create Mutation ID holds while its
+// request runs. Settled means the ID already carries an outcome: Outcome is
+// the answer, and the caller must neither stage ciphertext nor call
+// CreateReserved.
+type Reservation struct {
+	Outcome  MutationOutcome
+	Settled  bool
+	prepared bool
+}
+
+// ReserveCreate records the in-progress claim for a create Mutation ID, or
+// reports the outcome the ID already carries. A caller that has to stage
+// ciphertext before it can name a blob key reserves the ID first: recovery
+// then sees a pending claim instead of a missing one while the create
+// commits, and a replay of a completed create is answered without staging a
+// second blob. Pass the reservation on to CreateReserved.
+func ReserveCreate(ctx context.Context, db *appdb.DB, userID, collectionID, mutationID string) (Reservation, error) {
 	intent := mutationIntent{Kind: "create", CollectionID: collectionID}
 	prepared, err := prepareMutation(ctx, db, userID, mutationID, intent)
 	if err != nil {
-		return MutationOutcome{}, err
+		return Reservation{}, err
 	}
+	if prepared || mutationID == "" || !ValidUUID(collectionID) {
+		return Reservation{prepared: prepared}, nil
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return Reservation{}, err
+	}
+	defer tx.Rollback()
+	if err := lockMutation(ctx, tx, userID, mutationID); err != nil {
+		return Reservation{}, err
+	}
+	stored, mismatch, err := replay(ctx, tx, userID, mutationID, intent)
+	if err != nil {
+		return Reservation{}, err
+	}
+	if mismatch {
+		return Reservation{Outcome: MutationOutcome{Code: MutationMismatch}, Settled: true}, nil
+	}
+	// A row that has since expired leaves nothing to replay, so the create
+	// runs as if the ID were fresh.
+	if stored == nil {
+		return Reservation{}, nil
+	}
+	outcome, err := mutationOutcomeFromStored(stored, true)
+	if err != nil {
+		return Reservation{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Reservation{}, err
+	}
+	return Reservation{Outcome: outcome, Settled: true}, nil
+}
+
+func Create(ctx context.Context, db *appdb.DB, publisher events.Publisher, userID, collectionID, mutationID, blobKey string) (MutationOutcome, error) {
+	reservation, err := ReserveCreate(ctx, db, userID, collectionID, mutationID)
+	if err != nil || reservation.Settled {
+		return reservation.Outcome, err
+	}
+	return CreateReserved(ctx, db, publisher, userID, collectionID, mutationID, blobKey, reservation)
+}
+
+// CreateReserved records a new object for a staged blob under the claim
+// ReserveCreate took for mutationID.
+func CreateReserved(ctx context.Context, db *appdb.DB, publisher events.Publisher, userID, collectionID, mutationID, blobKey string, reservation Reservation) (MutationOutcome, error) {
+	intent := mutationIntent{Kind: "create", CollectionID: collectionID}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return MutationOutcome{}, err
@@ -428,7 +489,7 @@ func Create(ctx context.Context, db *appdb.DB, publisher events.Publisher, userI
 	if mismatch {
 		return MutationOutcome{Code: MutationMismatch}, nil
 	}
-	if prepared && stored != nil && stored.Status == 102 {
+	if reservation.prepared && stored != nil && stored.Status == 102 {
 		stored = nil
 	}
 	if stored != nil {
