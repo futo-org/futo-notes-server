@@ -29,7 +29,7 @@ are. Back up first, then swap in the new compose file and pull:
 ```bash
 docker compose stop server
 docker compose exec -T postgres pg_dump -U futo_notes -d futo_notes -Fc > before-go.dump
-cp -a futo-notes-data futo-notes-data.before-go
+cp -a futo-notes-data/blobs blobs.before-go
 cp .env .env.before-go
 
 curl -fsSL https://gitlab.futo.org/futo-notes/futo-notes-server/-/raw/main/docker-compose.postgres.yml -o docker-compose.yml
@@ -38,9 +38,15 @@ docker compose up -d
 curl --fail http://localhost:3005/health
 ```
 
-If your notes folder is somewhere other than `./futo-notes-data`, copy that
-path instead. Open a note in the app, make an edit, and check it shows up on
-another device. You can stop here and stay on Postgres for as long as you like.
+The dump covers the database and the copy covers your encrypted notes; the
+`futo-notes-data/postgres` folder belongs to the database container and does
+not need copying by hand. If your notes folder is somewhere other than
+`./futo-notes-data`, use that path instead. If your `.env` pins
+`FUTO_NOTES_IMAGE` to a specific version, remove that line so the pull gets the
+current server.
+
+Open a note in the app, make an edit, and check it shows up on another device.
+You can stop here and stay on Postgres for as long as you like.
 
 ## Step 2: switch to SQLite
 
@@ -58,10 +64,12 @@ table after checking row counts, every collection's version, and the SQLite
 file's integrity against the Postgres snapshot. If anything fails it deletes
 the half-written file and tells you why.
 
-Now switch to the single-container compose file and start it:
+Now switch to the single-container compose file and start it. Keep the
+Postgres one around in case you want to go back:
 
 ```bash
 docker compose down
+mv docker-compose.yml docker-compose.postgres.yml
 curl -fsSL https://gitlab.futo.org/futo-notes/futo-notes-server/-/raw/main/docker-compose.production.yml -o docker-compose.yml
 docker compose up -d
 curl --fail http://localhost:3005/health
@@ -77,7 +85,14 @@ then delete them.
 
 ## Going back
 
-Stop the server, restore the Postgres compose file from Step 1, and start it.
+Stop the server, put the Postgres compose file back, and start it:
+
+```bash
+docker compose down
+mv docker-compose.postgres.yml docker-compose.yml
+docker compose up -d
+```
+
 Postgres is exactly as it was when you ran the copy. Any edits made while on
 SQLite stay in the SQLite file, so keep `futo-notes-data/db` if you might want
 them.
