@@ -22,7 +22,30 @@ Same machine, same workload, old TypeScript + Postgres stack against Go + SQLite
 SQLite is for one server process. Keep Postgres for multi-process or hosted
 deployments.
 
-## How to switch
+## Step 1: update to the Go server, still on Postgres
+
+The Go server reads your existing Postgres database and blob directory as they
+are. The `stable` image tag now points at it, so for a Docker Compose install
+the update is a pull. Back up first, then swap the compose file for
+`docker-compose.postgres.yml` from the server repo and start:
+
+```bash
+docker compose stop server
+docker compose exec -T postgres pg_dump -U futo_notes -d futo_notes -Fc > futo-notes-before-go.dump
+cp -a /absolute/path/to/blobs /absolute/path/to/blobs.before-go
+cp .env .env.before-go
+
+curl -fsSLO https://gitlab.futo.org/futo-notes/futo-notes-server/-/raw/main/docker-compose.postgres.yml
+docker compose -f docker-compose.postgres.yml pull server
+docker compose -f docker-compose.postgres.yml up -d
+curl --fail http://localhost:3005/health
+```
+
+Keep the same `DATABASE_URL`, password setting, and blob directory. Open an
+existing note and confirm an edit syncs. You can stop here and stay on
+Postgres.
+
+## Step 2: switch to SQLite (optional)
 
 1. Be on the Go server, still on Postgres, and healthy.
 2. Stop the server. Back up Postgres, the blob directory, and `.env`.
