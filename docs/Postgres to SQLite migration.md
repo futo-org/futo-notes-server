@@ -1,95 +1,91 @@
-# Migrating the server from Postgres to SQLite
+# Moving your FUTO Notes server from Postgres to SQLite
 
-Since v0.7.0 the FUTO Notes sync server uses SQLite by default. New installs
-run one container with no database server; the SQLite file and the encrypted
-blobs share one data directory, so backup is stop, copy that directory, start.
+This guide assumes you run the server with Docker Compose, the way the
+installer set it up. All commands run from the directory that holds your
+`docker-compose.yml` and `.env`.
 
-Existing Postgres installs keep working unchanged. Switching is optional,
-one-way, and never modifies Postgres. Clients cannot tell which engine is
-underneath.
+Since v0.7.0 the server is written in Go and uses SQLite by default. New
+installs are one container, and the database sits in the same folder as your
+encrypted notes, so a backup is just a copy of that folder. Your existing
+Postgres install keeps working as it is. Moving to SQLite is optional, and
+nothing in this guide changes your Postgres data, so you can always go back.
 
-## Why
+## Why bother
 
-Same machine, same workload, old TypeScript + Postgres stack against Go + SQLite:
+Same machine, same workload:
 
 | | Postgres | SQLite |
 | --- | --- | --- |
-| Idle memory | 220 MB | 16 MB |
-| Cold start to healthy | 3.7 s | 6 ms |
-| p50 request latency | 5.3 ms | 0.37 ms |
-| Backup | `pg_dump` plus the blob directory | copy one directory |
+| Memory while idle | 220 MB | 16 MB |
+| Time to start | 3.7 s | 6 ms |
+| Typical request | 5.3 ms | 0.37 ms |
+| Backup | `pg_dump` plus copying the notes folder | copy one folder |
 
-SQLite is for one server process. Keep Postgres for multi-process or hosted
-deployments.
+## Step 1: update to the new server
 
-## Step 1: update to the Go server, still on Postgres
-
-The Go server reads your existing Postgres database and blob directory as they
-are. The `stable` image tag now points at it, so for a Docker Compose install
-the update is a pull. Back up first, then swap the compose file for
-`docker-compose.postgres.yml` from the server repo and start:
+The new server reads your existing Postgres database and notes folder as they
+are. Back up first, then swap in the new compose file and pull:
 
 ```bash
 docker compose stop server
-docker compose exec -T postgres pg_dump -U futo_notes -d futo_notes -Fc > futo-notes-before-go.dump
-cp -a /absolute/path/to/blobs /absolute/path/to/blobs.before-go
+docker compose exec -T postgres pg_dump -U futo_notes -d futo_notes -Fc > before-go.dump
+cp -a futo-notes-data futo-notes-data.before-go
 cp .env .env.before-go
 
-curl -fsSLO https://gitlab.futo.org/futo-notes/futo-notes-server/-/raw/main/docker-compose.postgres.yml
-docker compose -f docker-compose.postgres.yml pull server
-docker compose -f docker-compose.postgres.yml up -d
+curl -fsSL https://gitlab.futo.org/futo-notes/futo-notes-server/-/raw/main/docker-compose.postgres.yml -o docker-compose.yml
+docker compose pull
+docker compose up -d
 curl --fail http://localhost:3005/health
 ```
 
-Keep the same `DATABASE_URL`, password setting, and blob directory. Open an
-existing note and confirm an edit syncs. You can stop here and stay on
-Postgres.
+If your notes folder is somewhere other than `./futo-notes-data`, copy that
+path instead. Open a note in the app, make an edit, and check it shows up on
+another device. You can stop here and stay on Postgres for as long as you like.
 
-## Step 2: switch to SQLite (optional)
+## Step 2: switch to SQLite
 
-1. Be on the Go server, still on Postgres, and healthy.
-2. Stop the server. Back up Postgres, the blob directory, and `.env`.
-3. Run the built-in copy. Binary install:
+Stop the server and run the built-in copy. It reads Postgres and writes a new
+SQLite file next to your notes folder. Postgres is not modified.
 
-   ```bash
-   DATABASE_URL='postgres://user:password@host/notes' \
-   ./futo-notes-server migrate-to-sqlite -to sqlite:/srv/futo-notes/notes.db
-   ```
+```bash
+docker compose stop server
+docker compose run --rm --volume "$PWD/futo-notes-data/db:/data/db" server \
+  futo-notes-server migrate-to-sqlite -to sqlite:/data/db/notes.db
+```
 
-   Docker Compose install, into the image's standard path:
+When it finishes it prints a table of what it copied. It only prints that
+table after checking row counts, every collection's version, and the SQLite
+file's integrity against the Postgres snapshot. If anything fails it deletes
+the half-written file and tells you why.
 
-   ```bash
-   docker compose -f docker-compose.postgres.yml run --rm \
-     --volume "${FUTO_NOTES_DATA_DIR:-./futo-notes-data}/db:/data/db" server \
-     futo-notes-server migrate-to-sqlite -to sqlite:/data/db/notes.db
-   ```
+Now switch to the single-container compose file and start it:
 
-4. Point `DATABASE_URL` at the new `sqlite:` path (or use the current
-   `docker-compose.production.yml`, which defaults to it), keep the same blob
-   directory mounted, start, and check `curl --fail http://localhost:3005/health`.
-5. Edit a note on one device and confirm it reaches another.
+```bash
+docker compose down
+curl -fsSL https://gitlab.futo.org/futo-notes/futo-notes-server/-/raw/main/docker-compose.production.yml -o docker-compose.yml
+docker compose up -d
+curl --fail http://localhost:3005/health
+```
 
-## What the copy does
+Edit a note on one device and confirm it reaches another. You are now on
+SQLite. Your notes folder holds both the database and the encrypted notes;
+back it up together with `.env`.
 
-It refuses a target that already holds a database. It opens one read-only
-`REPEATABLE READ` snapshot of Postgres, creates the SQLite schema, and copies
-users, collections, objects, the blob ledger, mutation results, sessions, and
-server configuration inside one SQLite transaction. Before committing it
-compares row counts, every collection's current version, and total ledger
-bytes against the snapshot. After committing it runs SQLite's integrity and
-foreign-key checks. Only then does it print a summary. On any failure the
-partial SQLite files are deleted. Blob files are never touched.
+The `POSTGRES_PASSWORD` line in `.env` and the `futo-notes-data/postgres`
+folder are no longer used. Leave them until you are sure you will not go back,
+then delete them.
 
-## Rollback
+## Going back
 
-Stop the server and set `DATABASE_URL` back to Postgres. That is the exact
-state at the snapshot. Edits made while on SQLite stay in SQLite; there is no
-reverse converter, so keep the SQLite file until you are done with it.
+Stop the server, restore the Postgres compose file from Step 1, and start it.
+Postgres is exactly as it was when you ran the copy. Any edits made while on
+SQLite stay in the SQLite file, so keep `futo-notes-data/db` if you might want
+them.
 
-## Safety guard
+## One safety net to know about
 
-Because `DATABASE_URL` is now optional, the server refuses to create a fresh
-SQLite database when the blob directory already contains blobs. That usually
-means an existing install lost its configuration. Fix the configuration
-rather than syncing against an empty vault; `ALLOW_FRESH_DATABASE=true`
-overrides the guard only for an intentional fresh start.
+If the server ever starts with a brand-new empty database while your notes
+folder already has notes in it, it refuses to run and says so. That almost
+always means the compose file or `.env` was changed and the server lost track
+of its database. Fix the configuration rather than letting devices sync
+against an empty vault.
