@@ -1,126 +1,175 @@
-# FUTO Notes Sync Server
+# FUTO Notes server
 
-End-to-end encrypted sync server for the [FUTO Notes](https://gitlab.futo.org/futo-notes/futo-notes) notes app. The server stores opaque encrypted blobs and never sees plaintext note content.
+Self-hosted encrypted sync for FUTO Notes. Your notes are encrypted on your
+device before they are uploaded, so this server stores opaque encrypted blobs
+and never sees their contents. It is single-user: one sync password, one vault,
+no accounts to manage. New installs need no database server, only a directory on
+disk. This implementation is wire- and storage-compatible with the previous
+TypeScript server, so existing clients and existing data keep working.
 
-- [docs/API.md](./docs/API.md) — client integration guide (endpoints, auth, the sync protocol, SSE)
-- [DESIGN.md](./DESIGN.md) — architecture, threat model, and scaling plan
-
-## Self-hosting
-
-The only thing you need installed is **Docker** (with the Compose v2 plugin). You don't need to clone this repo or install any language toolchain — everything runs from a prebuilt image.
-
-The image is published on Docker Hub as [`futotech/notes-server`](https://hub.docker.com/r/futotech/notes-server), built for both `linux/amd64` and `linux/arm64` — so x86 servers and arm boards (Raspberry Pi 4/5, Ampere VPS) both work with no extra configuration.
-
-The guided installer asks for an admin password and install location, writes a
-private configuration file, and starts the server:
+## Install with one command
 
 ```bash
-curl -fsSL https://gitlab.futo.org/futo-notes/futo-notes-server/-/raw/main/install.sh | sh
+curl -fsSL https://notes.futo.tech/install-server.sh | sh
 ```
 
-For a manual installation:
+The script checks that Docker and the Compose v2 plugin are present, writes a
+private `.env` and a `docker-compose.yml` into `~/futo-notes`, and starts the
+server. It then waits for the server to report healthy and prints the URL to
+paste into the app.
+
+It asks you for three things: the install directory (`~/futo-notes` by
+default), the port to expose (3005 by default), and the sync password you will
+enter in the app. Set `FUTO_NOTES_PASSWORD`, `FUTO_NOTES_DIR`,
+`FUTO_NOTES_PORT`, or `FUTO_NOTES_DATA_DIR` in the environment to skip the
+prompts and run it unattended.
+
+## Install with Docker Compose by hand
+
+Download the compose file and the example environment file, fill in the
+password, and start the server:
 
 ```bash
-# 1. Make a directory for your install
-mkdir my-futo-notes && cd my-futo-notes
-
-# 2. Grab the compose file and a starter .env
-curl -sSL https://gitlab.futo.org/futo-notes/futo-notes-server/-/raw/main/docker-compose.production.yml -o docker-compose.yml
-curl -sSL https://gitlab.futo.org/futo-notes/futo-notes-server/-/raw/main/.env.production.example -o .env
-
-# 3. Edit .env: set FUTO_NOTES_PASSWORD and set POSTGRES_PASSWORD to a
-#    strong random string (e.g. `openssl rand -hex 32`).
-$EDITOR .env
-
-# 4. Keep the credential file private and start
+mkdir -p ~/futo-notes && cd ~/futo-notes
+curl -fsSLO https://gitlab.futo.org/futo-notes/futo-notes-server/-/raw/main/docker-compose.production.yml
+curl -fsSL https://gitlab.futo.org/futo-notes/futo-notes-server/-/raw/main/.env.production.example -o .env
 chmod 600 .env
-docker compose up -d
+$EDITOR .env
+docker compose -f docker-compose.production.yml up -d
+curl --fail http://localhost:3005/health
 ```
 
-The server listens on `http://localhost:3005` (override with `FUTO_NOTES_PORT` in `.env`).
+`.env` needs at least a sync password, and an absolute data directory if you do
+not want it beside the compose file:
 
-### Connect the app
+```dotenv
+FUTO_NOTES_PASSWORD=replace-with-your-sync-password
+FUTO_NOTES_DATA_DIR=/absolute/path/to/futo-notes-data
+```
 
-Open FUTO Notes, go to **Settings → Sync**, and enter:
+SQLite metadata and encrypted blobs both live under `FUTO_NOTES_DATA_DIR`.
 
-- Server URL: `http://<server-IP-or-hostname>:3005` (`localhost` only if the app runs on the server)
-- Password: the admin password you configured
+## Run a release binary instead
 
-`FUTO_NOTES_PASSWORD` is stored as plaintext in `.env` for a simple setup, so
-protect and back up that file like any other credential. For deployments where
-environment/config exposure is a concern, set only `FUTO_NOTES_PASSWORD_HASH`
-instead; generate it with `bun dist/index.js hash <password>` inside the server
-image. A hash is safer at rest, though a weak password can still be guessed
-offline. Setting both alternatives is rejected to avoid ambiguous configuration.
+Download a binary for your platform from the
+[package registry](https://gitlab.futo.org/futo-notes/futo-notes-server/-/packages).
+Each release tag publishes Linux amd64/arm64, macOS amd64/arm64, and Windows
+amd64 binaries plus a SHA-256 checksum file.
 
-### Day-to-day
+New installs do not need a database server or `DATABASE_URL`. Set one password
+variable and an absolute `BLOB_DIR`; SQLite defaults to `./data/notes.db`:
 
 ```bash
-docker compose ps                              # status
-docker compose logs -f                         # tail logs
-docker compose pull && docker compose up -d    # upgrade to the latest image
-docker compose down                            # stop (data is preserved)
+FUTO_NOTES_PASSWORD='sync password' \
+BLOB_DIR='/srv/futo-notes/blobs' \
+PORT=3005 \
+./futo-notes-server
 ```
 
-### Where your data lives
+Run the process from a stable working directory, or explicitly set an absolute
+SQLite URL such as `DATABASE_URL=sqlite:/srv/futo-notes/notes.db`.
 
-Encrypted blobs and Postgres data are bind-mounted from `./futo-notes-data/` next to your `.env` (override with `FUTO_NOTES_DATA_DIR`):
+As a safety check, the server refuses to create a new SQLite file when
+`BLOB_DIR` already contains blob files; this usually means an existing install
+lost its `DATABASE_URL`. Recover the intended configuration instead of syncing
+against an empty vault. `ALLOW_FRESH_DATABASE=true` is available only for an
+intentional fresh database beside pre-existing blob files.
 
-- `futo-notes-data/blobs/` — encrypted note content (opaque to the server)
-- `futo-notes-data/postgres/` — Postgres data directory (sync metadata)
+To keep it running, put the configuration in `/etc/futo-notes-server.env`
+(mode 600, owned by root) and install a unit at
+`/etc/systemd/system/futo-notes-server.service`:
 
-A snapshot of `$FUTO_NOTES_DATA_DIR` plus `.env` is a complete backup.
+```ini
+[Unit]
+Description=FUTO Notes sync server
+After=network-online.target
+Wants=network-online.target
 
-### HTTPS for remote access
+[Service]
+User=futo-notes
+Group=futo-notes
+EnvironmentFile=/etc/futo-notes-server.env
+WorkingDirectory=/srv/futo-notes
+ExecStart=/usr/local/bin/futo-notes-server
+Restart=on-failure
 
-The server only speaks HTTP internally. To expose it to the internet, put a reverse proxy in front that terminates TLS:
+[Install]
+WantedBy=multi-user.target
+```
 
-- [Tailscale Funnel](https://tailscale.com/kb/1223/funnel) — simplest if you already use Tailscale
-- Caddy — automatic Let's Encrypt certificates
-- nginx — classic, most flexibility
-
-### Login rate limiting
-
-`POST /api/auth/password/login` guards the server's single password (and runs scrypt when the hash-based option is configured), so it is a brute-force target. **The server rate-limits this path for you** — by default 10 attempts per minute per client, returning `429` with a `Retry-After` header past that. You don't need to add a proxy rule.
-
-## Development
-
-For working on the server itself. The toolchain is [Bun](https://bun.sh) (`curl -fsSL https://bun.sh/install | bash`) — it's the package manager, TypeScript runtime, and test runner. You also need Docker for Postgres. (Self-hosters don't need any of this — see [Self-hosting](#self-hosting) above.)
+Create the user and directory first, then enable it:
 
 ```bash
-bun install
-docker compose up -d            # Postgres on localhost:5433
-cp .env.example .env
-
-# Set FUTO_NOTES_PASSWORD in .env. For hash-at-rest, generate a hash instead:
-# bun src/index.ts hash <your-password>
-
-bun run migrate                 # apply DB migrations
-bun dev                         # http://localhost:3005
+sudo useradd --system --home /srv/futo-notes --shell /usr/sbin/nologin futo-notes
+sudo install -d -o futo-notes -g futo-notes /srv/futo-notes
+sudo systemctl enable --now futo-notes-server
 ```
 
-The default `.env.example` is set up for `AUTH_MODE=password`. For dev/test mode (passwordless `/api/auth/dev/login`), set `AUTH_MODE=dev` and clear both password variables.
+## Connect the app
+
+In FUTO Notes, go to Settings, then Self-hosted sync, and set the Server URL to
+your server, for example `http://192.168.1.10:3005`. Sign in with the sync
+password from your `.env`. The Android and iOS apps accept plain `http://` URLs,
+so a server on your own network needs no certificate.
+
+## HTTPS for remote access
+
+The server speaks plain HTTP. To reach it from outside your own network, put a
+TLS reverse proxy in front of it. Two easy options:
+
+- [Tailscale Funnel](https://tailscale.com/kb/1223/funnel) publishes the server
+  on a `*.ts.net` hostname with a certificate, without opening a port on your
+  router.
+- [Caddy](https://caddyserver.com) gets a certificate itself. The whole
+  Caddyfile is three lines:
+
+  ```caddyfile
+  notes.example.com {
+      reverse_proxy localhost:3005
+  }
+  ```
+
+The login endpoint is rate-limited to 10 attempts per minute per client address.
+Behind a reverse proxy the server sees only the proxy's address, so every client
+shares one bucket; keep that in mind if several devices sign in at once.
+
+## Upgrade
+
+With Docker Compose, from your install directory:
 
 ```bash
-bun run test                    # full suite (needs Postgres running)
-bun run build                   # esbuild → dist/index.js
+docker compose pull && docker compose up -d
 ```
 
-The stack is TypeScript + Hono + PostgreSQL (Kysely). See [DESIGN.md](./DESIGN.md) for the architecture and [AGENTS.md](./AGENTS.md) for conventions.
+If you installed by hand and kept the file named
+`docker-compose.production.yml`, add `-f docker-compose.production.yml` to both
+commands.
 
-### Repo layout
+With a release binary, replace the file and restart the service:
 
+```bash
+sudo systemctl restart futo-notes-server
 ```
-src/
-  app.ts        # buildApp() factory — shared by both entrypoints
-  index.ts      # OSS entrypoint (ships in public Docker image)
-  hosted/       # hosted-only middleware + separate entrypoint
-  server.ts     # shared lifecycle (runServer, CLI subcommands like `hash`)
-  auth/         # session + password-mode login
-  blob/         # blob storage abstraction (filesystem for now)
-  collection-contents/ # atomic object mutations + blob lifetime policy
-  collections/  # collection API
-  objects/      # per-object versioned sync API
-  db/           # Kysely connection + migrations
-tests/          # integration tests (bun:test)
+
+## Back up
+
+The data directory is the whole server. Stop the server, copy it, start again:
+
+```bash
+docker compose -f docker-compose.production.yml stop server
+cp -a /absolute/path/to/futo-notes-data /absolute/path/to/futo-notes-data.backup
+docker compose -f docker-compose.production.yml start server
 ```
+
+Back up `.env` alongside it, since it holds your sync password.
+
+## Existing TypeScript installations
+
+Existing TypeScript installations must first follow
+[the TypeScript-to-Go upgrade guide](docs/UPGRADING_FROM_TYPESCRIPT.md). They
+continue using Postgres. Afterward, they can optionally follow
+[Switching from Postgres to SQLite](docs/Switching%20from%20Postgres%20to%20SQLite.md).
+
+---
+
+Working on the server itself? See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).

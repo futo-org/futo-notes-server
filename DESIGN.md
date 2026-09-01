@@ -1,5 +1,11 @@
 # FUTO Notes Server — Design Document
 
+> **Superseded stack, still-current design.** This document was written for the
+> TypeScript + Bun + Postgres implementation, and its Stack table below describes
+> that server, not this one. The threat model, sync model, and rationale still
+> apply. For the current implementation see
+> [docs/Rewriting the server in Go.md](docs/Rewriting%20the%20server%20in%20Go.md).
+
 A generic E2EE sync server. Paid service, licensed under [FUTO Source First License](https://sourcefirst.com/). Designed for future migration to [Yucca](https://github.com/immich-app/yucca) for auth and storage.
 
 The first client is a notes app, but the server knows nothing about notes — see §Objects and collections.

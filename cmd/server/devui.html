@@ -1,0 +1,482 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>futo-notes dev</title>
+<style>
+  :root {
+    --bg: #16181d;
+    --card: #1e2128;
+    --border: #2c303a;
+    --text: #d7dae0;
+    --muted: #8a90a0;
+    --accent: #6aa1ff;
+    --ok: #4cc38a;
+    --warn: #e5b567;
+    --err: #e5726a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    background: var(--bg);
+  }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  #session-pill {
+    padding: 2px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    color: var(--muted);
+  }
+  #session-pill.in { color: var(--ok); border-color: var(--ok); }
+  #session-pill.out { color: var(--muted); }
+  #database-pill { color: var(--muted); margin-left: auto; }
+  main {
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 20px;
+    display: grid;
+    gap: 16px;
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+  }
+  .card .row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .job {
+    border-top: 1px solid var(--border);
+    margin-top: 10px;
+    padding-top: 10px;
+  }
+  .method { color: var(--accent); font-weight: 600; }
+  .path { color: var(--text); }
+  .desc { color: var(--muted); margin: 4px 0 0; font-size: 13px; }
+  button {
+    margin-left: auto;
+    background: var(--accent);
+    color: #10131a;
+    border: 0;
+    border-radius: 6px;
+    padding: 5px 14px;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button:hover { filter: brightness(1.1); }
+  input[type=password], input[type=text], textarea {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font: inherit;
+    padding: 5px 10px;
+  }
+  textarea {
+    width: 100%;
+    margin-top: 10px;
+    resize: vertical;
+  }
+  .result { margin-top: 10px; display: none; }
+  .result.shown { display: block; }
+  .status { font-weight: 600; }
+  .status.s2 { color: var(--ok); }
+  .status.s4 { color: var(--warn); }
+  .status.s5 { color: var(--err); }
+  .ms { color: var(--muted); margin-left: 8px; }
+  pre {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 12px;
+    margin: 6px 0 0;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  #sse-log { max-height: 240px; overflow-y: auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>futo-notes dev</h1>
+  <span id="session-pill">checking…</span>
+  <span id="database-pill">{{DATABASE_INFO}}</span>
+</header>
+<main id="cards"></main>
+
+<script>
+const endpoints = [
+  { method: 'GET', path: '/', desc: 'capability document' },
+  { method: 'GET', path: '/health', desc: 'server + database health' },
+  {
+    method: 'POST', path: '/dev/panic', desc: 'trigger panic recovery; logs a stack trace and returns a JSON 500',
+    responseHeaders: ['Connection'],
+  },
+  {
+    method: 'POST', path: '/api/auth/dev/login', desc: 'passwordless login; available only when AUTH_MODE=dev',
+    input: { name: 'email', type: 'text', placeholder: 'developer@example.com' },
+    body: v => ({ email: v }),
+    refreshesSession: true,
+  },
+  {
+    method: 'POST', path: '/api/auth/password/login', desc: 'password login; sets the session cookie',
+    input: { name: 'password', placeholder: 'password' },
+    body: v => ({ password: v }),
+    refreshesSession: true,
+  },
+  { method: 'GET', path: '/api/auth', desc: 'current user for this session' },
+  { method: 'POST', path: '/api/auth/logout', desc: 'delete this session; clears the cookie', refreshesSession: true },
+  { method: 'POST', path: '/api/collections', desc: 'claim the vault: 201 first time, 200 with the existing one after' },
+  { method: 'GET', path: '/api/collections', desc: 'list collections, oldest first' },
+  {
+    method: 'GET', path: '/api/collections/:id', desc: 'one collection by id; 404 if absent or not yours',
+    input: { type: 'text', placeholder: 'collection id' },
+    pathFor: v => `/api/collections/${encodeURIComponent(v)}`,
+  },
+  {
+    method: 'DELETE', path: '/api/collections/:id', desc: 'delete a collection; objects cascade, blobs become purgeable',
+    input: { type: 'text', placeholder: 'collection id' },
+    pathFor: v => `/api/collections/${encodeURIComponent(v)}`,
+  },
+  {
+    method: 'GET', path: '/api/collections/:id/key', desc: 'vault key material; {"key": null} before first claim',
+    input: { type: 'text', placeholder: 'collection id' },
+    pathFor: v => `/api/collections/${encodeURIComponent(v)}/key`,
+  },
+  {
+    method: 'PUT', path: '/api/collections/:id/key', desc: 'claim or rotate key material; add previous_key_updated_at to rotate',
+    input: { type: 'text', placeholder: 'collection id' },
+    pathFor: v => `/api/collections/${encodeURIComponent(v)}/key`,
+    rawBody: '{"key_salt": "c2FsdA", "key_kdf": {"name": "scrypt"}, "encrypted_vault_key": "d3JhcHBlZA"}',
+  },
+  {
+    method: 'POST', path: '/api/blobs', desc: 'stage a blob: pick a file, get back its storage key; no file sends an empty body (400)',
+    file: true,
+  },
+  {
+    method: 'GET', path: '/api/blobs/:userId/:blobId', desc: 'download ciphertext; another user\'s key or an unknown one is a 404',
+    input: { type: 'text', placeholder: 'USER_ID/BLOB_ID' },
+    pathFor: v => `/api/blobs/${v.trim().split('/').map(encodeURIComponent).join('/')}`,
+    binary: true,
+  },
+  {
+    method: 'POST', path: '/api/blobs/batch', desc: 'fetch up to 200 keys as binary frames; comma-separated',
+    input: { type: 'text', placeholder: 'USER_ID/BLOB_ID, USER_ID/BLOB_ID' },
+    bodyFor: v => JSON.stringify({ keys: splitValues(v).filter(Boolean) }),
+    frames: true,
+  },
+  {
+    method: 'DELETE', path: '/api/blobs/:userId/:blobId', desc: 'delete a staged blob; 204 when absent, 409 once an object claims it',
+    input: { type: 'text', placeholder: 'USER_ID/BLOB_ID' },
+    pathFor: v => `/api/blobs/${v.trim().split('/').map(encodeURIComponent).join('/')}`,
+  },
+  {
+    method: 'GET', path: '/api/collections/:id/objects', desc: 'pull object metadata; optionally add sinceVersion after a comma',
+    input: { type: 'text', placeholder: 'collection id[, sinceVersion]' },
+    pathFor: v => {
+      const [cid, since] = splitValues(v);
+      return `/api/collections/${encodeURIComponent(cid)}/objects${since ? `?sinceVersion=${encodeURIComponent(since)}` : ''}`;
+    },
+  },
+  {
+    method: 'GET', path: '/api/collections/:id/objects/:objectId', desc: 'get one object metadata row',
+    input: { type: 'text', placeholder: 'collection id, object id' },
+    pathFor: v => objectPath(v),
+  },
+  {
+    method: 'POST', path: '/api/collections/:id/objects', desc: 'claim a blob staged above; size_bytes is validated while the ledger size is authoritative',
+    input: { type: 'text', placeholder: 'collection id' }, mutation: true,
+    pathFor: v => `/api/collections/${encodeURIComponent(v.trim())}/objects`,
+    rawBody: '{"blob_key": "USER_ID/BLOB_ID", "size_bytes": 1}',
+  },
+  {
+    method: 'PUT', path: '/api/collections/:id/objects/:objectId', desc: 'version-guarded replacement using a separately staged blob',
+    input: { type: 'text', placeholder: 'collection id, object id' }, mutation: true,
+    pathFor: v => objectPath(v),
+    rawBody: '{"version": 2, "blob_key": "USER_ID/BLOB_ID", "size_bytes": 1}',
+  },
+  {
+    method: 'DELETE', path: '/api/collections/:id/objects/:objectId', desc: 'soft-delete; optional third value guards the current version',
+    input: { type: 'text', placeholder: 'collection id, object id[, version]' }, mutation: true,
+    pathFor: v => {
+      const [cid, oid, version] = splitValues(v);
+      return `/api/collections/${encodeURIComponent(cid)}/objects/${encodeURIComponent(oid)}${version ? `?version=${encodeURIComponent(version)}` : ''}`;
+    },
+  },
+  {
+    method: 'POST', path: '/api/collections/:id/blob-objects', desc: 'create an object from the selected ciphertext in one round trip',
+    input: { type: 'text', placeholder: 'collection id' }, mutation: true, file: true,
+    pathFor: v => `/api/collections/${encodeURIComponent(v.trim())}/blob-objects`,
+  },
+  {
+    method: 'PUT', path: '/api/collections/:id/blob-objects/:objectId', desc: 'replace an object with selected ciphertext; version is the next object version',
+    input: { type: 'text', placeholder: 'collection id, object id, version' }, mutation: true, file: true,
+    pathFor: v => {
+      const [cid, oid, version] = splitValues(v);
+      return `/api/collections/${encodeURIComponent(cid)}/blob-objects/${encodeURIComponent(oid)}?version=${encodeURIComponent(version)}`;
+    },
+  },
+  {
+    method: 'POST', path: '/api/collections/:id/blob-objects/batch', desc: 'send a file containing the documented binary batch frames',
+    input: { type: 'text', placeholder: 'collection id' }, file: true,
+    pathFor: v => `/api/collections/${encodeURIComponent(v.trim())}/blob-objects/batch`,
+  },
+  {
+    method: 'GET', path: '/api/collections/:id/create-mutations/:mutationId', desc: 'recover a durable create result after an ambiguous response',
+    input: { type: 'text', placeholder: 'collection id, mutation id' },
+    pathFor: v => {
+      const [cid, mID] = splitValues(v);
+      return `/api/collections/${encodeURIComponent(cid)}/create-mutations/${encodeURIComponent(mID)}`;
+    },
+  },
+];
+
+function splitValues(value) {
+  return value.split(',').map(part => part.trim());
+}
+
+function objectPath(value) {
+  const [cid, oid] = splitValues(value);
+  return `/api/collections/${encodeURIComponent(cid)}/objects/${encodeURIComponent(oid)}`;
+}
+
+const cards = document.getElementById('cards');
+
+const jobEndpoints = [
+  { method: 'POST', path: '/dev/jobs/sessions', name: 'session reaper', desc: 'delete expired sessions' },
+  { method: 'POST', path: '/dev/jobs/reconciliation', name: 'storage reconciliation', desc: 'adopt up to 500 untracked files from BLOB_DIR' },
+  { method: 'POST', path: '/dev/jobs/mutation-results', name: 'mutation-results expiry', desc: 'expire old pending, failed, update, and delete outcomes' },
+  { method: 'POST', path: '/dev/jobs/blob-gc', name: 'blob garbage collection', desc: 'purge eligible staged, retained, and purgeable blobs' },
+];
+
+const jobsCard = document.createElement('div');
+jobsCard.className = 'card';
+jobsCard.innerHTML = `
+  <div class="row"><span class="method">JOBS</span><span class="path">run now</span></div>
+  <p class="desc">the same recurring jobs used by the hourly and six-hour timers</p>`;
+for (const job of jobEndpoints) {
+  const row = document.createElement('div');
+  row.className = 'job';
+  row.innerHTML = `
+    <div class="row">
+      <span class="path">${job.name}</span>
+      <button>Run now</button>
+    </div>
+    <p class="desc">${job.desc}</p>
+    <div class="result">
+      <span class="status"></span><span class="ms"></span>
+      <pre></pre>
+    </div>`;
+  row.querySelector('button').addEventListener('click', () => send(job, row));
+  jobsCard.appendChild(row);
+}
+cards.appendChild(jobsCard);
+
+const sseCard = document.createElement('div');
+sseCard.className = 'card';
+sseCard.innerHTML = `
+  <div class="row">
+    <span class="method">SSE</span>
+    <span class="path">/api/sync/events</span>
+    <button>Connect</button>
+  </div>
+  <p class="desc">live sync doorbell; object mutations appear as collection change events</p>
+  <div class="result shown">
+    <span class="status">disconnected</span>
+    <pre id="sse-log">(no events)</pre>
+  </div>`;
+cards.appendChild(sseCard);
+
+let eventSource = null;
+const sseButton = sseCard.querySelector('button');
+const sseStatus = sseCard.querySelector('.status');
+const sseLog = sseCard.querySelector('#sse-log');
+
+function appendSSE(event, data = '') {
+  if (sseLog.textContent === '(no events)') sseLog.textContent = '';
+  const stamp = new Date().toLocaleTimeString();
+  sseLog.textContent += `${stamp}  ${event}${data ? `  ${data}` : ''}\n`;
+  sseLog.scrollTop = sseLog.scrollHeight;
+}
+
+sseButton.addEventListener('click', () => {
+  if (eventSource) {
+    eventSource.close();
+    eventSource = null;
+    sseButton.textContent = 'Connect';
+    sseStatus.textContent = 'disconnected';
+    sseStatus.className = 'status';
+    appendSSE('closed');
+    return;
+  }
+
+  eventSource = new EventSource('/api/sync/events');
+  sseButton.textContent = 'Disconnect';
+  sseStatus.textContent = 'connecting…';
+  sseStatus.className = 'status s4';
+  for (const name of ['ready', 'change', 'ping']) {
+    eventSource.addEventListener(name, event => {
+      sseStatus.textContent = 'connected';
+      sseStatus.className = 'status s2';
+      appendSSE(name, event.data);
+    });
+  }
+  eventSource.onerror = () => {
+    sseStatus.textContent = 'reconnecting…';
+    sseStatus.className = 'status s4';
+    appendSSE('connection lost');
+  };
+});
+
+for (const ep of endpoints) {
+  const card = document.createElement('div');
+  card.className = 'card';
+  card.innerHTML = `
+    <div class="row">
+      <span class="method">${ep.method}</span>
+      <span class="path">${ep.path}</span>
+      ${ep.input ? `<input type="${ep.input.type ?? 'password'}" placeholder="${ep.input.placeholder}" data-1p-ignore autocomplete="off">` : ''}
+      ${ep.mutation ? '<input class="mutation-id" type="text" placeholder="Mutation-Id (optional)" data-1p-ignore autocomplete="off">' : ''}
+      ${ep.file ? '<input type="file">' : ''}
+      <button>Send</button>
+    </div>
+    ${ep.rawBody !== undefined ? `<textarea rows="3" spellcheck="false">${ep.rawBody}</textarea>` : ''}
+    <p class="desc">${ep.desc}</p>
+    <div class="result">
+      <span class="status"></span><span class="ms"></span>
+      <pre></pre>
+    </div>`;
+  card.querySelector('button').addEventListener('click', () => send(ep, card));
+  const input = card.querySelector('input');
+  if (input) input.addEventListener('keydown', e => { if (e.key === 'Enter') send(ep, card); });
+  cards.appendChild(card);
+}
+
+async function send(ep, card) {
+  const opts = { method: ep.method, headers: {} };
+  let path = ep.path;
+  if (ep.pathFor) path = ep.pathFor(card.querySelector('input:not(.mutation-id)[type="text"], input[type="password"]').value);
+  const mutationId = card.querySelector('.mutation-id')?.value;
+  if (mutationId) opts.headers['Mutation-Id'] = mutationId;
+  if (ep.body) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(ep.body(card.querySelector('input').value));
+  } else if (ep.rawBody !== undefined) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = card.querySelector('textarea').value;
+  } else if (ep.bodyFor) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = ep.bodyFor(card.querySelector('input[type="text"]').value);
+  } else if (ep.file) {
+    opts.headers['Content-Type'] = 'application/octet-stream';
+    opts.body = card.querySelector('input[type=file]').files[0] ?? '';
+  }
+
+  const result = card.querySelector('.result');
+  const status = card.querySelector('.status');
+  const ms = card.querySelector('.ms');
+  const pre = card.querySelector('pre');
+  result.classList.add('shown');
+
+  const start = performance.now();
+  try {
+    const res = await fetch(path, opts);
+    const elapsed = Math.round(performance.now() - start);
+    const octets = (ep.binary || ep.frames) && res.ok;
+    const buffer = octets ? await res.arrayBuffer() : null;
+    const text = octets ? '' : await res.text();
+
+    status.textContent = `${res.status} ${res.statusText}`.trim();
+    status.className = `status s${Math.floor(res.status / 100)}`;
+    ms.textContent = `${elapsed} ms`;
+    let rendered;
+    if (ep.frames && octets) {
+      rendered = decodeFrames(buffer);
+    } else if (octets) {
+      rendered = describeBytes(new Uint8Array(buffer));
+    } else {
+      try {
+        rendered = text ? JSON.stringify(JSON.parse(text), null, 2) : '(empty body)';
+      } catch {
+        rendered = text;
+      }
+    }
+    const responseHeaders = (ep.responseHeaders ?? [])
+      .map(name => `${name}: ${res.headers.get(name) ?? '(not exposed)'}`)
+      .join('\n');
+    pre.textContent = responseHeaders ? `${responseHeaders}\n\n${rendered}` : rendered;
+  } catch (err) {
+    status.textContent = 'network error';
+    status.className = 'status s5';
+    ms.textContent = '';
+    pre.textContent = String(err);
+  }
+
+  if (ep.refreshesSession) refreshSession();
+}
+
+const FRAME_STATUS = ['ok', 'missing', 'omitted'];
+
+function describeBytes(bytes) {
+  const head = [...bytes.slice(0, 32)].map(b => b.toString(16).padStart(2, '0')).join(' ');
+  return `${bytes.length} bytes\n${head}${bytes.length > 32 ? ' …' : ''}`;
+}
+
+// [u16 keyLen][key utf8][u8 status][u32 blobLen][bytes], repeated to EOF.
+function decodeFrames(buffer) {
+  const view = new DataView(buffer);
+  const decoder = new TextDecoder();
+  const lines = [];
+  let offset = 0;
+  while (offset < buffer.byteLength) {
+    const keyLen = view.getUint16(offset);
+    const key = decoder.decode(new Uint8Array(buffer, offset + 2, keyLen));
+    const status = view.getUint8(offset + 2 + keyLen);
+    const blobLen = view.getUint32(offset + 3 + keyLen);
+    lines.push(`${key}  ${FRAME_STATUS[status] ?? status}  ${blobLen} bytes`);
+    offset += 7 + keyLen + blobLen;
+  }
+  return `${lines.length} frame(s), ${buffer.byteLength} bytes\n${lines.join('\n')}`;
+}
+
+async function refreshSession() {
+  const pill = document.getElementById('session-pill');
+  try {
+    const res = await fetch('/api/auth');
+    if (res.ok) {
+      const data = await res.json();
+      pill.textContent = `logged in · ${data.user?.email ?? '?'}`;
+      pill.className = 'in';
+    } else {
+      pill.textContent = 'logged out';
+      pill.className = 'out';
+    }
+  } catch {
+    pill.textContent = 'server unreachable';
+    pill.className = 'out';
+  }
+}
+
+refreshSession();
+</script>
+</body>
+</html>

@@ -1,6 +1,6 @@
 # Client Integration Guide
 
-How to build a client against the FUTO Notes sync server. This is the integrator's reference — for *why* the server is shaped this way (threat model, scaling), see [DESIGN.md](../DESIGN.md).
+How to build a client against the FUTO Notes sync server. This is the integrator's reference — for *why* the server is shaped this way (threat model, scaling), see [DESIGN.md](../DESIGN.md), which predates the Go rewrite but whose threat model and sync model still apply.
 
 The server is a **generic E2EE sync backend**: it stores opaque encrypted blobs plus version metadata and never sees plaintext. Your client owns all encryption and all conflict resolution; the server only coordinates versions and tells you when something changed.
 

@@ -1,49 +1,40 @@
-FROM oven/bun:1.3.14-slim AS builder
-WORKDIR /app
+FROM golang:1.27-bookworm AS builder
 
-COPY package.json bun.lock ./
-RUN bun install --frozen-lockfile
+ARG TARGETOS
+ARG TARGETARCH
+ARG VERSION=0.1.0-dev
 
-COPY src/ src/
-COPY tsconfig.json build.mjs ./
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
+    go build -trimpath -ldflags="-s -w -X main.serverVersion=${VERSION}" \
+    -o /out/futo-notes-server ./cmd/server
 
-RUN bun run build
+FROM debian:bookworm-slim
 
-# Production stage — only the bundle + pg driver
-FROM oven/bun:1.3.14-slim
-ENV NODE_ENV=production
-WORKDIR /app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl gosu \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 1000 notes \
+    && useradd --uid 1000 --gid notes --home-dir /nonexistent --shell /usr/sbin/nologin notes \
+    && mkdir -p /data/blobs /data/db \
+    && chown -R notes:notes /data
 
-LABEL org.opencontainers.image.title="FUTO Notes Server"
-LABEL org.opencontainers.image.description="Self-hosted E2EE sync server for FUTO Notes"
-
-RUN apt-get update && apt-get install -y --no-install-recommends gosu \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY --from=builder /app/dist/ dist/
-COPY --from=builder /app/package.json ./
-COPY --from=builder /app/bun.lock ./
-
-RUN bun install --production --frozen-lockfile \
-    && rm -rf /root/.bun/install/cache
+COPY --from=builder /out/futo-notes-server /usr/local/bin/futo-notes-server
 
 ENV PORT=3000
 ENV BLOB_DIR=/data/blobs
-# AUTH_MODE selects the auth strategy ("password" vs "dev"); it is NOT a secret
-# value, so the DS-0031 "secret in env" finding here is a false positive.
-#trivy:ignore:DS-0031
-ENV AUTH_MODE=password
-
-# Start as root to chown the (bind-mounted) blob dir — a bind mount is created
-# root-owned at runtime and masks this build-time chown — then drop to the
-# unprivileged `bun` user (uid 1000) via gosu. Non-recursive: bun owns the dir,
-# so blobs it writes underneath are bun-owned.
-RUN mkdir -p $BLOB_DIR && chown -R bun:bun /data
-ENTRYPOINT ["/bin/sh", "-c", "chown bun:bun /data $BLOB_DIR && exec gosu bun \"$@\"", "--"]
+ENV DATABASE_URL=sqlite:/data/db/notes.db
 
 EXPOSE 3000
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-  CMD bun -e "fetch('http://localhost:3000/health').then(r=>{if(!r.ok)throw r;process.exit(0)}).catch(()=>process.exit(1))"
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD curl --fail --silent --show-error http://127.0.0.1:3000/health >/dev/null || exit 1
 
-CMD ["bun", "dist/index.js"]
+# The previous TypeScript image wrote blobs as uid 1000. Keep that uid and
+# repair only mount roots before dropping privileges; existing blob trees stay
+# writable without an expensive recursive chown on every boot.
+ENTRYPOINT ["/bin/sh", "-c", "mkdir -p /data/db \"$BLOB_DIR\" && chown notes:notes /data /data/db \"$BLOB_DIR\" && exec gosu notes \"$@\"", "--"]
+CMD ["futo-notes-server"]

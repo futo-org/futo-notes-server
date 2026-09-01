@@ -1,27 +1,28 @@
 #!/bin/sh
 # FUTO Notes server installer.
 #
-#   curl -fsSL https://gitlab.futo.org/futo-notes/futo-notes-server/-/raw/main/install.sh | sh
+#   curl -fsSL https://notes.futo.tech/install-server.sh | sh
 #
-# Brings up a self-hosted, single-user E2EE sync server with Docker Compose:
-# pulls the image, writes a private .env, starts Postgres +
-# the server, and waits for it to come up.
+# Brings up a self-hosted, single-user end-to-end-encrypted sync server with
+# Docker Compose: pulls the image, writes a private .env, starts the server,
+# and waits for it to report healthy. Notes and blobs are stored encrypted;
+# the server never sees their contents. There is no database server to run --
+# metadata lives in SQLite inside the data directory.
 #
 # Interactive by default (prompts read from /dev/tty so they work under the
 # pipe above). Every prompt also has an env-var override, so the same script
-# runs fully non-interactively for CI/automation:
+# runs fully non-interactively:
 #
-#   FUTO_ADMIN_PASSWORD=hunter2 FUTO_NOTES_DIR=/opt/futo-notes \
-#     sh -c "$(curl -fsSL .../install.sh)"
+#   FUTO_NOTES_PASSWORD=hunter2 FUTO_NOTES_DIR=/opt/futo-notes \
+#     sh -c "$(curl -fsSL https://notes.futo.tech/install-server.sh)"
 #
 # Env overrides:
-#   FUTO_NOTES_DIR        install directory            (default: ~/futo-notes)
-#   FUTO_NOTES_PORT       host port to expose          (default: 3005)
-#   FUTO_ADMIN_PASSWORD   admin password (else prompt)
-#   FUTO_NOTES_IMAGE      server image to run          (default: stable)
-#   FUTO_NOTES_DATA_DIR   blob + Postgres data dir     (default: <dir>/futo-notes-data)
-#   POSTGRES_PASSWORD     DB password                  (default: random)
-#   FUTO_NOTES_COMPOSE_URL  compose file to fetch      (default: main on GitLab)
+#   FUTO_NOTES_DIR          install directory        (default: ~/futo-notes)
+#   FUTO_NOTES_PORT         host port to expose      (default: 3005)
+#   FUTO_NOTES_PASSWORD     sync password (else prompt)
+#   FUTO_NOTES_DATA_DIR     data directory           (default: <dir>/futo-notes-data)
+#   FUTO_NOTES_IMAGE        server image to run      (default: futotech/notes-server:stable)
+#   FUTO_NOTES_COMPOSE_URL  compose file to fetch    (default: main on GitLab)
 
 set -eu
 
@@ -44,7 +45,7 @@ fi
 
 info() { printf '%s\n' "$*"; }
 step() { printf '%s==>%s %s\n' "$BOLD" "$OFF" "$*"; }
-ok()   { printf '%s✓%s %s\n' "$GREEN" "$OFF" "$*"; }
+ok()   { printf '%s\xe2\x9c\x93%s %s\n' "$GREEN" "$OFF" "$*"; }
 die()  { printf '%serror:%s %s\n' "$RED" "$OFF" "$*" >&2; exit 1; }
 
 # ---- interactivity --------------------------------------------------------
@@ -71,7 +72,7 @@ ask() {
     printf '%s: ' "$_prompt" >/dev/tty
   fi
   IFS= read -r _ans </dev/tty || _ans=""
-  [ -n "$_ans" ] && printf '%s' "$_ans" || printf '%s' "$_default"
+  if [ -n "$_ans" ]; then printf '%s' "$_ans"; else printf '%s' "$_default"; fi
 }
 
 # ask_secret <prompt> -> echoes the answer, input not displayed
@@ -85,28 +86,30 @@ ask_secret() {
   printf '%s' "$_sec"
 }
 
-gen_secret() {
-  if command -v openssl >/dev/null 2>&1; then
-    openssl rand -hex 32
-  else
-    LC_ALL=C tr -dc 'a-f0-9' </dev/urandom | dd bs=1 count=64 2>/dev/null
-  fi
+# absolute <path> -> echoes the path resolved against the current directory
+absolute() {
+  case "$1" in
+    /*) printf '%s' "$1" ;;
+    *)  printf '%s/%s' "$(pwd)" "${1#./}" ;;
+  esac
 }
 
 # ---- preflight ------------------------------------------------------------
 
 step "Checking prerequisites"
 
-command -v docker >/dev/null 2>&1 || die "Docker is not installed. See https://docs.docker.com/engine/install/"
+command -v curl >/dev/null 2>&1 || die "curl is required."
 
-if docker compose version >/dev/null 2>&1; then
-  COMPOSE="docker compose"
-else
-  die "Docker Compose v2 plugin not found. Install it: https://docs.docker.com/compose/install/"
-fi
+command -v docker >/dev/null 2>&1 \
+  || die "Docker is not installed. See https://docs.docker.com/engine/install/"
+
+docker compose version >/dev/null 2>&1 \
+  || die "Docker Compose v2 plugin not found. Install it: https://docs.docker.com/compose/install/"
+
+COMPOSE="docker compose"
+DOCKER="docker"
 
 # The daemon may require elevated privileges (user not in the docker group).
-DOCKER="docker"
 if ! docker info >/dev/null 2>&1; then
   if command -v sudo >/dev/null 2>&1 && sudo docker info >/dev/null 2>&1; then
     DOCKER="sudo docker"
@@ -117,8 +120,6 @@ if ! docker info >/dev/null 2>&1; then
   fi
 fi
 
-command -v curl >/dev/null 2>&1 || die "curl is required."
-
 ok "Docker and Compose are available"
 
 # ---- gather configuration -------------------------------------------------
@@ -126,62 +127,80 @@ ok "Docker and Compose are available"
 step "Configuration"
 
 INSTALL_DIR="$(ask 'Install directory' "$INSTALL_DIR")"
-PORT="$(ask 'Port to expose the server on' "$PORT")"
+[ -n "$INSTALL_DIR" ] || die "Install directory cannot be empty."
+INSTALL_DIR="$(absolute "$INSTALL_DIR")"
 
-if [ -n "${FUTO_ADMIN_PASSWORD:-}" ]; then
-  ADMIN_PASSWORD="$FUTO_ADMIN_PASSWORD"
-elif [ "$INTERACTIVE" = "1" ]; then
-  while :; do
-    ADMIN_PASSWORD="$(ask_secret 'Admin password')"
-    [ -z "$ADMIN_PASSWORD" ] && { info "Password cannot be empty."; continue; }
-    _confirm="$(ask_secret 'Confirm admin password')"
-    [ "$ADMIN_PASSWORD" = "$_confirm" ] && break
-    info "Passwords did not match — try again."
-  done
-else
-  die "FUTO_ADMIN_PASSWORD must be set when running non-interactively."
+PORT="$(ask 'Port to expose the server on' "$PORT")"
+case "$PORT" in
+  ''|*[!0-9]*) die "Port must be a number, got '$PORT'." ;;
+esac
+
+if [ -e "$INSTALL_DIR/.env" ]; then
+  info "$INSTALL_DIR/.env already exists, so this looks like an existing install."
+  info "To upgrade it instead, run:"
+  info "    cd $INSTALL_DIR && $COMPOSE pull && $COMPOSE up -d"
+  die "Refusing to overwrite $INSTALL_DIR/.env."
 fi
 
-# Docker Compose .env values cannot safely contain physical line breaks. Keep
-# the supported form explicit instead of silently changing the credential.
+if [ -n "${FUTO_NOTES_PASSWORD:-}" ]; then
+  PASSWORD="$FUTO_NOTES_PASSWORD"
+elif [ "$INTERACTIVE" = "1" ]; then
+  while :; do
+    PASSWORD="$(ask_secret 'Sync password')"
+    if [ -z "$PASSWORD" ]; then
+      info "Password cannot be empty."
+      continue
+    fi
+    _confirm="$(ask_secret 'Confirm sync password')"
+    [ "$PASSWORD" = "$_confirm" ] && break
+    info "Passwords did not match - try again."
+  done
+else
+  die "FUTO_NOTES_PASSWORD must be set when running non-interactively."
+fi
+[ -n "$PASSWORD" ] || die "FUTO_NOTES_PASSWORD cannot be empty."
+
+# Compose .env values cannot represent a physical line break. Reject rather
+# than silently storing a different credential than the one supplied.
 CR="$(printf '\r')"
-case "$ADMIN_PASSWORD" in
+case "$PASSWORD" in
   *'
-'*|*"$CR"*) die "Admin password must not contain newline characters." ;;
+'*|*"$CR"*) die "Sync password must not contain newline characters." ;;
 esac
 
 DATA_DIR="${FUTO_NOTES_DATA_DIR:-$INSTALL_DIR/futo-notes-data}"
-PG_PASSWORD="${POSTGRES_PASSWORD:-$(gen_secret)}"
+DATA_DIR="$(absolute "$DATA_DIR")"
 
 # ---- install --------------------------------------------------------------
 
 step "Installing into $INSTALL_DIR"
 mkdir -p "$INSTALL_DIR"
+mkdir -p "$DATA_DIR"
 cd "$INSTALL_DIR"
 
 info "Fetching compose file"
-curl -fsSL "$COMPOSE_URL" -o docker-compose.yml || die "Could not download compose file from $COMPOSE_URL"
-
-info "Pulling server image (this may take a minute)"
-$DOCKER pull "$IMAGE" >/dev/null || die "Could not pull image $IMAGE"
+curl -fsSL "$COMPOSE_URL" -o docker-compose.yml \
+  || die "Could not download compose file from $COMPOSE_URL"
 
 info "Writing .env"
-# Compose double-quoted dotenv values can represent every supported password
-# character. Escape the three characters Compose interprets; single quotes and
-# spaces remain literal.
-ESCAPED_ADMIN_PASSWORD="$(printf '%s' "$ADMIN_PASSWORD" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/[$]/&&/g')"
+# Compose double-quoted dotenv values can carry every allowed password
+# character. Escape the three the parser interprets: a backslash, a double
+# quote, and a dollar sign (doubled to mean a literal '$').
+ESCAPED_PASSWORD="$(printf '%s' "$PASSWORD" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/[$]/&&/g')"
 umask 077
 cat > .env <<EOF
-# Generated by install.sh — keep this file private.
+# Generated by install.sh - keep this file private.
 # Back up this file together with $DATA_DIR to back up your server.
-FUTO_NOTES_PASSWORD="$ESCAPED_ADMIN_PASSWORD"
-POSTGRES_PASSWORD=$PG_PASSWORD
-FUTO_NOTES_PORT=$PORT
+FUTO_NOTES_PASSWORD="$ESCAPED_PASSWORD"
 FUTO_NOTES_DATA_DIR=$DATA_DIR
+FUTO_NOTES_PORT=$PORT
 FUTO_NOTES_IMAGE=$IMAGE
 EOF
 chmod 600 .env
 umask 022
+
+step "Pulling the server image (this may take a minute)"
+$COMPOSE pull || die "docker compose pull failed"
 
 step "Starting the server"
 $COMPOSE up -d || die "docker compose up failed"
@@ -192,7 +211,7 @@ info "Waiting for the server to become healthy"
 HEALTHY=0
 i=0
 while [ "$i" -lt 60 ]; do
-  if curl -fsS "http://localhost:$PORT/health" >/dev/null 2>&1; then
+  if curl -fsS "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
     HEALTHY=1; break
   fi
   i=$((i + 1))
@@ -203,30 +222,40 @@ if [ "$HEALTHY" != "1" ]; then
   printf '%s\n' "${RED}Server did not report healthy within 60s.${OFF}" >&2
   info "Recent logs:"
   $COMPOSE logs --tail 30 || true
-  die "Check the logs above. Re-run '$COMPOSE up -d' once the issue is resolved."
+  info "Full logs: cd $INSTALL_DIR && $COMPOSE logs"
+  die "Fix the problem above, then run '$COMPOSE up -d' from $INSTALL_DIR."
 fi
 
 # ---- done -----------------------------------------------------------------
 
+HOST_ADDR="localhost"
+if command -v hostname >/dev/null 2>&1; then
+  _ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  [ -n "$_ip" ] && HOST_ADDR="$_ip"
+fi
+
 printf '\n'
 ok "FUTO Notes server is up and running."
 printf '\n'
+info "  Install directory:  $INSTALL_DIR"
+info "  Data directory:     $DATA_DIR"
+printf '\n'
 info "${BOLD}Connect the app${OFF}"
-info "  Open FUTO Notes → Settings → Sync and enter:"
-info "    Server URL:  http://<this-server's-IP-or-hostname>:$PORT"
-info "    Password:    the admin password you just set"
-info "  (Use http://localhost:$PORT only when the app runs on this server.)"
+info "  FUTO Notes -> Settings -> Self-hosted sync -> Server URL:"
+info "      http://$HOST_ADDR:$PORT"
+info "  Then sign in with the sync password you just set."
 printf '\n'
 info "${BOLD}Manage it${OFF} (from $INSTALL_DIR)"
-info "    $COMPOSE ps                 # status"
-info "    $COMPOSE logs -f            # follow logs"
-info "    $COMPOSE pull && $COMPOSE up -d   # upgrade"
-info "    $COMPOSE down               # stop (data is preserved)"
+info "    $COMPOSE ps                        # status"
+info "    $COMPOSE logs -f                   # follow logs"
+info "    $COMPOSE pull && $COMPOSE up -d    # upgrade"
+info "    $COMPOSE down                      # stop (data is preserved)"
 printf '\n'
-info "${BOLD}Your data${OFF}"
-info "    Lives in $DATA_DIR — back it up along with $INSTALL_DIR/.env"
-printf '\n'
-info "${BOLD}Before exposing this to the internet${OFF}"
-info "  • Put a TLS reverse proxy in front (Caddy, nginx, or Tailscale Funnel)."
-info "  • The server rate-limits password login automatically."
+info "${BOLD}Next steps${OFF}"
+info "  1. Back up $DATA_DIR (and this install's .env). That directory is the"
+info "     whole server: SQLite metadata and encrypted blobs."
+info "  2. To reach this server from outside your LAN, put TLS in front of it"
+info "     with Tailscale Funnel or Caddy. See the \"HTTPS for remote access\""
+info "     section of the README:"
+info "     https://gitlab.futo.org/futo-notes/futo-notes-server#https-for-remote-access"
 printf '\n'

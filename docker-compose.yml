@@ -1,4 +1,26 @@
 services:
+  server:
+    profiles: ["server"]
+    build: .
+    image: ${FUTO_NOTES_IMAGE:-futo-notes-server:local}
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://futo_notes:futo_notes@postgres:5432/futo_notes
+      PORT: "3000"
+      AUTH_MODE: ${AUTH_MODE:-password}
+      FUTO_NOTES_PASSWORD: ${FUTO_NOTES_PASSWORD:-}
+      FUTO_NOTES_PASSWORD_HASH: ${FUTO_NOTES_PASSWORD_HASH:-}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      BLOB_DIR: /data/blobs
+      BLOB_GC_ENABLED: ${BLOB_GC_ENABLED:-true}
+    ports:
+      - "${FUTO_NOTES_PORT:-3005}:3000"
+    volumes:
+      - ${FUTO_NOTES_BLOB_DIR:-./blobs}:/data/blobs
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   postgres:
     image: postgres:16
     container_name: futo-notes-postgres

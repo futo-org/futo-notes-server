@@ -1,5 +1,9 @@
 # Managed Service — Launch Readiness
 
+> **Written against the TypeScript server.** The decisions and gaps below still
+> stand, but the `src/...` paths it cites belong to the superseded TypeScript
+> implementation and no longer exist in this tree.
+
 Working notes on what it takes to offer FUTO Notes as a fully managed, paid,
 multi-tenant service. Captures decisions and findings as of 2026-06-17.
 

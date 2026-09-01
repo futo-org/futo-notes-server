@@ -1,10 +1,6 @@
-node_modules/
-blobs/
-dist/
+.git
 .env
-.env.local
+blobs
+dist
+docs
 *.log
-.git/
-.DS_Store
-tests/
-packages/
