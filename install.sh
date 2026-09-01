@@ -1,7 +1,7 @@
 #!/bin/sh
 # FUTO Notes server installer.
 #
-#   curl -fsSL https://notes.futo.tech/install.sh | sh
+#   curl -fsSL https://notes.futo.tech/install-server.sh | sh
 #
 # Brings up a self-hosted, single-user end-to-end-encrypted sync server with
 # Docker Compose: pulls the image, writes a private .env, starts the server,
@@ -14,7 +14,7 @@
 # runs fully non-interactively:
 #
 #   FUTO_NOTES_PASSWORD=hunter2 FUTO_NOTES_DIR=/opt/futo-notes \
-#     sh -c "$(curl -fsSL https://notes.futo.tech/install.sh)"
+#     sh -c "$(curl -fsSL https://notes.futo.tech/install-server.sh)"
 #
 # Env overrides:
 #   FUTO_NOTES_DIR          install directory        (default: ~/futo-notes)

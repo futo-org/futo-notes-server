@@ -10,7 +10,7 @@ TypeScript server, so existing clients and existing data keep working.
 ## Install with one command
 
 ```bash
-curl -fsSL https://notes.futo.tech/install.sh | sh
+curl -fsSL https://notes.futo.tech/install-server.sh | sh
 ```
 
 The script checks that Docker and the Compose v2 plugin are present, writes a
