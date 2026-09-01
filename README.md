@@ -1,43 +1,60 @@
-# FUTO Notes server (Go)
+# FUTO Notes server
 
-Self-hosted encrypted sync for FUTO Notes. This implementation is wire- and
-storage-compatible with the previous TypeScript server.
+Self-hosted encrypted sync for FUTO Notes. Your notes are encrypted on your
+device before they are uploaded, so this server stores opaque encrypted blobs
+and never sees their contents. It is single-user: one sync password, one vault,
+no accounts to manage. New installs need no database server, only a directory on
+disk. This implementation is wire- and storage-compatible with the previous
+TypeScript server, so existing clients and existing data keep working.
 
-## Self-host with Docker
+## Install with one command
 
-Copy `docker-compose.production.yml`, create `.env`, and start the server:
+```bash
+curl -fsSL https://notes.futo.tech/install.sh | sh
+```
+
+The script checks that Docker and the Compose v2 plugin are present, writes a
+private `.env` and a `docker-compose.yml` into `~/futo-notes`, and starts the
+server. It then waits for the server to report healthy and prints the URL to
+paste into the app.
+
+It asks you for three things: the install directory (`~/futo-notes` by
+default), the port to expose (3005 by default), and the sync password you will
+enter in the app. Set `FUTO_NOTES_PASSWORD`, `FUTO_NOTES_DIR`,
+`FUTO_NOTES_PORT`, or `FUTO_NOTES_DATA_DIR` in the environment to skip the
+prompts and run it unattended.
+
+## Install with Docker Compose by hand
+
+Download the compose file and the example environment file, fill in the
+password, and start the server:
+
+```bash
+mkdir -p ~/futo-notes && cd ~/futo-notes
+curl -fsSLO https://gitlab.futo.org/futo-notes/futo-notes-server/-/raw/main/docker-compose.production.yml
+curl -fsSL https://gitlab.futo.org/futo-notes/futo-notes-server/-/raw/main/.env.production.example -o .env
+chmod 600 .env
+$EDITOR .env
+docker compose -f docker-compose.production.yml up -d
+curl --fail http://localhost:3005/health
+```
+
+`.env` needs at least a sync password, and an absolute data directory if you do
+not want it beside the compose file:
 
 ```dotenv
 FUTO_NOTES_PASSWORD=replace-with-your-sync-password
 FUTO_NOTES_DATA_DIR=/absolute/path/to/futo-notes-data
 ```
 
-```bash
-docker compose -f docker-compose.production.yml up -d
-curl --fail http://localhost:3005/health
-```
-
 SQLite metadata and encrypted blobs both live under `FUTO_NOTES_DATA_DIR`.
-Back up the complete server by stopping it, copying that directory, and
-starting it again:
 
-```bash
-docker compose -f docker-compose.production.yml stop server
-cp -a /absolute/path/to/futo-notes-data /absolute/path/to/futo-notes-data.backup
-docker compose -f docker-compose.production.yml start server
-```
+## Run a release binary instead
 
-The image is `futotech/notes-server:stable` for both `linux/amd64` and
-`linux/arm64`. While the Go rewrite is under test, every `go-rewrite` build also
-publishes `futotech/notes-server:go-candidate` (moving) alongside
-`futotech/notes-server:candidate-<short-sha>` (immutable).
-
-Existing TypeScript installations must first follow
-[the TypeScript-to-Go upgrade guide](docs/UPGRADING_FROM_TYPESCRIPT.md). They
-continue using Postgres. Afterward, they can optionally follow
-[Switching from Postgres to SQLite](docs/Switching%20from%20Postgres%20to%20SQLite.md).
-
-## Run a release binary
+Download a binary for your platform from the
+[package registry](https://gitlab.futo.org/futo-notes/futo-notes-server/-/packages).
+Each release tag publishes Linux amd64/arm64, macOS amd64/arm64, and Windows
+amd64 binaries plus a SHA-256 checksum file.
 
 New installs do not need a database server or `DATABASE_URL`. Set one password
 variable and an absolute `BLOB_DIR`; SQLite defaults to `./data/notes.db`:
@@ -58,72 +75,101 @@ lost its `DATABASE_URL`. Recover the intended configuration instead of syncing
 against an empty vault. `ALLOW_FRESH_DATABASE=true` is available only for an
 intentional fresh database beside pre-existing blob files.
 
-Release tags produce Linux amd64/arm64, macOS amd64/arm64, and Windows amd64
-binaries plus SHA-256 checksums. `scripts/build-release.sh <version>` produces
-the same files locally.
+To keep it running, put the configuration in `/etc/futo-notes-server.env`
+(mode 600, owned by root) and install a unit at
+`/etc/systemd/system/futo-notes-server.service`:
 
-## Testing
+```ini
+[Unit]
+Description=FUTO Notes sync server
+After=network-online.target
+Wants=network-online.target
 
-`go test ./...` runs the unit tests and the SQLite application lifecycle test
-without external dependencies. Postgres-backed tests also run when
-`OBJECTS_TEST_DATABASE_URL`, `EVENTS_TEST_DATABASE_URL`,
-`JOBS_TEST_DATABASE_URL`, `BLOBS_TEST_DATABASE_URL`, and
-`SERVER_TEST_DATABASE_URL` are set to scratch databases. The Postgres-to-SQLite
-copy test also runs when `MIGRATION_TEST_DATABASE_URL` is set. Every URL must
-identify a scratch database that tests may freely write to; never use a
-development or production database.
+[Service]
+User=futo-notes
+Group=futo-notes
+EnvironmentFile=/etc/futo-notes-server.env
+WorkingDirectory=/srv/futo-notes
+ExecStart=/usr/local/bin/futo-notes-server
+Restart=on-failure
 
-For a convenient local Postgres run on port 5433:
-
-```bash
-docker compose up -d postgres
-docker exec futo-notes-postgres createdb -U futo_notes notes_test
-URL='postgres://futo_notes:futo_notes@localhost:5433/notes_test'
-OBJECTS_TEST_DATABASE_URL=$URL EVENTS_TEST_DATABASE_URL=$URL \
-JOBS_TEST_DATABASE_URL=$URL BLOBS_TEST_DATABASE_URL=$URL \
-SERVER_TEST_DATABASE_URL=$URL MIGRATION_TEST_DATABASE_URL=$URL \
-go test -race -count=1 -p 1 ./...
+[Install]
+WantedBy=multi-user.target
 ```
 
-CI runs the Go suite with `-race`. Fuzz targets are also available, for example
-`go test -fuzz=FuzzStreamBlobBatch ./cmd/server`.
-
-## Development and launch gates
-
-The default developer server uses SQLite and needs no database setup:
+Create the user and directory first, then enable it:
 
 ```bash
-AUTH_MODE=dev GOTOOLCHAIN=auto go run ./cmd/server
+sudo useradd --system --home /srv/futo-notes --shell /usr/sbin/nologin futo-notes
+sudo install -d -o futo-notes -g futo-notes /srv/futo-notes
+sudo systemctl enable --now futo-notes-server
 ```
 
-Postgres remains available for exercising existing-install and hosted paths:
+## Connect the app
+
+In FUTO Notes, go to Settings, then Self-hosted sync, and set the Server URL to
+your server, for example `http://192.168.1.10:3005`. Sign in with the sync
+password from your `.env`. The Android and iOS apps accept plain `http://` URLs,
+so a server on your own network needs no certificate.
+
+## HTTPS for remote access
+
+The server speaks plain HTTP. To reach it from outside your own network, put a
+TLS reverse proxy in front of it. Two easy options:
+
+- [Tailscale Funnel](https://tailscale.com/kb/1223/funnel) publishes the server
+  on a `*.ts.net` hostname with a certificate, without opening a port on your
+  router.
+- [Caddy](https://caddyserver.com) gets a certificate itself. The whole
+  Caddyfile is three lines:
+
+  ```caddyfile
+  notes.example.com {
+      reverse_proxy localhost:3005
+  }
+  ```
+
+The login endpoint is rate-limited to 10 attempts per minute per client address.
+Behind a reverse proxy the server sees only the proxy's address, so every client
+shares one bucket; keep that in mind if several devices sign in at once.
+
+## Upgrade
+
+With Docker Compose, from your install directory:
 
 ```bash
-docker compose up -d postgres
+docker compose pull && docker compose up -d
 ```
 
-Run the compatibility gates before release:
+If you installed by hand and kept the file named
+`docker-compose.production.yml`, add `-f docker-compose.production.yml` to both
+commands.
+
+With a release binary, replace the file and restart the service:
 
 ```bash
-GOTOOLCHAIN=auto go run ./cmd/compare -mode all
-GOTOOLCHAIN=auto go run ./cmd/compare -engine-parity -mode dev
-./scripts/rust-acceptance.sh ts
-./scripts/rust-acceptance.sh go
-./scripts/rust-acceptance.sh go sqlite
-./scripts/sqlite-migration-rehearsal.sh
-./scripts/adoption-rehearsal.sh all
-./scripts/compose-rehearsal.sh
+sudo systemctl restart futo-notes-server
 ```
 
-The adoption rehearsal requires local TypeScript-server and FUTO Notes client
-checkouts; override their locations with `FUTO_TS_SERVER_REPO` and
-`FUTO_NOTES_CLIENT_REPO`.
+## Back up
 
-During a staging soak, audit the immutable candidate and its containers with:
+The data directory is the whole server. Stop the server, copy it, start again:
 
 ```bash
-CANDIDATE_TAG=candidate-abcdef12
-SOAK_START=2026-08-21T20:15:00Z
-FUTO_SOAK_ENGINES='postgres sqlite' \
-./scripts/staging-soak-check.sh "$CANDIDATE_TAG" "$SOAK_START"
+docker compose -f docker-compose.production.yml stop server
+cp -a /absolute/path/to/futo-notes-data /absolute/path/to/futo-notes-data.backup
+docker compose -f docker-compose.production.yml start server
 ```
+
+Back up `.env` alongside it, since it holds your sync password.
+
+## Existing TypeScript installations
+
+Existing TypeScript installations must first follow
+[the TypeScript-to-Go upgrade guide](docs/UPGRADING_FROM_TYPESCRIPT.md). They
+continue using Postgres. Afterward, they can optionally follow
+[Switching from Postgres to SQLite](docs/Switching%20from%20Postgres%20to%20SQLite.md).
+
+---
+
+Working on the server itself? See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
