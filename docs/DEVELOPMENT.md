@@ -55,11 +55,16 @@ GOTOOLCHAIN=auto go run ./cmd/compare -engine-parity -mode dev
 ./scripts/sqlite-migration-rehearsal.sh
 ./scripts/adoption-rehearsal.sh all
 ./scripts/compose-rehearsal.sh
+./scripts/sqlite-switch-rehearsal.sh
 ```
 
 The adoption rehearsal requires local TypeScript-server and FUTO Notes client
 checkouts; override their locations with `FUTO_TS_SERVER_REPO` and
 `FUTO_NOTES_CLIENT_REPO`.
+
+`sqlite-switch-rehearsal.sh` runs `migrate-to-sqlite.sh` — the one command a
+self-hoster uses to move off Postgres — against a Postgres install that
+deliberately does not match the shipped compose file, then rolls it back.
 
 During a staging soak, audit the immutable candidate and its containers with:
 

@@ -248,7 +248,7 @@ the switch.
   fresh-database guard instead of silently starting empty.
 - **README** self-host section: SQLite is the only documented path; backup
   is "stop, copy `/data`, start" — one directory now holds everything.
-- **New doc**: `docs/Switching from Postgres to SQLite.md` — prerequisites,
+- **New doc**: `docs/Postgres to SQLite migration.md` — prerequisites,
   the command, the env flip, verification, rollback, and the
   post-switch-edits caveat.
 - **Dev compose**: `docker compose up -d postgres` stays, for working on
