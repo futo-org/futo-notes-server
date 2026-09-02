@@ -96,10 +96,9 @@ health checks.
 
 Before you start:
 
-1. If you are still on the TypeScript server,
-   [upgrade to the Go server](UPGRADING_FROM_TYPESCRIPT.md) while staying on
-   Postgres. The copy expects the Go server's schema, which the Go server
-   applies at boot.
+1. If you are still on the TypeScript server, upgrade to the Go image while
+   staying on Postgres first. The copy expects the Go server's schema, which
+   the Go server applies at boot.
 2. Confirm the Go server is healthy and syncing normally.
 3. Choose the SQLite path. It must not already hold a database, and the user
    the server runs as must be able to write to its directory.

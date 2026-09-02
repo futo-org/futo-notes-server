@@ -165,9 +165,14 @@ Back up `.env` alongside it, since it holds your sync password.
 
 ## Existing TypeScript installations
 
-Existing TypeScript installations must first follow
-[the TypeScript-to-Go upgrade guide](docs/UPGRADING_FROM_TYPESCRIPT.md). They
-continue using Postgres. Afterward, one command moves them to SQLite; see
+Upgrade to the Go image while staying on Postgres: keep the same
+`DATABASE_URL`, blob directory, and password or password hash. The Go server
+uses the same schema, session tokens, blob layout and HTTP API, applies any
+missing migrations at boot, and warns once for each environment variable it no
+longer uses. Back up the database and the blob directory together before you
+start — they are one logical data set.
+
+Afterward, one command moves you to SQLite; see
 [Moving your server from Postgres to SQLite](docs/Postgres%20to%20SQLite%20migration.md).
 
 ---
