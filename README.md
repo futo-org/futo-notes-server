@@ -167,8 +167,8 @@ Back up `.env` alongside it, since it holds your sync password.
 
 Existing TypeScript installations must first follow
 [the TypeScript-to-Go upgrade guide](docs/UPGRADING_FROM_TYPESCRIPT.md). They
-continue using Postgres. Afterward, they can optionally follow
-[Switching from Postgres to SQLite](docs/Switching%20from%20Postgres%20to%20SQLite.md).
+continue using Postgres. Afterward, one command moves them to SQLite; see
+[Moving your server from Postgres to SQLite](docs/Postgres%20to%20SQLite%20migration.md).
 
 ---
 
