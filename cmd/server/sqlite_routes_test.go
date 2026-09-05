@@ -109,4 +109,30 @@ func TestSQLiteRoutesEndToEnd(t *testing.T) {
 	if listed.StatusCode != http.StatusOK || !strings.Contains(listed.Body, uploaded.Key) {
 		t.Fatalf("list = %d %q", listed.StatusCode, listed.Body)
 	}
+
+	var createdObject struct {
+		Object struct {
+			ID string `json:"id"`
+		} `json:"object"`
+	}
+	if err := json.Unmarshal(createBody, &createdObject); err != nil {
+		t.Fatal(err)
+	}
+	objectURL := server.URL + "/api/collections/" + claimBody.Collection.ID + "/objects/" + createdObject.Object.ID
+	tombstone := `{"object":{"id":"` + createdObject.Object.ID + `","version":"2","change_seq":"2","deleted":true},"collectionVersion":2}`
+	for _, step := range []struct {
+		query  string
+		status int
+		body   string
+	}{
+		{"", http.StatusOK, tombstone},
+		{"", http.StatusOK, tombstone},
+		{"?version=1", http.StatusConflict, `{"error":"version conflict","currentVersion":2,"currentBlobKey":"` + uploaded.Key + `"}`},
+		{"?version=2", http.StatusOK, tombstone},
+	} {
+		deleted := doRequest(t, client, http.MethodDelete, objectURL+step.query, "", loggedIn.Token, nil)
+		if deleted.StatusCode != step.status || strings.TrimSpace(deleted.Body) != step.body {
+			t.Fatalf("delete%s = %d %q, want %d %q", step.query, deleted.StatusCode, deleted.Body, step.status, step.body)
+		}
+	}
 }

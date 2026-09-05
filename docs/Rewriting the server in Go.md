@@ -331,7 +331,7 @@ Blobs on-disk aren't immediately deleted.
 3. check mutation_results to see if this has been tried before and if so, what happened?
 4. check for and lock the collections row
 5. check for and lock the objects row
-6. If the object has already been deleted, return the current tombstone as a successful no-op without changing the object version, collection cursor, or publishing an event. Otherwise, if the client requested deletion of a specific version, check that version and return 409 when it does not match.
+6. If the client requested deletion of a specific version, check that version and return 409 when it does not match; this applies to tombstones too. Otherwise, if the object has already been deleted, return the current tombstone as a successful no-op without changing the object version, collection cursor, or publishing an event.
    Go deviation: the legacy TS server increments the tombstone and collection cursor again on every re-delete. The OpenAPI contract now specifies a successful no-op, which avoids spurious sync work and makes retries stable. A client receives an older version/cursor than it would from TS only when it deletes an object that is already a tombstone. Accepted.
 7. Update the collection row's version to +=1, return the value
 8. Update `objects` table, set deleted to true, bump the object version number and change_seq

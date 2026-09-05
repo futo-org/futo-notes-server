@@ -117,7 +117,16 @@ func TestObjectMutationLifecycle(t *testing.T) {
 		t.Fatalf("unexpected delta: %#v", rows)
 	}
 	staleVersion := int64(1)
-	redeleted, err := objects.Delete(ctx, database, publisher, userID, collectionID, created.Response.Object.ID, "delete-2", &staleVersion)
+	staleRedelete, err := objects.Delete(ctx, database, publisher, userID, collectionID, created.Response.Object.ID, "delete-stale", &staleVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if staleRedelete.Code != objects.VersionConflict || staleRedelete.Conflict.CurrentVersion != 3 {
+		t.Fatalf("unexpected stale tombstone re-delete: %#v", staleRedelete)
+	}
+	assertNoObjectNotification(t, listener, userID, collectionID)
+	tombstoneVersion := int64(3)
+	redeleted, err := objects.Delete(ctx, database, publisher, userID, collectionID, created.Response.Object.ID, "delete-2", &tombstoneVersion)
 	if err != nil {
 		t.Fatal(err)
 	}
