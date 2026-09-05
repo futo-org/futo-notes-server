@@ -675,7 +675,8 @@ paths:
         (edit-vs-delete race; the edit wins). Omit it to delete
         unconditionally. Deleting an already-deleted object is a successful
         no-op: it returns the current tombstone without advancing either the
-        object version or collection cursor.
+        object version or collection cursor. A stale `?version` still returns
+        `409` against a tombstone.
 
         The success body carries the compact object projection
         (`id`, `version`, `change_seq`, `deleted`), not the full row.

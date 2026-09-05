@@ -361,8 +361,9 @@ DELETE $BASE/api/collections/:cid/objects/:oid[?version=N]
     → 404 not found
 ```
 Soft delete sets `deleted: true` and bumps the version so peers see the tombstone. Supplying `?version=N` makes the delete lose to a newer concurrent edit (edit-vs-delete race; edit wins). Omit it to delete unconditionally.
-Deleting an already-deleted object is another mutation: without a replayed
-Mutation ID it advances the tombstone version and collection cursor again.
+Deleting an already-deleted object is a successful no-op: it returns the current
+tombstone without advancing the object version or collection cursor. A stale
+`?version` still returns `409` against a tombstone.
 
 ### Single-round-trip variants
 

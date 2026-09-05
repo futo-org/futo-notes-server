@@ -757,6 +757,19 @@ func Delete(ctx context.Context, db *appdb.DB, publisher events.Publisher, userI
 	if err != nil {
 		return DeleteOutcome{}, err
 	}
+	// The race guard applies to tombstones too: a stale ?version must 409
+	// before the re-delete no-op below.
+	currentVersion, _ := strconv.ParseInt(current.Version, 10, 64)
+	if expectedVersion != nil && *expectedVersion != currentVersion {
+		conflict := Conflict{Error: "version conflict", CurrentVersion: currentVersion, CurrentBlobKey: current.BlobKey}
+		if err := saveResult(ctx, tx, userID, mutationID, intent, 409, conflict, nil); err != nil {
+			return DeleteOutcome{}, err
+		}
+		if err := tx.Commit(); err != nil {
+			return DeleteOutcome{}, err
+		}
+		return DeleteOutcome{Code: VersionConflict, Conflict: conflict}, nil
+	}
 	if current.Deleted {
 		var collectionVersion int64
 		if err := tx.QueryRowContext(ctx,
@@ -779,17 +792,6 @@ func Delete(ctx context.Context, db *appdb.DB, publisher events.Publisher, userI
 			return DeleteOutcome{}, err
 		}
 		return DeleteOutcome{Code: OK, Response: response}, nil
-	}
-	currentVersion, _ := strconv.ParseInt(current.Version, 10, 64)
-	if expectedVersion != nil && *expectedVersion != currentVersion {
-		conflict := Conflict{Error: "version conflict", CurrentVersion: currentVersion, CurrentBlobKey: current.BlobKey}
-		if err := saveResult(ctx, tx, userID, mutationID, intent, 409, conflict, nil); err != nil {
-			return DeleteOutcome{}, err
-		}
-		if err := tx.Commit(); err != nil {
-			return DeleteOutcome{}, err
-		}
-		return DeleteOutcome{Code: VersionConflict, Conflict: conflict}, nil
 	}
 	var collectionVersion int64
 	if err := tx.QueryRowContext(ctx, `UPDATE collections SET current_version = current_version + 1 WHERE id = $1 RETURNING current_version`, collectionID).Scan(&collectionVersion); err != nil {
