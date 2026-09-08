@@ -55,6 +55,23 @@ func UpsertLocalUser(ctx context.Context, database *db.DB) (User, error) {
 	return u, nil
 }
 
+// UpsertUserBySub returns the OIDC user for sub, creating it on first login
+// and updating its email and name on later logins. sub is the issuer's raw
+// subject identifier, stored without a prefix.
+func UpsertUserBySub(ctx context.Context, database *db.DB, sub, email, name string) (User, error) {
+	var u User
+	err := database.QueryRowContext(ctx,
+		`INSERT INTO users (id, sub, email, name) VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (sub) DO UPDATE SET email = EXCLUDED.email, name = EXCLUDED.name
+		 RETURNING id, email, name`,
+		uuid.NewV7().String(), sub, email, name).
+		Scan(&u.ID, &u.Email, &u.Name)
+	if err != nil {
+		return User{}, err
+	}
+	return u, nil
+}
+
 // UpsertUserByEmail returns the development user for email, creating it on
 // first login and updating its display name on later logins.
 func UpsertUserByEmail(ctx context.Context, database *db.DB, email, name string) (User, error) {

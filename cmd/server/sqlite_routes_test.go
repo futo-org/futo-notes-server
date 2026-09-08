@@ -34,7 +34,7 @@ func TestSQLiteRoutesEndToEnd(t *testing.T) {
 	}
 	hub := events.NewHub()
 	server := httptest.NewServer(routes(cfg, database, &blobs.Store{Dir: cfg.BlobDir}, hub,
-		events.NewPublisher(database.Dialect(), hub)))
+		events.NewPublisher(database.Dialect(), hub), nil))
 	defer server.Close()
 	client := serverClient(server)
 

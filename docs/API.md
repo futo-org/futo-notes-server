@@ -70,8 +70,8 @@ GET $BASE/
 }
 ```
 
-- `auth_mode` is `"dev"` or `"password"` (`"oidc"` is reserved for later). It tells you which login endpoint to use.
-- `signup` is `"closed"` in v1.
+- `auth_mode` is `"dev"`, `"password"`, or `"oidc"`. It tells you which login endpoint to use.
+- `signup` is `"closed"`, except `"open"` in `oidc` mode, since any FUTO account can log in.
 - `mutation_ids` advertises retry-safe object mutations. They are supported but
   optional for backward compatibility. Successful create outcomes remain
   available for the collection lifetime; other recorded outcomes are retained for
@@ -114,7 +114,20 @@ Content-Type: application/json
 ```
 Same response shape as password login. `400` if `email` is missing.
 
-### Session endpoints (both modes)
+### OIDC mode (`auth_mode: "oidc"`)
+
+"Log in with FUTO": Authorization Code + PKCE against the configured issuer. Browser-driven only.
+
+```
+GET $BASE/api/auth/oidc/start     → 302 to the identity provider's authorize endpoint
+GET $BASE/api/auth/oidc/callback  → completes the flow
+```
+- `start` sets a short-lived `oidc_flow` cookie carrying the OAuth `state` and PKCE verifier, and redirects.
+- `callback` requires that cookie and a matching `state` query parameter (`400` otherwise), exchanges the `code`, reads `sub`/`email`/`name` from the identity provider's userinfo endpoint, and upserts the user by `sub`. `502` if the provider omits `sub` or `email`.
+- On success: if the server runs with `DEV_UI=true`, redirects to `/dev`; otherwise returns the same `{ user, token }` body as password/dev login.
+- Rate limited like password login.
+
+### Session endpoints (all modes)
 
 ```
 GET  $BASE/api/auth        → 200 { "user": { "id", "email", "name" } }   // who am I

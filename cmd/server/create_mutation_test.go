@@ -50,7 +50,7 @@ func startMutationTestServer(t *testing.T, blobDir string) mutationTestServer {
 	}
 	hub := events.NewHub()
 	server := httptest.NewServer(routes(cfg, database, &blobs.Store{Dir: cfg.BlobDir}, hub,
-		events.NewPublisher(database.Dialect(), hub)))
+		events.NewPublisher(database.Dialect(), hub), nil))
 	t.Cleanup(server.Close)
 	client := serverClient(server)
 

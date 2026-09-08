@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -22,6 +23,10 @@ type Config struct {
 	AllowFreshDatabase bool   // ALLOW_FRESH_DATABASE, overrides the SQLite/blob safety guard
 	DBPoolMax          int
 	DBPoolIdleTimeout  time.Duration
+	OIDCIssuer         string // OIDC_ISSUER, trailing slash trimmed
+	OIDCClientID       string // OIDC_CLIENT_ID
+	OIDCClientSecret   string // OIDC_CLIENT_SECRET
+	OIDCRedirectURI    string // OIDC_REDIRECT_URI
 }
 
 func Load() (Config, error) {
@@ -39,9 +44,13 @@ func Load() (Config, error) {
 		BlobDir:            getDefault("BLOB_DIR", "./blobs"),
 		BlobGCEnabled:      os.Getenv("BLOB_GC_ENABLED") != "false",
 		AllowFreshDatabase: os.Getenv("ALLOW_FRESH_DATABASE") == "true",
+		OIDCIssuer:         strings.TrimSuffix(os.Getenv("OIDC_ISSUER"), "/"),
+		OIDCClientID:       os.Getenv("OIDC_CLIENT_ID"),
+		OIDCClientSecret:   os.Getenv("OIDC_CLIENT_SECRET"),
+		OIDCRedirectURI:    os.Getenv("OIDC_REDIRECT_URI"),
 	}
-	if cfg.AuthMode != "dev" && cfg.AuthMode != "password" {
-		return Config{}, fmt.Errorf("AUTH_MODE must be dev or password, got %q", cfg.AuthMode)
+	if cfg.AuthMode != "dev" && cfg.AuthMode != "password" && cfg.AuthMode != "oidc" {
+		return Config{}, fmt.Errorf("AUTH_MODE must be dev, password, or oidc, got %q", cfg.AuthMode)
 	}
 	if cfg.AuthMode == "password" {
 		switch {
@@ -49,6 +58,27 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("set only one of FUTO_NOTES_PASSWORD or FUTO_NOTES_PASSWORD_HASH when AUTH_MODE=password")
 		case cfg.Password == "" && cfg.PasswordHash == "":
 			return Config{}, fmt.Errorf("FUTO_NOTES_PASSWORD or FUTO_NOTES_PASSWORD_HASH is required when AUTH_MODE=password")
+		}
+	}
+	if cfg.AuthMode == "oidc" {
+		var missing []string
+		if cfg.OIDCIssuer == "" {
+			missing = append(missing, "OIDC_ISSUER")
+		}
+		if cfg.OIDCClientID == "" {
+			missing = append(missing, "OIDC_CLIENT_ID")
+		}
+		if cfg.OIDCClientSecret == "" {
+			missing = append(missing, "OIDC_CLIENT_SECRET")
+		}
+		if cfg.OIDCRedirectURI == "" {
+			missing = append(missing, "OIDC_REDIRECT_URI")
+		}
+		if len(missing) > 0 {
+			return Config{}, fmt.Errorf("%s required when AUTH_MODE=oidc", strings.Join(missing, ", "))
+		}
+		if u, err := url.Parse(cfg.OIDCRedirectURI); err != nil || !u.IsAbs() {
+			return Config{}, fmt.Errorf("OIDC_REDIRECT_URI must be an absolute URL, got %q", cfg.OIDCRedirectURI)
 		}
 	}
 

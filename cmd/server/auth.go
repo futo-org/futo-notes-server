@@ -12,7 +12,15 @@ import (
 	"futo-notes-server/internal/auth"
 	"futo-notes-server/internal/config"
 	"futo-notes-server/internal/db"
+	"futo-notes-server/internal/oidc"
 )
+
+// oidcFlowCookie carries the OIDC state and PKCE verifier between start and
+// callback. It is never sent to the identity provider.
+const oidcFlowCookie = "oidc_flow"
+
+// oidcFlowCookiePath scopes the flow cookie to the OIDC routes.
+const oidcFlowCookiePath = "/api/auth/oidc/"
 
 type sessionCtxKey struct{}
 
@@ -42,6 +50,10 @@ func requireAuth(cfg config.Config, database *db.DB, next http.Handler) http.Han
 			return
 		}
 		if cfg.AuthMode == "dev" && r.URL.Path == "/api/auth/dev/login" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if cfg.AuthMode == "oidc" && (r.URL.Path == "/api/auth/oidc/start" || r.URL.Path == "/api/auth/oidc/callback") {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -130,6 +142,123 @@ func handleDevLogin(cfg config.Config, database *db.DB) http.HandlerFunc {
 			Secure:   cfg.CookieSecure,
 			SameSite: http.SameSiteLaxMode,
 		})
+		writeJSON(w, http.StatusOK, map[string]any{"user": u, "token": token})
+	}
+}
+
+// handleOIDCStart begins the Authorization Code + PKCE flow: it generates a
+// state and PKCE verifier, stashes both in a short-lived cookie, and
+// redirects to the provider's authorization endpoint.
+func handleOIDCStart(cfg config.Config, provider *oidc.Provider) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		state, verifier := oidc.NewFlow()
+
+		http.SetCookie(w, &http.Cookie{
+			Name:     oidcFlowCookie,
+			Value:    state + "." + verifier,
+			Path:     oidcFlowCookiePath,
+			MaxAge:   600,
+			HttpOnly: true,
+			Secure:   cfg.CookieSecure,
+			SameSite: http.SameSiteLaxMode,
+		})
+		http.Redirect(w, r, provider.AuthorizeURL(cfg.OIDCClientID, cfg.OIDCRedirectURI, state, verifier), http.StatusFound)
+	}
+}
+
+// clearOIDCFlowCookie deletes the flow cookie set by handleOIDCStart.
+func clearOIDCFlowCookie(w http.ResponseWriter, cfg config.Config) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     oidcFlowCookie,
+		Value:    "",
+		Path:     oidcFlowCookiePath,
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   cfg.CookieSecure,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+// handleOIDCCallback completes the flow: validates state against the flow
+// cookie, exchanges the code for an access token, fetches userinfo, and
+// upserts the user by sub. On success it sets the session cookie exactly
+// like the other login modes, then redirects to /dev (DevUI) or returns the
+// standard {user, token} JSON.
+func handleOIDCCallback(cfg config.Config, provider *oidc.Provider, database *db.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		flowCookie, err := r.Cookie(oidcFlowCookie)
+		if err != nil || flowCookie.Value == "" {
+			writeError(w, http.StatusBadRequest, "missing oidc flow cookie")
+			return
+		}
+		state, verifier, ok := strings.Cut(flowCookie.Value, ".")
+		if !ok {
+			writeError(w, http.StatusBadRequest, "invalid oidc flow cookie")
+			return
+		}
+		if r.URL.Query().Get("state") != state {
+			writeError(w, http.StatusBadRequest, "state mismatch")
+			return
+		}
+		clearOIDCFlowCookie(w, cfg)
+
+		code := r.URL.Query().Get("code")
+		if code == "" {
+			writeError(w, http.StatusBadRequest, "missing code")
+			return
+		}
+
+		accessToken, err := provider.Exchange(r.Context(), cfg.OIDCClientID, cfg.OIDCClientSecret, cfg.OIDCRedirectURI, code, verifier)
+		if err != nil {
+			serverError(w, r, "oidc callback: exchanging code", err)
+			return
+		}
+		claims, err := provider.Userinfo(r.Context(), accessToken)
+		if err != nil {
+			serverError(w, r, "oidc callback: fetching userinfo", err)
+			return
+		}
+		if claims.Sub == "" {
+			writeError(w, http.StatusBadGateway, "identity provider did not return sub")
+			return
+		}
+		if claims.Email == "" {
+			writeError(w, http.StatusBadGateway, "identity provider did not return email")
+			return
+		}
+		name := claims.Name
+		if name == "" {
+			name = claims.PreferredUsername
+		}
+		if name == "" {
+			name = claims.Email
+		}
+
+		u, err := auth.UpsertUserBySub(r.Context(), database, claims.Sub, claims.Email, name)
+		if err != nil {
+			serverError(w, r, "oidc callback: upserting user", err)
+			return
+		}
+		token, err := auth.CreateSession(r.Context(), database, u.ID)
+		if err != nil {
+			serverError(w, r, "oidc callback: creating session", err)
+			return
+		}
+
+		http.SetCookie(w, &http.Cookie{
+			Name:     "session",
+			Value:    token,
+			Path:     "/",
+			MaxAge:   int(auth.SessionTTL.Seconds()),
+			HttpOnly: true,
+			Secure:   cfg.CookieSecure,
+			SameSite: http.SameSiteLaxMode,
+		})
+
+		if cfg.DevUI {
+			http.Redirect(w, r, "/dev", http.StatusFound)
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"user": u, "token": token})
 	}
 }

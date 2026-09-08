@@ -291,6 +291,14 @@ for (const job of jobEndpoints) {
 }
 cards.appendChild(jobsCard);
 
+const oidcCard = document.createElement('div');
+oidcCard.className = 'card';
+oidcCard.innerHTML = `
+  <div class="row"><span class="method">GET</span><span class="path">/api/auth/oidc/start</span></div>
+  <p class="desc">Log in with FUTO (OIDC); requires AUTH_MODE=oidc</p>
+  <div class="row"><a id="oidc-login-link" href="/api/auth/oidc/start"><button>Log in with FUTO</button></a></div>`;
+cards.appendChild(oidcCard);
+
 const sseCard = document.createElement('div');
 sseCard.className = 'card';
 sseCard.innerHTML = `
@@ -476,7 +484,26 @@ async function refreshSession() {
   }
 }
 
+async function checkOIDCMode() {
+  const card = document.getElementById('oidc-login-link').closest('.card');
+  try {
+    const res = await fetch('/');
+    const cap = await res.json();
+    if (cap.auth_mode !== 'oidc') {
+      card.style.opacity = '0.5';
+      const reason = document.createElement('p');
+      reason.className = 'desc';
+      reason.textContent = `disabled: server is running AUTH_MODE=${cap.auth_mode}, not oidc`;
+      card.appendChild(reason);
+      document.getElementById('oidc-login-link').style.pointerEvents = 'none';
+    }
+  } catch {
+    // capability document unreachable; leave the card enabled.
+  }
+}
+
 refreshSession();
+checkOIDCMode();
 </script>
 </body>
 </html>

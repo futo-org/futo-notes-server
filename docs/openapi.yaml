@@ -235,6 +235,80 @@ paths:
                 $ref: "#/components/schemas/Error"
               example: { error: too many requests }
 
+  /api/auth/oidc/start:
+    get:
+      operationId: oidcStart
+      tags: [auth]
+      security: []
+      summary: Begin "Log in with FUTO" (OIDC mode only)
+      description: |
+        Mounted only when `AUTH_MODE=oidc`. Generates an OAuth `state` and PKCE
+        code verifier, stores both in a short-lived `oidc_flow` cookie, and
+        redirects the browser to the identity provider's authorization
+        endpoint (Authorization Code flow with S256 PKCE).
+      responses:
+        "302":
+          description: Redirect to the identity provider's authorization endpoint
+
+  /api/auth/oidc/callback:
+    get:
+      operationId: oidcCallback
+      tags: [auth]
+      security: []
+      summary: Complete "Log in with FUTO" (OIDC mode only)
+      description: |
+        Mounted only when `AUTH_MODE=oidc`. Requires the `oidc_flow` cookie
+        set by `oidcStart` and a matching `state` query parameter, exchanges
+        the authorization `code` for an access token, reads `sub`, `email`,
+        `name`, and `preferred_username` from the userinfo endpoint, and
+        upserts the user by `sub`. Opens a session on success.
+
+        Rate limited like `passwordLogin`, before the route handler runs.
+
+        On success: if the server is running with `DEV_UI=true`, redirects to
+        `/dev`; otherwise returns the standard login JSON body.
+      parameters:
+        - name: code
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: state
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          $ref: "#/components/responses/LoginSuccess"
+        "302":
+          description: Redirect to `/dev` (only when `DEV_UI=true`)
+        "400":
+          description: Missing or mismatched `state`, or a missing `oidc_flow` cookie
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          description: |
+            Rate limit exceeded. Carries a `Retry-After` header in seconds.
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+                minimum: 1
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: too many requests }
+        "502":
+          description: The identity provider did not return a required claim
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /api/auth:
     get:
       operationId: getCurrentUser
@@ -1337,12 +1411,14 @@ components:
           example: 0.6.0
         auth_mode:
           type: string
-          enum: [dev, password]
+          enum: [dev, password, oidc]
           description: |
-            Which login endpoint to drive. `oidc` is reserved for later.
+            Which login endpoint to drive.
         signup:
           type: string
-          enum: [closed]
+          enum: [closed, open]
+          description: |
+            `open` in `oidc` mode, since any FUTO account can log in.
         billing:
           type: boolean
         mutation_ids:

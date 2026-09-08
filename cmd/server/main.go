@@ -16,6 +16,7 @@ import (
 	"futo-notes-server/internal/db"
 	"futo-notes-server/internal/events"
 	"futo-notes-server/internal/jobs"
+	"futo-notes-server/internal/oidc"
 )
 
 const (
@@ -57,11 +58,15 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 func handleCapability(authMode string) http.HandlerFunc {
+	signup := "closed"
+	if authMode == "oidc" {
+		signup = "open"
+	}
 	cap := capability{
 		Name:     serverName,
 		Version:  serverVersion,
 		AuthMode: authMode,
-		Signup:   "closed",
+		Signup:   signup,
 		Billing:  false,
 		MutationIDs: mutationIDs{
 			Supported:                true,
@@ -92,7 +97,7 @@ func handleHealth(database *db.DB) http.HandlerFunc {
 	}
 }
 
-func routes(cfg config.Config, database *db.DB, blobStore *blobs.Store, eventHub *events.Hub, publisher events.Publisher) http.Handler {
+func routes(cfg config.Config, database *db.DB, blobStore *blobs.Store, eventHub *events.Hub, publisher events.Publisher, provider *oidc.Provider) http.Handler {
 	api := http.NewServeMux()
 	if cfg.AuthMode == "dev" {
 		api.HandleFunc("POST /api/auth/dev/login", handleDevLogin(cfg, database))
@@ -100,6 +105,11 @@ func routes(cfg config.Config, database *db.DB, blobStore *blobs.Store, eventHub
 	if cfg.AuthMode == "password" {
 		api.HandleFunc("POST /api/auth/password/login",
 			rateLimited(auth.NewRateLimiter(), handlePasswordLogin(cfg, database)))
+	}
+	if cfg.AuthMode == "oidc" {
+		api.HandleFunc("GET /api/auth/oidc/start", handleOIDCStart(cfg, provider))
+		api.HandleFunc("GET /api/auth/oidc/callback",
+			rateLimited(auth.NewRateLimiter(), handleOIDCCallback(cfg, provider, database)))
 	}
 	api.HandleFunc("GET /api/auth", handleCurrentUser)
 	api.HandleFunc("POST /api/auth/logout", handleLogout(database))
@@ -183,9 +193,20 @@ func main() {
 	}
 	go jobs.Run(context.Background(), database, blobStore, jobs.DefaultSchedule, cfg.BlobGCEnabled)
 
+	var provider *oidc.Provider
+	if cfg.AuthMode == "oidc" {
+		discoverCtx, discoverCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		provider, err = oidc.Discover(discoverCtx, cfg.OIDCIssuer)
+		discoverCancel()
+		if err != nil {
+			slog.Error("discovering OIDC provider", "issuer", cfg.OIDCIssuer, "err", err)
+			os.Exit(1)
+		}
+	}
+
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	slog.Info("listening", "addr", addr)
-	if err := http.ListenAndServe(addr, routes(cfg, database, blobStore, eventHub, publisher)); err != nil {
+	if err := http.ListenAndServe(addr, routes(cfg, database, blobStore, eventHub, publisher, provider)); err != nil {
 		slog.Error("serving HTTP", "err", err)
 		os.Exit(1)
 	}
