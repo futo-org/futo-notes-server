@@ -141,20 +141,37 @@ func Delete(ctx context.Context, database *db.DB, userID, id string) (bool, erro
 
 	// Purgeable bytes stop counting against the Storage Quota, so the account
 	// gets them back here rather than when garbage collection removes the
-	// files. The sum is scoped to this owner: a row naming another account —
-	// which only a legacy_shared-era anomaly can produce — leaves that
-	// account's counter high for reconciliation to correct, instead of
-	// crediting these bytes to the wrong person.
-	var freed int64
-	if err := tx.QueryRowContext(ctx,
-		`SELECT COALESCE(SUM(size_bytes), 0) FROM blob_ledger
-		 WHERE collection_id = $1 AND user_id = $2 AND state IN ('claimed', 'retained')`,
-		id, userID).Scan(&freed); err != nil {
+	// files.
+	//
+	// The transition reports the bytes it moved rather than a separate SUM
+	// taken beforehand. Two statements would let garbage collection purge one
+	// of these rows in between and subtract it first, so the delete would
+	// subtract it a second time from a stale total.
+	//
+	// Only rows naming this owner are credited back. A row naming another
+	// account — which only a legacy_shared-era anomaly can produce — leaves
+	// that account's counter high for reconciliation to correct, rather than
+	// crediting its bytes to the wrong person.
+	rows, err := tx.QueryContext(ctx,
+		`UPDATE blob_ledger SET state = 'purgeable', state_changed_at = $2
+		 WHERE collection_id = $1 AND state IN ('claimed', 'retained')
+		 RETURNING user_id, size_bytes`, id, db.Timestamp(time.Now()))
+	if err != nil {
 		return false, err
 	}
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE blob_ledger SET state = 'purgeable', state_changed_at = $2
-		 WHERE collection_id = $1 AND state IN ('claimed', 'retained')`, id, db.Timestamp(time.Now())); err != nil {
+	var freed int64
+	for rows.Next() {
+		var owner string
+		var size int64
+		if err := rows.Scan(&owner, &size); err != nil {
+			rows.Close()
+			return false, err
+		}
+		if owner == userID {
+			freed += size
+		}
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
 		return false, err
 	}
 	if err := usage.Add(ctx, tx, userID, -freed); err != nil {

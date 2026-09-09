@@ -106,7 +106,7 @@ func handleGetObject(database *db.DB) http.HandlerFunc {
 	}
 }
 
-func handleCreateObject(database *db.DB, publisher events.Publisher) http.HandlerFunc {
+func handleCreateObject(database *db.DB, publisher events.Publisher, quotaEnforced bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		mID, ok := mutationID(r)
 		if !ok {
@@ -130,7 +130,7 @@ func handleCreateObject(database *db.DB, publisher events.Publisher) http.Handle
 			writeError(w, http.StatusBadRequest, "invalid size_bytes")
 			return
 		}
-		outcome, err := objects.Create(r.Context(), database, publisher, userID, r.PathValue("id"), mID, *body.BlobKey)
+		outcome, err := objects.Create(r.Context(), database, publisher, userID, r.PathValue("id"), mID, *body.BlobKey, quotaEnforced)
 		if err != nil {
 			serverError(w, r, "creating object", err)
 			return
@@ -139,7 +139,7 @@ func handleCreateObject(database *db.DB, publisher events.Publisher) http.Handle
 	}
 }
 
-func handleUpdateObject(database *db.DB, publisher events.Publisher) http.HandlerFunc {
+func handleUpdateObject(database *db.DB, publisher events.Publisher, quotaEnforced bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		mID, ok := mutationID(r)
 		if !ok {
@@ -169,7 +169,7 @@ func handleUpdateObject(database *db.DB, publisher events.Publisher) http.Handle
 			return
 		}
 		outcome, err := objects.Update(r.Context(), database, publisher, userID, r.PathValue("id"),
-			r.PathValue("objectId"), mID, *body.BlobKey, *body.Version)
+			r.PathValue("objectId"), mID, *body.BlobKey, *body.Version, quotaEnforced)
 		if err != nil {
 			serverError(w, r, "updating object", err)
 			return
@@ -265,7 +265,7 @@ func handleCreateBlobObject(database *db.DB, store *blobs.Store, publisher event
 			serverError(w, r, "staging inline create blob", err)
 			return
 		}
-		outcome, err := objects.CreateReserved(r.Context(), database, publisher, userID, collectionID, mID, key, reservation)
+		outcome, err := objects.CreateReserved(r.Context(), database, publisher, userID, collectionID, mID, key, reservation, quotaEnforced)
 		if err != nil {
 			serverError(w, r, "creating inline blob object", err)
 			return
@@ -299,7 +299,7 @@ func handleUpdateBlobObject(database *db.DB, store *blobs.Store, publisher event
 			return
 		}
 		outcome, err := objects.Update(r.Context(), database, publisher, userID, r.PathValue("id"),
-			r.PathValue("objectId"), mID, key, version)
+			r.PathValue("objectId"), mID, key, version, quotaEnforced)
 		if err != nil {
 			serverError(w, r, "updating inline blob object", err)
 			return
@@ -347,6 +347,8 @@ func writeMutationOutcome(w http.ResponseWriter, successStatus int, outcome obje
 		writeError(w, http.StatusConflict, "Mutation-Id reused for different intent")
 	case objects.MutationPending:
 		writeError(w, http.StatusConflict, "mutation still in progress")
+	case objects.QuotaExceeded:
+		writeAccountQuotaExceeded(w, outcome.Account)
 	default:
 		writeError(w, http.StatusInternalServerError, "internal server error")
 	}
@@ -464,7 +466,7 @@ func handleBatchBlobObjects(database *db.DB, store *blobs.Store, publisher event
 			// Each entry is weighed against what the earlier ones claimed, so
 			// a batch cannot walk past the quota one entry at a time.
 			if limits.exceeded(int64(len(entry.Blob))) {
-				results = append(results, limits.batchQuotaExceeded())
+				results = append(results, accountQuotaExceededEntry(limits.account))
 				continue
 			}
 			var reservation objects.Reservation
@@ -489,9 +491,9 @@ func handleBatchBlobObjects(database *db.DB, store *blobs.Store, publisher event
 			}
 			var outcome objects.MutationOutcome
 			if entry.Operation == 0 {
-				outcome, err = objects.CreateReserved(r.Context(), database, publisher, userID, collectionID, entry.Identifier, key, reservation)
+				outcome, err = objects.CreateReserved(r.Context(), database, publisher, userID, collectionID, entry.Identifier, key, reservation, quotaEnforced)
 			} else {
-				outcome, err = objects.Update(r.Context(), database, publisher, userID, collectionID, entry.Identifier, "", key, int64(entry.Version))
+				outcome, err = objects.Update(r.Context(), database, publisher, userID, collectionID, entry.Identifier, "", key, int64(entry.Version), quotaEnforced)
 			}
 			if err != nil {
 				slog.Error("applying batch object mutation", "err", err, "method", r.Method, "path", r.URL.Path)
@@ -531,6 +533,8 @@ func batchResult(operation byte, outcome objects.MutationOutcome) any {
 		return map[string]any{"status": "error", "error": "mutation id reused for different intent"}
 	case objects.MutationPending:
 		return map[string]any{"status": "error", "error": "mutation still in progress"}
+	case objects.QuotaExceeded:
+		return accountQuotaExceededEntry(outcome.Account)
 	default:
 		return map[string]any{"status": "error", "error": "internal server error"}
 	}

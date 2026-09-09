@@ -63,7 +63,7 @@ func TestObjectMutationLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	created, err := objects.Create(ctx, database, publisher, userID, collectionID, "create-1", firstKey)
+	created, err := objects.Create(ctx, database, publisher, userID, collectionID, "create-1", firstKey, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +71,7 @@ func TestObjectMutationLifecycle(t *testing.T) {
 		t.Fatalf("unexpected create: %#v", created)
 	}
 	waitForObjectNotification(t, listener, userID, collectionID, 1)
-	replayed, err := objects.Create(ctx, database, publisher, userID, collectionID, "create-1", firstKey)
+	replayed, err := objects.Create(ctx, database, publisher, userID, collectionID, "create-1", firstKey, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestObjectMutationLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	updated, err := objects.Update(ctx, database, publisher, userID, collectionID, created.Response.Object.ID, "update-1", secondKey, 2)
+	updated, err := objects.Update(ctx, database, publisher, userID, collectionID, created.Response.Object.ID, "update-1", secondKey, 2, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestObjectMutationLifecycle(t *testing.T) {
 		t.Fatalf("unexpected update: %#v", updated)
 	}
 	waitForObjectNotification(t, listener, userID, collectionID, 2)
-	conflict, err := objects.Update(ctx, database, publisher, userID, collectionID, created.Response.Object.ID, "update-stale", firstKey, 2)
+	conflict, err := objects.Update(ctx, database, publisher, userID, collectionID, created.Response.Object.ID, "update-stale", firstKey, 2, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +149,7 @@ func TestObjectMutationLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tombstoneUpdate, err := objects.Update(ctx, database, publisher, userID, collectionID, created.Response.Object.ID, "update-2", thirdKey, 4)
+	tombstoneUpdate, err := objects.Update(ctx, database, publisher, userID, collectionID, created.Response.Object.ID, "update-2", thirdKey, 4, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,7 +268,7 @@ func TestDeleteRetainsBlobForReclamation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	created, err := objects.Create(ctx, database, publisher, userID, collectionID, "create-folder", key)
+	created, err := objects.Create(ctx, database, publisher, userID, collectionID, "create-folder", key, false)
 	if err != nil {
 		t.Fatal(err)
 	}

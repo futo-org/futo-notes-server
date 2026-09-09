@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -395,4 +396,99 @@ func TestSelfHostedDeploymentsHaveNoStorageQuota(t *testing.T) {
 	if billing := doRequest(t, client, http.MethodGet, server.URL+"/api/billing", "", loggedIn.Token, nil); billing.StatusCode != http.StatusNotFound {
 		t.Fatalf("GET /api/billing off oidc = %d %q, want 404", billing.StatusCode, billing.Body)
 	}
+}
+
+// stage uploads ciphertext through the two-call path and returns its key.
+func (h quotaHarness) stage(t *testing.T, ciphertext string) string {
+	t.Helper()
+	response := h.do(t, http.MethodPost, "/api/blobs", ciphertext)
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("stage blob = %d %q", response.StatusCode, response.Body)
+	}
+	var uploaded struct {
+		Key string `json:"key"`
+	}
+	if err := json.Unmarshal([]byte(response.Body), &uploaded); err != nil {
+		t.Fatal(err)
+	}
+	return uploaded.Key
+}
+
+// TestStagingAheadCannotWalkPastTheQuota is the bypass the upload-time check
+// alone allows: staged bytes never move the counter, so any number of blobs
+// pass an upload check taken against an empty account. The claim is where the
+// bytes become the account's, so that is where the refusal has to land.
+func TestStagingAheadCannotWalkPastTheQuota(t *testing.T) {
+	h := newQuotaHarness(t)
+	h.setQuota(t, 1000)
+
+	// Every one of these passes the upload check: the counter is still zero.
+	keys := make([]string, 5)
+	for i := range keys {
+		keys[i] = h.stage(t, strings.Repeat("a", 900))
+	}
+
+	claim := func(key string) routeTestResponse {
+		return h.do(t, http.MethodPost, "/api/collections/"+h.collectionID+"/objects",
+			`{"blob_key":"`+key+`","size_bytes":900}`)
+	}
+	if first := claim(keys[0]); first.StatusCode != http.StatusCreated {
+		t.Fatalf("first claim = %d %q, want 201", first.StatusCode, first.Body)
+	}
+	h.assertBytesUsed(t, 900, "after the first claim")
+
+	for _, key := range keys[1:] {
+		refused := claim(key)
+		if refused.StatusCode != http.StatusInsufficientStorage {
+			t.Fatalf("claim past the quota = %d %q, want 507", refused.StatusCode, refused.Body)
+		}
+		if !strings.Contains(refused.Body, `"quota_exceeded"`) {
+			t.Fatalf("refused claim body = %q, want quota_exceeded", refused.Body)
+		}
+	}
+	h.assertBytesUsed(t, 900, "after four claims the quota had no room for")
+}
+
+// TestAQuotaRefusalLeavesTheMutationIdReusable checks that a refused claim
+// does not spend its Mutation-Id. A quota refusal is transient: once the
+// account has room, the same retry has to be able to succeed.
+func TestAQuotaRefusalLeavesTheMutationIdReusable(t *testing.T) {
+	h := newQuotaHarness(t)
+	// Staged under the seeded quota, then the ceiling drops beneath it, which
+	// is what an account close to full looks like by the time it claims.
+	key := h.stage(t, strings.Repeat("a", 900))
+	h.setQuota(t, 500)
+
+	claim := func() routeTestResponse {
+		request, err := http.NewRequest(http.MethodPost,
+			h.url+"/api/collections/"+h.collectionID+"/objects",
+			strings.NewReader(`{"blob_key":"`+key+`","size_bytes":900}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Authorization", "Bearer "+h.token)
+		request.Header.Set("Mutation-Id", "retry-after-room")
+		response, err := h.client.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		body, err := io.ReadAll(response.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return routeTestResponse{StatusCode: response.StatusCode, Body: string(body)}
+	}
+
+	if refused := claim(); refused.StatusCode != http.StatusInsufficientStorage {
+		t.Fatalf("claim over quota = %d %q, want 507", refused.StatusCode, refused.Body)
+	}
+	h.setQuota(t, 1000)
+	accepted := claim()
+	if accepted.StatusCode != http.StatusCreated {
+		t.Fatalf("retry after the quota rose = %d %q, want 201; the refusal spent the Mutation-Id",
+			accepted.StatusCode, accepted.Body)
+	}
+	h.assertBytesUsed(t, 900, "after the retry succeeded")
 }

@@ -841,6 +841,8 @@ paths:
                 oneOf:
                   - $ref: "#/components/schemas/BlobNotStagedError"
                   - $ref: "#/components/schemas/MutationMismatchError"
+        "507":
+          $ref: "#/components/responses/QuotaExceeded"
 
   /api/collections/{cid}/objects/{oid}:
     parameters:
@@ -925,6 +927,8 @@ paths:
                   - $ref: "#/components/schemas/VersionConflict"
                   - $ref: "#/components/schemas/BlobNotStagedError"
                   - $ref: "#/components/schemas/MutationMismatchError"
+        "507":
+          $ref: "#/components/responses/QuotaExceeded"
     delete:
       operationId: deleteObject
       tags: [objects]
@@ -1616,6 +1620,18 @@ components:
         Storing these bytes would put the account past its Storage Quota.
         Only the hosted deployment (`AUTH_MODE=oidc`) can answer this; a
         self-hosted server has no plan ceiling.
+
+        Answered at two points. An upload is refused when the bytes plainly
+        will not fit, which avoids writing ciphertext that is going to be
+        rejected. The **claim** is the enforcing check: staged bytes do not
+        count until an object claims them, so an upload check on its own could
+        be walked past by staging several blobs first and claiming them
+        afterwards. On the two-call write path the refusal therefore arrives
+        at `createObject` or `updateObject`, not at `uploadBlob`.
+
+        A refused claim commits nothing and does **not** spend its
+        `Mutation-Id`: the refusal is transient, so retrying the same mutation
+        once the account has room succeeds rather than replaying the refusal.
 
         The body names the quota and the usage behind the refusal, so a client
         can say how much room is left rather than only that the write failed.

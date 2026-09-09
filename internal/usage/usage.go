@@ -37,18 +37,39 @@ func (a Account) Exceeds(incoming int64) bool {
 	return a.BytesUsed+incoming > a.Plan.StorageQuotaBytes
 }
 
-// Of returns the account's plan limits and Storage Usage. An account that has
-// never stored anything has no counter row yet and reads as zero.
-func Of(ctx context.Context, database *db.DB, userID string) (Account, error) {
+// selectAccount reads one account's plan limits beside its counter. An account
+// that has never stored anything has no counter row yet and reads as zero.
+const selectAccount = `SELECT plans.storage_quota_bytes, plans.blob_max_bytes,
+	COALESCE(user_usage.bytes_used, 0)
+	FROM users
+	JOIN plans ON plans.id = users.plan_id
+	LEFT JOIN user_usage ON user_usage.user_id = users.id
+	WHERE users.id = $1`
+
+type accountRow interface{ Scan(dest ...any) error }
+
+func scanAccount(row accountRow) (Account, error) {
 	var account Account
-	err := database.QueryRowContext(ctx, `SELECT plans.storage_quota_bytes, plans.blob_max_bytes,
-		COALESCE(user_usage.bytes_used, 0)
-		FROM users
-		JOIN plans ON plans.id = users.plan_id
-		LEFT JOIN user_usage ON user_usage.user_id = users.id
-		WHERE users.id = $1`, userID).
-		Scan(&account.Plan.StorageQuotaBytes, &account.Plan.BlobMaxBytes, &account.BytesUsed)
+	err := row.Scan(&account.Plan.StorageQuotaBytes, &account.Plan.BlobMaxBytes, &account.BytesUsed)
 	return account, err
+}
+
+// Of returns the account's plan limits and Storage Usage.
+func Of(ctx context.Context, database *db.DB, userID string) (Account, error) {
+	return scanAccount(database.QueryRowContext(ctx, selectAccount, userID))
+}
+
+// Fits reports whether the account has room for incoming more bytes, reading
+// the counter inside the caller's transaction — the same transaction that
+// claims the blob and calls Add. That is what makes the quota enforceable: a
+// check taken before the transaction can be walked past by staging bytes
+// first, because staged bytes do not count until something claims them.
+func Fits(ctx context.Context, tx *db.Tx, userID string, incoming int64) (Account, bool, error) {
+	account, err := scanAccount(tx.QueryRowContext(ctx, selectAccount, userID))
+	if err != nil {
+		return Account{}, false, err
+	}
+	return account, !account.Exceeds(incoming), nil
 }
 
 // Add moves the account's counter by delta inside the caller's transaction,

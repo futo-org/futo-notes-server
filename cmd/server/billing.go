@@ -51,7 +51,7 @@ func readBlobBodyWithinLimits(w http.ResponseWriter, r *http.Request, database *
 		return nil, false
 	}
 	if limits.exceeded(int64(len(body))) {
-		writeQuotaExceeded(w, limits)
+		writeAccountQuotaExceeded(w, limits.account)
 		return nil, false
 	}
 	return body, true
@@ -78,24 +78,25 @@ func (l *storageLimits) recordClaim(bytes int64) {
 	l.account.BytesUsed += bytes
 }
 
-// writeQuotaExceeded names the quota and the usage behind the refusal, so a
-// client can tell the person how much room is left rather than only that
-// the write failed.
-func writeQuotaExceeded(w http.ResponseWriter, l storageLimits) {
+// writeAccountQuotaExceeded names the quota and the usage behind the refusal,
+// so a client can tell the person how much room is left rather than only that
+// the write failed. Both refusal points answer with this same body: the
+// upload that would not fit, and the claim that finds the account full.
+func writeAccountQuotaExceeded(w http.ResponseWriter, account usage.Account) {
 	writeJSON(w, http.StatusInsufficientStorage, map[string]any{
 		"error":       "storage quota exceeded",
 		"code":        "quota_exceeded",
-		"quota_bytes": l.account.Plan.StorageQuotaBytes,
-		"bytes_used":  l.account.BytesUsed,
+		"quota_bytes": account.Plan.StorageQuotaBytes,
+		"bytes_used":  account.BytesUsed,
 	})
 }
 
-// batchQuotaExceeded is the same refusal as one entry of a batch response,
-// which reports per entry rather than failing the whole request.
-func (l storageLimits) batchQuotaExceeded() map[string]any {
+// accountQuotaExceededEntry is the same refusal as one entry of a batch
+// response, which reports per entry rather than failing the whole request.
+func accountQuotaExceededEntry(account usage.Account) map[string]any {
 	return map[string]any{
 		"status":      "quota_exceeded",
-		"quota_bytes": l.account.Plan.StorageQuotaBytes,
-		"bytes_used":  l.account.BytesUsed,
+		"quota_bytes": account.Plan.StorageQuotaBytes,
+		"bytes_used":  account.BytesUsed,
 	}
 }

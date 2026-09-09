@@ -118,14 +118,20 @@ Settled while building step 3:
   `{error, code, quota_bytes, bytes_used}`. Deliberately not the `413` an
   over-cap blob gets: a smaller blob may fit under the per-blob cap, but the
   account being full is a different problem with a different fix.
-- Enforcement sits on every route that accepts ciphertext — `POST /api/blobs`,
-  both inline blob-object routes, and each batch entry. A batch weighs each
-  entry against what the earlier ones claimed, so it cannot walk past the
-  quota one entry at a time.
-- The two-call write path checks at upload, not at claim, so a client that
-  stages many blobs concurrently and claims them all can overshoot by what it
-  had in flight. Reconciliation reports the true number and the next upload is
-  refused; a claim-time check is the fix if that ever matters.
+- **The claim is the enforcing check**, not the upload. Staged bytes do not
+  count until an object claims them, so an upload check on its own can be
+  walked past without limit and without any concurrency: stage as many blobs
+  as you like against an empty counter, then claim them all. The check
+  therefore lives in the object mutation, inside the transaction that moves
+  the ledger row and the counter together, where the ledger's size is
+  authoritative and the client's declared `size_bytes` cannot lie about it.
+- Uploads still check, as a courtesy rather than a guarantee: it avoids
+  writing ciphertext that the claim is going to reject. `POST /api/blobs`,
+  both inline blob-object routes, and each batch entry do this, and a batch
+  weighs each entry against what the earlier ones claimed.
+- A refused claim commits nothing and does not spend its Mutation ID. A quota
+  refusal is transient, so the same retry has to succeed once the account has
+  room, rather than replaying the refusal for the ID's retention window.
 
 ### 6. Data model: no structural change
 

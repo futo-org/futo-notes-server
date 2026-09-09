@@ -164,7 +164,7 @@ func TestSQLiteApplicationLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	createdObject, err := objects.Create(ctx, database, publisher, user.ID, collection.ID, "create-sqlite", firstBlob)
+	createdObject, err := objects.Create(ctx, database, publisher, user.ID, collection.ID, "create-sqlite", firstBlob, false)
 	if err != nil || createdObject.Code != objects.OK {
 		t.Fatalf("Create() = %#v, %v", createdObject, err)
 	}
@@ -183,7 +183,7 @@ func TestSQLiteApplicationLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	updated, err := objects.Update(ctx, database, publisher, user.ID, collection.ID,
-		createdObject.Response.Object.ID, "update-sqlite", secondBlob, 2)
+		createdObject.Response.Object.ID, "update-sqlite", secondBlob, 2, false)
 	if err != nil || updated.Code != objects.OK {
 		t.Fatalf("Update() = %#v, %v", updated, err)
 	}

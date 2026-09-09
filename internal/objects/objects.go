@@ -68,12 +68,16 @@ const (
 	BlobNotStaged
 	MutationMismatch
 	MutationPending
+	QuotaExceeded
 )
 
 type MutationOutcome struct {
 	Code     ResultCode
 	Response MutationResponse
 	Conflict Conflict
+	// Account is set only for QuotaExceeded, so the caller can name the
+	// quota and the usage that refused the claim.
+	Account usage.Account
 }
 
 type DeleteOutcome struct {
@@ -463,17 +467,17 @@ func ReserveCreate(ctx context.Context, db *appdb.DB, userID, collectionID, muta
 	return Reservation{Outcome: outcome, Settled: true}, nil
 }
 
-func Create(ctx context.Context, db *appdb.DB, publisher events.Publisher, userID, collectionID, mutationID, blobKey string) (MutationOutcome, error) {
+func Create(ctx context.Context, db *appdb.DB, publisher events.Publisher, userID, collectionID, mutationID, blobKey string, enforceQuota bool) (MutationOutcome, error) {
 	reservation, err := ReserveCreate(ctx, db, userID, collectionID, mutationID)
 	if err != nil || reservation.Settled {
 		return reservation.Outcome, err
 	}
-	return CreateReserved(ctx, db, publisher, userID, collectionID, mutationID, blobKey, reservation)
+	return CreateReserved(ctx, db, publisher, userID, collectionID, mutationID, blobKey, reservation, enforceQuota)
 }
 
 // CreateReserved records a new object for a staged blob under the claim
 // ReserveCreate took for mutationID.
-func CreateReserved(ctx context.Context, db *appdb.DB, publisher events.Publisher, userID, collectionID, mutationID, blobKey string, reservation Reservation) (MutationOutcome, error) {
+func CreateReserved(ctx context.Context, db *appdb.DB, publisher events.Publisher, userID, collectionID, mutationID, blobKey string, reservation Reservation, enforceQuota bool) (MutationOutcome, error) {
 	intent := mutationIntent{Kind: "create", CollectionID: collectionID}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -530,6 +534,20 @@ func CreateReserved(ctx context.Context, db *appdb.DB, publisher events.Publishe
 		}
 		return MutationOutcome{Code: BlobNotStaged}, nil
 	}
+	// The ledger's size is authoritative and this transaction is the one that
+	// moves the counter, so this is the only place the Storage Quota can be
+	// enforced. A check taken before the blob was staged is not enough: staged
+	// bytes do not count, so a client could stage any number of blobs under an
+	// empty quota and then claim them all.
+	if enforceQuota {
+		account, fits, err := usage.Fits(ctx, tx, userID, size)
+		if err != nil {
+			return MutationOutcome{}, err
+		}
+		if !fits {
+			return refuseForQuota(ctx, tx, userID, mutationID, account)
+		}
+	}
 	var collectionVersion int64
 	if err := tx.QueryRowContext(ctx, `UPDATE collections SET current_version = current_version + 1
 		WHERE id = $1 RETURNING current_version`, collectionID).Scan(&collectionVersion); err != nil {
@@ -576,7 +594,7 @@ func resultCode(status int) ResultCode {
 	}
 }
 
-func Update(ctx context.Context, db *appdb.DB, publisher events.Publisher, userID, collectionID, objectID, mutationID, blobKey string, version int64) (MutationOutcome, error) {
+func Update(ctx context.Context, db *appdb.DB, publisher events.Publisher, userID, collectionID, objectID, mutationID, blobKey string, version int64, enforceQuota bool) (MutationOutcome, error) {
 	intent := mutationIntent{Kind: "update", CollectionID: collectionID, ObjectID: &objectID, RequestedVersion: &version}
 	prepared, err := prepareMutation(ctx, db, userID, mutationID, intent)
 	if err != nil {
@@ -652,6 +670,17 @@ func Update(ctx context.Context, db *appdb.DB, publisher events.Publisher, userI
 		}
 		return MutationOutcome{Code: BlobNotStaged}, nil
 	}
+	// An update keeps the superseded blob as a merge ancestor, so the new blob
+	// is added to the account's usage rather than swapped for it.
+	if enforceQuota {
+		account, fits, err := usage.Fits(ctx, tx, userID, size)
+		if err != nil {
+			return MutationOutcome{}, err
+		}
+		if !fits {
+			return refuseForQuota(ctx, tx, userID, mutationID, account)
+		}
+	}
 	var collectionVersion int64
 	if err := tx.QueryRowContext(ctx, `UPDATE collections SET current_version = current_version + 1 WHERE id = $1 RETURNING current_version`, collectionID).Scan(&collectionVersion); err != nil {
 		return MutationOutcome{}, err
@@ -689,6 +718,23 @@ func Update(ctx context.Context, db *appdb.DB, publisher events.Publisher, userI
 		return MutationOutcome{}, err
 	}
 	return MutationOutcome{Code: OK, Response: response}, nil
+}
+
+// refuseForQuota answers a claim the account has no room for. Nothing commits
+// except the release of the Mutation-Id: a quota refusal is transient, so the
+// ID must be free for a retry once the account has room, rather than carrying
+// a durable outcome that replays the refusal forever.
+func refuseForQuota(ctx context.Context, tx *appdb.Tx, userID, mutationID string, account usage.Account) (MutationOutcome, error) {
+	if mutationID != "" {
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM mutation_results WHERE user_id = $1 AND mutation_id = $2`, userID, mutationID); err != nil {
+			return MutationOutcome{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return MutationOutcome{}, err
+	}
+	return MutationOutcome{Code: QuotaExceeded, Account: account}, nil
 }
 
 func finishMutationNotFound(ctx context.Context, tx *appdb.Tx, userID, mutationID string, intent mutationIntent) (MutationOutcome, error) {
