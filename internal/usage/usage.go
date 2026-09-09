@@ -64,6 +64,16 @@ func Of(ctx context.Context, database *db.DB, userID string) (Account, error) {
 // claims the blob and calls Add. That is what makes the quota enforceable: a
 // check taken before the transaction can be walked past by staging bytes
 // first, because staged bytes do not count until something claims them.
+//
+// This reads without locking the counter, so on its own it is check-then-act:
+// two claims could both find room and both take it. What closes that today is
+// that every object mutation holds its collection's row lock before it gets
+// here, and an account has one vault, so its claims are already serialized.
+// That is a lock taken for an unrelated reason. Give an account a second
+// collection — which the hosted plan expects as a later, additive change —
+// and the window opens. Closing it by construction means locking the counter
+// row here, after creating it, which reconciliation already assumes it may
+// have to wait on.
 func Fits(ctx context.Context, tx *db.Tx, userID string, incoming int64) (Account, bool, error) {
 	account, err := scanAccount(tx.QueryRowContext(ctx, selectAccount, userID))
 	if err != nil {

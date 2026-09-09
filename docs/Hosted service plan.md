@@ -132,6 +132,12 @@ Settled while building step 3:
 - A refused claim commits nothing and does not spend its Mutation ID. A quota
   refusal is transient, so the same retry has to succeed once the account has
   room, rather than replaying the refusal for the ID's retention window.
+- The check does not lock the counter. It does not have to yet: every object
+  mutation already holds its collection's row lock by the time it checks, and
+  an account has one vault, so its claims are serialized. **A second
+  collection per account reopens that window** — the check would have to lock
+  the counter row itself. Worth remembering when multiple vaults land, since
+  the lock that closes it today is taken for an unrelated reason.
 
 ### 6. Data model: no structural change
 
