@@ -76,6 +76,24 @@ webhook route, so entitlement can be exercised without a sandbox subscription;
 its checkout card calls the real `POLAR_BASE_URL`, so point that at the sandbox
 before pressing anything there.
 
+To walk the whole hosted path without any credentials at all, run the hosted
+rehearsal. It boots the shipped binary from the deployed environment contract
+against a scratch Postgres, with local stand-ins for Zitadel and Polar, and
+checks the sequence a person actually goes through — hand-off login, the
+email-domain allowlist, a 402 write, a checkout carrying the discount, a
+signed webhook delivery, an accepted write, usage, the quota, and the lapse:
+
+```bash
+docker compose up -d postgres
+docker exec futo-notes-postgres createdb -U futo_notes hosted_rehearsal
+HOSTED_REHEARSAL_DATABASE_URL='postgres://futo_notes:futo_notes@localhost:5433/hosted_rehearsal' \
+  GOTOOLCHAIN=auto go run ./cmd/hostedrehearsal
+```
+
+It drops and recreates the scratch database's public schema on every run, so
+never point it at anything worth keeping. Deploying the hosted service, and
+the full list of settings it reads, are in [Hosted deployment](./Hosted%20deployment.md).
+
 Postgres remains available for exercising existing-install and hosted paths:
 
 ```bash
@@ -94,6 +112,14 @@ GOTOOLCHAIN=auto go run ./cmd/compare -engine-parity -mode dev
 ./scripts/adoption-rehearsal.sh all
 ./scripts/compose-rehearsal.sh
 ./scripts/sqlite-switch-rehearsal.sh
+```
+
+The hosted path has its own rehearsal, which needs a scratch Postgres rather
+than the checkouts the others want:
+
+```bash
+HOSTED_REHEARSAL_DATABASE_URL='postgres://futo_notes:futo_notes@localhost:5433/hosted_rehearsal' \
+  GOTOOLCHAIN=auto go run ./cmd/hostedrehearsal
 ```
 
 The adoption rehearsal requires local TypeScript-server and FUTO Notes client

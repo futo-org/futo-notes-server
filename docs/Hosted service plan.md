@@ -8,7 +8,18 @@ subscription record, the Polar webhook, and the Entitlement gate (issue #10), an
 checkout, the customer portal, and the success page (issue #11). Step 4's code is
 done; one thing in it is not, and it gates the MVP being usable — **nobody has run
 a checkout against the Polar sandbox yet**, so the 100%-forever discount below is
-documented rather than observed. Step 5 is the Manifest deployment.
+documented rather than observed.
+
+Step 5, the Manifest deployment (issue #12), is under way. Its operational
+half — the full environment contract, the Manifest entry, and the one-time
+Zitadel, Polar, DNS, and database setup — is in
+[Hosted deployment](./Hosted%20deployment.md). What exists so far is the
+Manifest service definition, the documented contract, and
+`cmd/hostedrehearsal`, which walks the whole hosted path against a real server
+process on localhost with local stand-ins for Zitadel and Polar. **Nothing is
+deployed**, and the four steps that need a console — DNS, the Zitadel
+application for the public redirect URI, the Polar discount and webhook
+endpoint, and the 1Password item — have not been done.
 
 Goal: a paid sync service, $5/month, that a person signs up for from inside the
 app without visiting the web. Once signed up, hosted and self-hosted must feel

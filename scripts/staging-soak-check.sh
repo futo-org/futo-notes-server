@@ -16,6 +16,15 @@ Environment:
   FUTO_SOAK_REMOTE        Set false to skip container/log checks.
   FUTO_SOAK_MIN_DAYS      Require this many complete elapsed soak days.
   FUTO_SOAK_REQUIRE_JOBS  Set true to require evidence for all four jobs.
+  FUTO_SOAK_CONTAINER     Podman container to inspect. Defaults to the
+                          internal sync server; the hosted instance is a
+                          second service on the same hosts, so checking it
+                          means naming its container here.
+  FUTO_SOAK_AUTH_MODE     Require this auth mode, both in the capability
+                          document and in the container's environment. Set it
+                          to oidc when checking the hosted instance, so a
+                          missing FUTO_SOAK_CONTAINER cannot quietly report on
+                          the wrong service.
 EOF
 }
 
@@ -45,6 +54,33 @@ read -r -a engines <<<"${FUTO_SOAK_ENGINES:-postgres sqlite}"
 remote_checks=${FUTO_SOAK_REMOTE:-true}
 require_jobs=${FUTO_SOAK_REQUIRE_JOBS:-false}
 min_days=${FUTO_SOAK_MIN_DAYS:-0}
+container=${FUTO_SOAK_CONTAINER:-inventory_futo-notes_sync-server}
+auth_mode=${FUTO_SOAK_AUTH_MODE:-}
+
+# Both of these are expanded into a remote shell command and a jq filter, so
+# they are held to the characters a container name and an auth mode actually
+# use rather than passed through.
+if [[ ! $container =~ ^[A-Za-z0-9_.-]+$ ]]; then
+  echo "FUTO_SOAK_CONTAINER must be a container name, got $container" >&2
+  exit 2
+fi
+if [[ -n $auth_mode && ! $auth_mode =~ ^[a-z]+$ ]]; then
+  echo "FUTO_SOAK_AUTH_MODE must be dev, password, or oidc, got $auth_mode" >&2
+  exit 2
+fi
+
+# setting_value prints one NAME=value entry out of a container's environment
+# listing. Reading the listing once and picking values out of it keeps a
+# second setting from costing a second SSH round trip.
+setting_value() {
+  local name=$1 listing=$2 setting
+  while IFS= read -r setting; do
+    if [[ $setting == "$name="* ]]; then
+      printf '%s' "${setting#"$name="}"
+      return
+    fi
+  done <<<"$listing"
+}
 
 if [[ ! $min_days =~ ^[0-9]+$ ]]; then
   echo "FUTO_SOAK_MIN_DAYS must be a non-negative integer" >&2
@@ -98,6 +134,9 @@ for index in "${!urls[@]}"; do
     .version == $version and
     .mutation_ids.successful_create_outcomes == "durable"
   ' <<<"$capability" >/dev/null
+  if [[ -n $auth_mode ]]; then
+    jq -e --arg mode "$auth_mode" '.auth_mode == $mode' <<<"$capability" >/dev/null
+  fi
 
   health=$(curl --fail --silent --show-error --max-time 15 "$url/health")
   jq -e '.status == "ok" and .db == "connected"' <<<"$health" >/dev/null
@@ -115,19 +154,18 @@ for index in "${!urls[@]}"; do
     -o UserKnownHostsFile=/dev/null
   )
 
+  # container is validated above; client-side expansion is intentional.
+  # shellcheck disable=SC2029
   state=$(ssh "${ssh_options[@]}" "root@$host" \
-    "runuser -l podman -c 'podman inspect inventory_futo-notes_sync-server --format \"started={{.State.StartedAt}}|status={{.State.Status}}|exit={{.State.ExitCode}}|restarts={{.RestartCount}}|health={{if .State.Health}}{{.State.Health.Status}}{{end}}\"'")
+    "runuser -l podman -c 'podman inspect $container --format \"started={{.State.StartedAt}}|status={{.State.Status}}|exit={{.State.ExitCode}}|restarts={{.RestartCount}}|health={{if .State.Health}}{{.State.Health.Status}}{{end}}\"'")
   echo "  $state"
   [[ $state == *'|status=running|exit=0|restarts=0|health=healthy' ]]
 
-  database_url=$(ssh "${ssh_options[@]}" "root@$host" \
-    "runuser -l podman -c 'podman inspect inventory_futo-notes_sync-server --format \"{{range .Config.Env}}{{println .}}{{end}}\"'" \
-    | while IFS= read -r setting; do
-        if [[ $setting == DATABASE_URL=* ]]; then
-          printf '%s' "${setting#DATABASE_URL=}"
-          break
-        fi
-      done)
+  # container is validated above; client-side expansion is intentional.
+  # shellcheck disable=SC2029
+  container_env=$(ssh "${ssh_options[@]}" "root@$host" \
+    "runuser -l podman -c 'podman inspect $container --format \"{{range .Config.Env}}{{println .}}{{end}}\"'")
+  database_url=$(setting_value DATABASE_URL "$container_env")
   case $engine:$database_url in
     postgres:postgres://*|postgres:postgresql://*|sqlite:sqlite:*) ;;
     *)
@@ -136,6 +174,15 @@ for index in "${!urls[@]}"; do
       ;;
   esac
   echo "  database_engine=$engine"
+
+  if [[ -n $auth_mode ]]; then
+    container_auth_mode=$(setting_value AUTH_MODE "$container_env")
+    if [[ $container_auth_mode != "$auth_mode" ]]; then
+      echo "AUTH_MODE in $container on $host is ${container_auth_mode:-unset}, expected $auth_mode" >&2
+      exit 1
+    fi
+    echo "  auth_mode=$auth_mode"
+  fi
 
   started=${state#started=}
   started=${started%%|status=*}
@@ -146,10 +193,11 @@ for index in "${!urls[@]}"; do
     exit 1
   fi
 
-  # soak_start is format-validated above; client-side expansion is intentional.
+  # soak_start and container are validated above; client-side expansion is
+  # intentional.
   # shellcheck disable=SC2029
   logs=$(ssh "${ssh_options[@]}" "root@$host" \
-    "runuser -l podman -c 'podman logs --since $soak_start inventory_futo-notes_sync-server'" 2>&1)
+    "runuser -l podman -c 'podman logs --since $soak_start $container'" 2>&1)
   if rg -q 'level=(ERROR|FATAL)|panic:|fatal error:' <<<"$logs"; then
     echo "application errors found on $host since $soak_start" >&2
     rg 'level=(ERROR|FATAL)|panic:|fatal error:' <<<"$logs" >&2
@@ -169,8 +217,10 @@ for index in "${!urls[@]}"; do
     exit 2
   fi
 
+  # container is validated above; client-side expansion is intentional.
+  # shellcheck disable=SC2029
   usage_line=$(ssh "${ssh_options[@]}" "root@$host" \
-    "runuser -l podman -c 'podman stats --no-stream --format \"mem={{.MemUsage}} cpu={{.CPU}} pids={{.PIDs}}\" inventory_futo-notes_sync-server'")
+    "runuser -l podman -c 'podman stats --no-stream --format \"mem={{.MemUsage}} cpu={{.CPU}} pids={{.PIDs}}\" $container'")
   echo "  $usage_line"
 done
 

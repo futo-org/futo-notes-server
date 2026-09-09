@@ -156,6 +156,11 @@ publish:candidate-image:
     - if: '$CI_PIPELINE_SOURCE == "schedule" && $FUTO_SOAK_CHECK == "true"'
       when: never
     - if: $CI_COMMIT_BRANCH == "go-rewrite"
+    # The hosted service deploys from an immutable candidate tag, and its
+    # Manifest entry names one. Without this the hosted branch produces no
+    # image and there is nothing to point the internal instance at. Drop this
+    # line once the branch merges.
+    - if: $CI_COMMIT_BRANCH == "hosted-server"
 
 publish:image:
   stage: publish
