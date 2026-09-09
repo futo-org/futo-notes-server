@@ -24,8 +24,12 @@ client and hands the app a session:
 2. App opens `url` (the OIDC start route carrying the ticket) in whatever
    browser surface the client team picks: system browser, platform auth sheet,
    or webview. The server does not care.
-3. After the callback, the server parks the resulting `{user, token}` against
-   the ticket for a few minutes and shows a "you can go back to the app" page.
+3. After the callback, the server binds the ticket to the account that
+   authenticated, for a few minutes, and shows a "you can go back to the app"
+   page. As built, the ticket row records the account and never a session
+   token; the session is opened at redemption, so a leak of that table yields
+   no usable bearer credential and the browser's cookie session stays
+   independent of the app's.
 4. App polls `GET /api/auth/handoff/{ticket}`: 202 while pending, the
    `{user, token}` body exactly once, 404 afterwards and after expiry.
 
@@ -34,6 +38,25 @@ server must validate Zitadel tokens, client ID baked into the app), the OAuth
 device flow (worse UX, user types a code), a native login UI on Zitadel's
 Session API (best UX, most work by far; the hand-off endpoint is shaped so it
 could drop in later and produce the same session).
+
+**Accepted risk: the hand-off is phishable.** Nothing binds a ticket to the
+person who completes it, so whoever mints a ticket redeems whatever login
+finishes it. A crafted start URL that a victim opens and signs in through
+hands the ticket's minter that victim's session — and the victim sees a
+genuine "Log in with FUTO" page for the real product, so there is nothing
+off about it to notice. The server cannot tell an app-initiated login from a
+phished one, because the app opens the URL itself and no code passes through
+the person's hands. That binding is exactly what the rejected device flow
+buys, which is why it stays the fallback if this ever matters more than the
+UX.
+
+Mitigations considered and not built: pinning the ticket to the minting
+client's IP (breaks a login that moves between networks, and stops nothing
+on a shared one), and shortening the window (changes the attack's
+convenience, not the attack). What makes this acceptable today is decision 2
+— an attacker's target has to be someone already inside the email-domain
+allowlist, and the whole user base is FUTO staff. It stops being acceptable
+the moment sign-up opens, so it is on the pre-launch list below.
 
 ### 2. MVP gate: email-domain allowlist
 
@@ -129,6 +152,9 @@ them.
 - S3 blob store against Yucca's Ceph RGW, with an env-driven store factory.
 - A dedicated host rather than a second instance on the shared staging box.
 - Remove `HOSTED_ALLOWED_EMAIL_DOMAINS` and `POLAR_DISCOUNT_ID`.
+- Answer the Login Hand-off phishing risk in decision 1. The allowlist is what
+  makes it tolerable now; removing the allowlist removes the mitigation, so
+  these two are one piece of work, not two.
 
 ## Flagged, owned by the client team
 
