@@ -5,10 +5,16 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 )
+
+// oidcCallbackPath is the route OIDC_REDIRECT_URI has to point at. The Login
+// Hand-off login URL is built by swapping this route for its start sibling,
+// so a redirect URI aimed anywhere else would produce a URL that 404s.
+const oidcCallbackPath = "/api/auth/oidc/callback"
 
 type Config struct {
 	DatabaseURL        string
@@ -27,6 +33,11 @@ type Config struct {
 	OIDCClientID       string // OIDC_CLIENT_ID
 	OIDCClientSecret   string // OIDC_CLIENT_SECRET
 	OIDCRedirectURI    string // OIDC_REDIRECT_URI
+
+	// HOSTED_ALLOWED_EMAIL_DOMAINS, lowercased. Empty admits every identity
+	// the provider authenticates; otherwise sign-in is limited to these
+	// email domains. Internal-MVP gate, removed before public sign-up.
+	HostedAllowedEmailDomains []string
 }
 
 func Load() (Config, error) {
@@ -48,6 +59,8 @@ func Load() (Config, error) {
 		OIDCClientID:       os.Getenv("OIDC_CLIENT_ID"),
 		OIDCClientSecret:   os.Getenv("OIDC_CLIENT_SECRET"),
 		OIDCRedirectURI:    os.Getenv("OIDC_REDIRECT_URI"),
+
+		HostedAllowedEmailDomains: emailDomains(os.Getenv("HOSTED_ALLOWED_EMAIL_DOMAINS")),
 	}
 	if cfg.AuthMode != "dev" && cfg.AuthMode != "password" && cfg.AuthMode != "oidc" {
 		return Config{}, fmt.Errorf("AUTH_MODE must be dev, password, or oidc, got %q", cfg.AuthMode)
@@ -77,8 +90,12 @@ func Load() (Config, error) {
 		if len(missing) > 0 {
 			return Config{}, fmt.Errorf("%s required when AUTH_MODE=oidc", strings.Join(missing, ", "))
 		}
-		if u, err := url.Parse(cfg.OIDCRedirectURI); err != nil || !u.IsAbs() {
+		u, err := url.Parse(cfg.OIDCRedirectURI)
+		if err != nil || !u.IsAbs() {
 			return Config{}, fmt.Errorf("OIDC_REDIRECT_URI must be an absolute URL, got %q", cfg.OIDCRedirectURI)
+		}
+		if !strings.HasSuffix(u.Path, oidcCallbackPath) {
+			return Config{}, fmt.Errorf("OIDC_REDIRECT_URI path must end in %s, got %q", oidcCallbackPath, cfg.OIDCRedirectURI)
 		}
 	}
 
@@ -149,6 +166,33 @@ func getDefault(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// AllowsEmailDomain reports whether an identity with this email address may
+// sign in. An unset HOSTED_ALLOWED_EMAIL_DOMAINS admits everyone the
+// provider authenticates; otherwise the address's domain has to be on the
+// list. Both sides are lowercased, so the comparison ignores case.
+func (c Config) AllowsEmailDomain(email string) bool {
+	if len(c.HostedAllowedEmailDomains) == 0 {
+		return true
+	}
+	at := strings.LastIndex(email, "@")
+	if at < 0 {
+		return false
+	}
+	return slices.Contains(c.HostedAllowedEmailDomains, strings.ToLower(email[at+1:]))
+}
+
+// emailDomains parses HOSTED_ALLOWED_EMAIL_DOMAINS: comma-separated domains,
+// lowercased, without surrounding whitespace or empty entries.
+func emailDomains(value string) []string {
+	var entries []string
+	for entry := range strings.SplitSeq(value, ",") {
+		if entry = strings.ToLower(strings.TrimSpace(entry)); entry != "" {
+			entries = append(entries, entry)
+		}
+	}
+	return entries
 }
 
 func getInt(key string, fallback int) (int, error) {

@@ -14,6 +14,7 @@ import (
 	"futo-notes-server/internal/config"
 	"futo-notes-server/internal/db"
 	"futo-notes-server/internal/events"
+	"futo-notes-server/internal/handoff"
 	"futo-notes-server/internal/jobs"
 	"futo-notes-server/internal/objects"
 )
@@ -35,7 +36,7 @@ func TestSQLiteApplicationLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(applied) != 1 || applied[0] != "001_baseline" {
+	if len(applied) != 2 || applied[0] != "001_baseline" || applied[1] != "002_login_handoffs" {
 		t.Fatalf("applied migrations = %v", applied)
 	}
 	if again, err := db.Migrate(ctx, database); err != nil || len(again) != 0 {
@@ -60,6 +61,50 @@ func TestSQLiteApplicationLifecycle(t *testing.T) {
 	}
 	if reaped, err := jobs.ReapSessions(ctx, database); err != nil || reaped.Reaped != 1 {
 		t.Fatalf("ReapSessions() = %#v, %v", reaped, err)
+	}
+
+	ticket, err := handoff.Mint(ctx, database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending, err := handoff.Redeem(ctx, database, ticket); err != nil || pending.Code != handoff.RedeemPending {
+		t.Fatalf("handoff.Redeem() before the callback = %#v, %v, want pending", pending, err)
+	}
+	if err := handoff.Fulfil(ctx, database, ticket, user.ID); err != nil {
+		t.Fatal(err)
+	}
+	redeemed, err := handoff.Redeem(ctx, database, ticket)
+	if err != nil || redeemed.Code != handoff.RedeemOK || redeemed.User.ID != user.ID {
+		t.Fatalf("handoff.Redeem() = %#v, %v", redeemed, err)
+	}
+	// The token is minted at redemption, so it opens a live session and the
+	// ticket row never held a usable credential.
+	if session, err := auth.ValidateSession(ctx, database, redeemed.Token); err != nil || session == nil || session.User.ID != user.ID {
+		t.Fatalf("redeemed token does not open a session: %#v, %v", session, err)
+	}
+	if again, err := handoff.Redeem(ctx, database, ticket); err != nil || again.Code != handoff.RedeemGone {
+		t.Fatalf("handoff.Redeem() twice = %#v, %v, want gone", again, err)
+	}
+	refused, err := handoff.Mint(ctx, database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := handoff.Discard(ctx, database, refused); err != nil {
+		t.Fatal(err)
+	}
+	if gone, err := handoff.Redeem(ctx, database, refused); err != nil || gone.Code != handoff.RedeemGone {
+		t.Fatalf("handoff.Redeem() after Discard = %#v, %v, want gone", gone, err)
+	}
+	staleTicket, err := handoff.Mint(ctx, database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ExecContext(ctx, `UPDATE login_handoffs SET expires_at = $1 WHERE ticket = $2`,
+		db.Timestamp(time.Now().Add(-time.Hour)), staleTicket); err != nil {
+		t.Fatal(err)
+	}
+	if reaped, err := jobs.ReapLoginHandoffs(ctx, database); err != nil || reaped.Reaped != 1 {
+		t.Fatalf("ReapLoginHandoffs() = %#v, %v", reaped, err)
 	}
 
 	collection, created, err := collections.Claim(ctx, database, user.ID)
@@ -203,8 +248,15 @@ func TestSQLiteConcurrentMigration(t *testing.T) {
 		}
 		totalApplied += len(result.applied)
 	}
-	if totalApplied != 1 {
-		t.Fatalf("concurrent migration runs applied %d migrations, want 1", totalApplied)
+	// Every shipped migration is recorded, and no migration is claimed by
+	// both runs, so the two totals agree however many migrations there are.
+	var recorded int
+	if err := database.QueryRow(`SELECT count(*) FROM kysely_migration`).Scan(&recorded); err != nil {
+		t.Fatal(err)
+	}
+	if recorded == 0 || totalApplied != recorded {
+		t.Fatalf("concurrent migration runs applied %d migrations, want the %d recorded, each exactly once",
+			totalApplied, recorded)
 	}
 }
 

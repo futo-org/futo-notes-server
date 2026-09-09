@@ -28,13 +28,22 @@ func Run(ctx context.Context, database *db.DB, store *blobs.Store, schedule Sche
 	maintenance := maintenanceJobs(database, store, collectGarbage)
 
 	run(ctx, schedule, scheduledJobs{
-		sessions: []scheduledJob{{
-			name: "sessions",
-			run: func(ctx context.Context) (string, error) {
-				result, err := ReapSessions(ctx, database)
-				return fmt.Sprintf("reaped %d", result.Reaped), err
+		sessions: []scheduledJob{
+			{
+				name: "sessions",
+				run: func(ctx context.Context) (string, error) {
+					result, err := ReapSessions(ctx, database)
+					return fmt.Sprintf("reaped %d", result.Reaped), err
+				},
 			},
-		}},
+			{
+				name: "login hand-offs",
+				run: func(ctx context.Context) (string, error) {
+					result, err := ReapLoginHandoffs(ctx, database)
+					return fmt.Sprintf("reaped %d", result.Reaped), err
+				},
+			},
+		},
 		maintenance: maintenance,
 	})
 }

@@ -110,6 +110,9 @@ func routes(cfg config.Config, database *db.DB, blobStore *blobs.Store, eventHub
 		api.HandleFunc("GET /api/auth/oidc/start", handleOIDCStart(cfg, provider))
 		api.HandleFunc("GET /api/auth/oidc/callback",
 			rateLimited(auth.NewRateLimiter(), handleOIDCCallback(cfg, provider, database)))
+		api.HandleFunc("POST /api/auth/handoff",
+			rateLimited(auth.NewRateLimiter(), handleMintHandoff(cfg, database)))
+		api.HandleFunc("GET /api/auth/handoff/{ticket}", handleRedeemHandoff(database))
 	}
 	api.HandleFunc("GET /api/auth", handleCurrentUser)
 	api.HandleFunc("POST /api/auth/logout", handleLogout(database))

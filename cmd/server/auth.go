@@ -12,6 +12,7 @@ import (
 	"futo-notes-server/internal/auth"
 	"futo-notes-server/internal/config"
 	"futo-notes-server/internal/db"
+	"futo-notes-server/internal/handoff"
 	"futo-notes-server/internal/oidc"
 )
 
@@ -21,6 +22,22 @@ const oidcFlowCookie = "oidc_flow"
 
 // oidcFlowCookiePath scopes the flow cookie to the OIDC routes.
 const oidcFlowCookiePath = "/api/auth/oidc/"
+
+// encodeOIDCFlow packs the flow cookie: the OAuth state, the PKCE verifier,
+// and the Login Hand-off ticket this login fulfils, in that order. State and
+// verifier are base64url, so dots separate them unambiguously. The ticket is
+// empty for a login started in a browser rather than by an app.
+func encodeOIDCFlow(state, verifier, ticket string) string {
+	return state + "." + verifier + "." + ticket
+}
+
+func decodeOIDCFlow(value string) (state, verifier, ticket string, ok bool) {
+	parts := strings.SplitN(value, ".", 3)
+	if len(parts) != 3 {
+		return "", "", "", false
+	}
+	return parts[0], parts[1], parts[2], true
+}
 
 type sessionCtxKey struct{}
 
@@ -41,19 +58,29 @@ func bearerToken(header string) string {
 	return ""
 }
 
-// requireAuth guards every /api/* route except the login path for the active
+// loginPath reports whether requestPath is part of the unauthenticated login
+// surface mounted for authMode. In oidc mode that is the browser's two OIDC
+// routes plus the two Login Hand-off routes an app drives around them.
+func loginPath(authMode, requestPath string) bool {
+	switch authMode {
+	case "password":
+		return requestPath == "/api/auth/password/login"
+	case "dev":
+		return requestPath == "/api/auth/dev/login"
+	case "oidc":
+		return requestPath == "/api/auth/oidc/start" ||
+			requestPath == "/api/auth/oidc/callback" ||
+			requestPath == "/api/auth/handoff" ||
+			strings.HasPrefix(requestPath, "/api/auth/handoff/")
+	}
+	return false
+}
+
+// requireAuth guards every /api/* route except the login paths for the active
 // auth mode. The session cookie is checked before the Authorization header.
 func requireAuth(cfg config.Config, database *db.DB, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if cfg.AuthMode == "password" && r.URL.Path == "/api/auth/password/login" {
-			next.ServeHTTP(w, r)
-			return
-		}
-		if cfg.AuthMode == "dev" && r.URL.Path == "/api/auth/dev/login" {
-			next.ServeHTTP(w, r)
-			return
-		}
-		if cfg.AuthMode == "oidc" && (r.URL.Path == "/api/auth/oidc/start" || r.URL.Path == "/api/auth/oidc/callback") {
+		if loginPath(cfg.AuthMode, r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -147,15 +174,21 @@ func handleDevLogin(cfg config.Config, database *db.DB) http.HandlerFunc {
 }
 
 // handleOIDCStart begins the Authorization Code + PKCE flow: it generates a
-// state and PKCE verifier, stashes both in a short-lived cookie, and
-// redirects to the provider's authorization endpoint.
+// state and PKCE verifier, stashes both — plus any Login Hand-off ticket the
+// URL carries — in a short-lived cookie, and redirects to the provider's
+// authorization endpoint. A ticket that is not shaped like a minted one is
+// dropped, leaving an ordinary browser login.
 func handleOIDCStart(cfg config.Config, provider *oidc.Provider) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		state, verifier := oidc.NewFlow()
+		ticket := r.URL.Query().Get(handoffTicketParam)
+		if !handoff.ValidTicket(ticket) {
+			ticket = ""
+		}
 
 		http.SetCookie(w, &http.Cookie{
 			Name:     oidcFlowCookie,
-			Value:    state + "." + verifier,
+			Value:    encodeOIDCFlow(state, verifier, ticket),
 			Path:     oidcFlowCookiePath,
 			MaxAge:   600,
 			HttpOnly: true,
@@ -182,8 +215,10 @@ func clearOIDCFlowCookie(w http.ResponseWriter, cfg config.Config) {
 // handleOIDCCallback completes the flow: validates state against the flow
 // cookie, exchanges the code for an access token, fetches userinfo, and
 // upserts the user by sub. On success it sets the session cookie exactly
-// like the other login modes, then redirects to /dev (DevUI) or returns the
-// standard {user, token} JSON.
+// like the other login modes. A login carrying a Login Hand-off ticket parks
+// its session against that ticket and renders the "go back to the app" page;
+// otherwise it redirects to /dev (DevUI) or returns the standard
+// {user, token} JSON.
 func handleOIDCCallback(cfg config.Config, provider *oidc.Provider, database *db.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		flowCookie, err := r.Cookie(oidcFlowCookie)
@@ -191,7 +226,7 @@ func handleOIDCCallback(cfg config.Config, provider *oidc.Provider, database *db
 			writeError(w, http.StatusBadRequest, "missing oidc flow cookie")
 			return
 		}
-		state, verifier, ok := strings.Cut(flowCookie.Value, ".")
+		state, verifier, ticket, ok := decodeOIDCFlow(flowCookie.Value)
 		if !ok {
 			writeError(w, http.StatusBadRequest, "invalid oidc flow cookie")
 			return
@@ -226,6 +261,21 @@ func handleOIDCCallback(cfg config.Config, provider *oidc.Provider, database *db
 			writeError(w, http.StatusBadGateway, "identity provider did not return email")
 			return
 		}
+		if !cfg.AllowsEmailDomain(claims.Email) {
+			// The person is told here. Spend the ticket too, so an app is not
+			// left polling a login that is never coming.
+			if ticket != "" {
+				if err := handoff.Discard(r.Context(), database, ticket); err != nil {
+					serverError(w, r, "oidc callback: discarding a refused login hand-off", err)
+					return
+				}
+			}
+			writeJSON(w, http.StatusForbidden, map[string]string{
+				"error": "sign-up is not open yet",
+				"code":  "signup_not_open",
+			})
+			return
+		}
 		name := claims.Name
 		if name == "" {
 			name = claims.PreferredUsername
@@ -255,6 +305,15 @@ func handleOIDCCallback(cfg config.Config, provider *oidc.Provider, database *db
 			SameSite: http.SameSiteLaxMode,
 		})
 
+		if ticket != "" {
+			if err := handoff.Fulfil(r.Context(), database, ticket, u.ID); err != nil {
+				serverError(w, r, "oidc callback: parking the login hand-off", err)
+				return
+			}
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = w.Write(handoffDoneHTML)
+			return
+		}
 		if cfg.DevUI {
 			http.Redirect(w, r, "/dev", http.StatusFound)
 			return

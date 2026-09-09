@@ -38,6 +38,25 @@ The default developer server uses SQLite and needs no database setup:
 AUTH_MODE=dev GOTOOLCHAIN=auto go run ./cmd/server
 ```
 
+Hosted mode needs the four `OIDC_*` variables and, during the internal MVP,
+the sign-up gate:
+
+```bash
+AUTH_MODE=oidc DEV_UI=true COOKIE_SECURE=false \
+  OIDC_ISSUER=https://<instance>.zitadel.cloud \
+  OIDC_CLIENT_ID=... OIDC_CLIENT_SECRET=... \
+  OIDC_REDIRECT_URI=http://localhost:3005/api/auth/oidc/callback \
+  HOSTED_ALLOWED_EMAIL_DOMAINS=futo.org \
+  GOTOOLCHAIN=auto go run ./cmd/server
+```
+
+`OIDC_REDIRECT_URI`'s path has to end in `/api/auth/oidc/callback`; the server
+refuses to boot otherwise, because the Login Hand-off login URL is built from
+that route's `start` sibling. `HOSTED_ALLOWED_EMAIL_DOMAINS` is a
+comma-separated list compared case-insensitively — unset it to admit every
+identity the provider authenticates. The `/dev` page's "Start hand-off" card
+drives the whole login end to end.
+
 Postgres remains available for exercising existing-install and hosted paths:
 
 ```bash

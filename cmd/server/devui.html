@@ -266,6 +266,7 @@ const jobEndpoints = [
   { method: 'POST', path: '/dev/jobs/reconciliation', name: 'storage reconciliation', desc: 'adopt up to 500 untracked files from BLOB_DIR' },
   { method: 'POST', path: '/dev/jobs/mutation-results', name: 'mutation-results expiry', desc: 'expire old pending, failed, update, and delete outcomes' },
   { method: 'POST', path: '/dev/jobs/blob-gc', name: 'blob garbage collection', desc: 'purge eligible staged, retained, and purgeable blobs' },
+  { method: 'POST', path: '/dev/jobs/login-handoffs', name: 'login hand-off reaper', desc: 'delete Login Hand-off tickets past their window' },
 ];
 
 const jobsCard = document.createElement('div');
@@ -292,12 +293,83 @@ for (const job of jobEndpoints) {
 cards.appendChild(jobsCard);
 
 const oidcCard = document.createElement('div');
-oidcCard.className = 'card';
+oidcCard.className = 'card oidc-only';
 oidcCard.innerHTML = `
   <div class="row"><span class="method">GET</span><span class="path">/api/auth/oidc/start</span></div>
   <p class="desc">Log in with FUTO (OIDC); requires AUTH_MODE=oidc</p>
   <div class="row"><a id="oidc-login-link" href="/api/auth/oidc/start"><button>Log in with FUTO</button></a></div>`;
 cards.appendChild(oidcCard);
+
+const handoffCard = document.createElement('div');
+handoffCard.className = 'card oidc-only';
+handoffCard.innerHTML = `
+  <div class="row">
+    <span class="method">POST</span>
+    <span class="path">/api/auth/handoff</span>
+    <button>Start hand-off</button>
+  </div>
+  <p class="desc">what an app does: mint a ticket, open the login URL in a new tab, then poll /api/auth/handoff/{ticket} until the session comes back</p>
+  <div class="result">
+    <span class="status"></span>
+    <pre></pre>
+  </div>`;
+cards.appendChild(handoffCard);
+
+const handoffButton = handoffCard.querySelector('button');
+const handoffStatus = handoffCard.querySelector('.status');
+const handoffLog = handoffCard.querySelector('pre');
+
+function renderJSON(text) {
+  if (!text) return '(empty body)';
+  try {
+    return JSON.stringify(JSON.parse(text), null, 2);
+  } catch {
+    return text;
+  }
+}
+
+handoffButton.addEventListener('click', async () => {
+  handoffCard.querySelector('.result').classList.add('shown');
+  handoffButton.disabled = true;
+  handoffStatus.className = 'status s4';
+  handoffStatus.textContent = 'minting…';
+  handoffLog.textContent = '';
+  try {
+    const minted = await fetch('/api/auth/handoff', { method: 'POST' });
+    const mintedText = await minted.text();
+    if (!minted.ok) {
+      handoffStatus.textContent = `${minted.status} ${minted.statusText}`.trim();
+      handoffStatus.className = `status s${Math.floor(minted.status / 100)}`;
+      handoffLog.textContent = renderJSON(mintedText);
+      return;
+    }
+    const { ticket, url } = JSON.parse(mintedText);
+    handoffLog.textContent = `ticket ${ticket}\nopening ${url}\n\n`;
+    window.open(url, '_blank');
+
+    // Poll the way an app would. An abandoned login ends the loop on its
+    // own, with the 404 the ticket's expiry produces.
+    for (let attempt = 1; ; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      const polled = await fetch(`/api/auth/handoff/${encodeURIComponent(ticket)}`);
+      if (polled.status === 202) {
+        handoffStatus.textContent = `202 pending · poll ${attempt}`;
+        continue;
+      }
+      handoffStatus.textContent = `${polled.status} ${polled.statusText}`.trim();
+      handoffStatus.className = `status s${Math.floor(polled.status / 100)}`;
+      handoffLog.textContent += renderJSON(await polled.text());
+      if (polled.ok) refreshSession();
+      return;
+    }
+  } catch (err) {
+    handoffStatus.textContent = 'network error';
+    handoffStatus.className = 'status s5';
+    handoffLog.textContent += String(err);
+  } finally {
+    handoffButton.disabled = false;
+  }
+});
 
 const sseCard = document.createElement('div');
 sseCard.className = 'card';
@@ -485,20 +557,21 @@ async function refreshSession() {
 }
 
 async function checkOIDCMode() {
-  const card = document.getElementById('oidc-login-link').closest('.card');
   try {
     const res = await fetch('/');
     const cap = await res.json();
-    if (cap.auth_mode !== 'oidc') {
+    if (cap.auth_mode === 'oidc') return;
+    for (const card of document.querySelectorAll('.oidc-only')) {
       card.style.opacity = '0.5';
       const reason = document.createElement('p');
       reason.className = 'desc';
       reason.textContent = `disabled: server is running AUTH_MODE=${cap.auth_mode}, not oidc`;
       card.appendChild(reason);
-      document.getElementById('oidc-login-link').style.pointerEvents = 'none';
+      for (const link of card.querySelectorAll('a')) link.style.pointerEvents = 'none';
+      for (const button of card.querySelectorAll('button')) button.disabled = true;
     }
   } catch {
-    // capability document unreachable; leave the card enabled.
+    // capability document unreachable; leave the cards enabled.
   }
 }
 

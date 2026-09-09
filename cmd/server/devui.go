@@ -44,6 +44,9 @@ func registerDevJobHandlers(mux *http.ServeMux, database *db.DB, store *blobs.St
 	mux.HandleFunc("POST /dev/jobs/blob-gc", handleDevJob(func(ctx context.Context) (jobs.BlobGCResult, error) {
 		return jobs.GarbageCollectBlobs(ctx, database, store)
 	}))
+	mux.HandleFunc("POST /dev/jobs/login-handoffs", handleDevJob(func(ctx context.Context) (jobs.HandoffReapResult, error) {
+		return jobs.ReapLoginHandoffs(ctx, database)
+	}))
 }
 
 func handleDevJob[T any](run func(context.Context) (T, error)) http.HandlerFunc {

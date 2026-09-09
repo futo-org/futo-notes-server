@@ -17,12 +17,16 @@ import (
 )
 
 // newFakeIssuer starts an httptest server that serves a minimal OIDC
-// discovery document, token endpoint, and userinfo endpoint. Its userinfo
-// claims can be changed between requests via the returned setter, so a test
-// can simulate a returning user whose display name changed upstream.
-func newFakeIssuer(t *testing.T, clientID, clientSecret string) (issuerURL string, setName func(string)) {
+// discovery document, token endpoint, and userinfo endpoint. The returned
+// claims are what /userinfo answers with and a test may edit them between
+// requests, to simulate a different identity or an upstream name change.
+func newFakeIssuer(t *testing.T, clientID, clientSecret string) (issuerURL string, claims *oidc.Claims) {
 	t.Helper()
-	name := "First Login"
+	claims = &oidc.Claims{
+		Sub:   "fake-issuer-sub-1",
+		Email: "person@example.test",
+		Name:  "First Login",
+	}
 	var issuer string
 
 	mux := http.NewServeMux()
@@ -57,22 +61,18 @@ func newFakeIssuer(t *testing.T, clientID, clientSecret string) (issuerURL strin
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(oidc.Claims{
-			Sub:   "fake-issuer-sub-1",
-			Email: "person@example.test",
-			Name:  name,
-		})
+		_ = json.NewEncoder(w).Encode(claims)
 	})
 
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
 	issuer = server.URL
-	return issuer, func(newName string) { name = newName }
+	return issuer, claims
 }
 
 func TestOIDCRoutesEndToEnd(t *testing.T) {
 	const clientID, clientSecret = "test-client", "test-secret"
-	issuerURL, setName := newFakeIssuer(t, clientID, clientSecret)
+	issuerURL, claims := newFakeIssuer(t, clientID, clientSecret)
 
 	provider, err := oidc.Discover(context.Background(), issuerURL)
 	if err != nil {
@@ -186,7 +186,7 @@ func TestOIDCRoutesEndToEnd(t *testing.T) {
 
 	// A second login with the same sub but a new upstream name updates the
 	// row rather than creating a second user.
-	setName("Second Login")
+	claims.Name = "Second Login"
 	start2 := doRequest(t, client, http.MethodGet, server.URL+"/api/auth/oidc/start", "", "", nil)
 	authorizeURL2, err := url.Parse(start2.Header.Get("Location"))
 	if err != nil {

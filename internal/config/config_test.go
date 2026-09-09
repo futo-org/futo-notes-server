@@ -125,6 +125,28 @@ func TestOIDCRedirectURIMustBeAbsolute(t *testing.T) {
 	}
 }
 
+func TestOIDCRedirectURIMustBeTheCallbackRoute(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("DATABASE_URL", "postgres://example.test/notes")
+	t.Setenv("AUTH_MODE", "oidc")
+	t.Setenv("OIDC_ISSUER", "https://idp.example.test")
+	t.Setenv("OIDC_CLIENT_ID", "client-id")
+	t.Setenv("OIDC_CLIENT_SECRET", "client-secret")
+
+	// The Login Hand-off login URL is the callback's start sibling, so a
+	// redirect URI aimed elsewhere would hand apps a URL that 404s.
+	t.Setenv("OIDC_REDIRECT_URI", "https://notes.example.test/callback")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), oidcCallbackPath) {
+		t.Fatalf("Load() error = %v, want it to name %s", err, oidcCallbackPath)
+	}
+
+	// A server mounted under a path prefix still passes.
+	t.Setenv("OIDC_REDIRECT_URI", "https://notes.example.test/notes"+oidcCallbackPath)
+	if _, err := Load(); err != nil {
+		t.Fatalf("Load() rejected a prefixed callback route: %v", err)
+	}
+}
+
 func TestDroppedEnvWarnings(t *testing.T) {
 	t.Setenv("DB_SSL", "true")
 	t.Setenv("MAX_BLOB_BYTES", "123")
@@ -144,5 +166,55 @@ func TestDroppedEnvWarnings(t *testing.T) {
 		return strings.Contains(warning, "BLOB_GC_ENABLED")
 	}) {
 		t.Fatalf("warnings %q include honored BLOB_GC_ENABLED", warnings)
+	}
+}
+
+func TestHostedAllowedEmailDomains(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("DATABASE_URL", "postgres://example.test/notes")
+	t.Setenv("AUTH_MODE", "dev")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.HostedAllowedEmailDomains) != 0 {
+		t.Fatalf("HostedAllowedEmailDomains = %q with the variable unset, want empty", cfg.HostedAllowedEmailDomains)
+	}
+
+	t.Setenv("HOSTED_ALLOWED_EMAIL_DOMAINS", " FUTO.org ,example.test,, ")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(cfg.HostedAllowedEmailDomains, []string{"futo.org", "example.test"}) {
+		t.Fatalf("HostedAllowedEmailDomains = %q, want lowercased, trimmed, no empties", cfg.HostedAllowedEmailDomains)
+	}
+}
+
+func TestAllowsEmailDomain(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		allowed []string
+		email   string
+		want    bool
+	}{
+		{name: "unset admits everyone", email: "anyone@somewhere.test", want: true},
+		{name: "unset admits a malformed address", email: "no-at-sign", want: true},
+		{name: "on the list", allowed: []string{"futo.org"}, email: "person@futo.org", want: true},
+		{name: "case is ignored", allowed: []string{"futo.org"}, email: "Person@FUTO.ORG", want: true},
+		{name: "off the list", allowed: []string{"futo.org"}, email: "person@example.test", want: false},
+		{name: "second entry counts", allowed: []string{"futo.org", "example.test"}, email: "person@example.test", want: true},
+		{name: "no domain at all", allowed: []string{"futo.org"}, email: "person", want: false},
+		// The domain is what follows the last @, so an address cannot smuggle
+		// an allowed domain in ahead of its real one.
+		{name: "domain is after the last at-sign", allowed: []string{"futo.org"}, email: "person@futo.org@example.test", want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := Config{HostedAllowedEmailDomains: test.allowed}
+			if got := cfg.AllowsEmailDomain(test.email); got != test.want {
+				t.Fatalf("AllowsEmailDomain(%q) with %q = %t, want %t", test.email, test.allowed, got, test.want)
+			}
+		})
 	}
 }

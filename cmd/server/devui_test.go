@@ -34,6 +34,9 @@ func TestDevUIIncludesRecurringJobPanel(t *testing.T) {
 		"/dev/jobs/reconciliation",
 		"/dev/jobs/mutation-results",
 		"/dev/jobs/blob-gc",
+		"/dev/jobs/login-handoffs",
+		"/api/auth/handoff",
+		"Start hand-off",
 		"Run now",
 		"sqlite: /var/lib/futo/notes.db",
 	} {

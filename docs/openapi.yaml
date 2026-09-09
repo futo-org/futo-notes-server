@@ -265,8 +265,16 @@ paths:
 
         Rate limited like `passwordLogin`, before the route handler runs.
 
-        On success: if the server is running with `DEV_UI=true`, redirects to
-        `/dev`; otherwise returns the standard login JSON body.
+        On success: a login that carries a Login Hand-off ticket (see
+        `mintLoginHandoff`) parks its session against that ticket, still sets
+        the `session` cookie, and renders an HTML "go back to the app" page.
+        A ticket that is unknown or expired by now parks nothing and still
+        gets the page — the app's poll answers `404` and it mints a fresh
+        ticket. A ticket whose identity is turned away by
+        `HOSTED_ALLOWED_EMAIL_DOMAINS` is spent rather than parked, so that
+        poll answers `404` immediately. Without a ticket: if the server is running with
+        `DEV_UI=true`, redirects to `/dev`; otherwise returns the standard
+        login JSON body.
       parameters:
         - name: code
           in: query
@@ -289,6 +297,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "403":
+          $ref: "#/components/responses/SignupNotOpen"
         "429":
           description: |
             Rate limit exceeded. Carries a `Retry-After` header in seconds.
@@ -308,6 +318,124 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+
+  /api/auth/handoff:
+    post:
+      operationId: mintLoginHandoff
+      tags: [auth]
+      security: []
+      summary: Mint a Login Hand-off ticket (OIDC mode only)
+      description: |
+        Mounted only when `AUTH_MODE=oidc`. Takes no body and no credentials.
+
+        A Login Hand-off is how an app signs in without ever handling
+        identity-provider tokens: it asks for a ticket and the URL to open,
+        opens that URL in whatever browser surface it likes, and polls
+        `redeemLoginHandoff` until the server hands back the same
+        `{user, token}` a password login returns.
+
+        `url` is the `oidcStart` route carrying the ticket, on the public
+        origin taken from `OIDC_REDIRECT_URI` (whose path has to end in the
+        callback route, since the start route is its sibling). The ticket is
+        unguessable — 32 random bytes, base64url — and stays claimable for 10
+        minutes.
+
+        A ticket records which account authenticated, never a session token;
+        the session is opened when the ticket is redeemed.
+
+        Rate limited like `passwordLogin`, before the route handler runs.
+      responses:
+        "200":
+          description: A ticket and the URL to open a browser at
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ticket, url]
+                properties:
+                  ticket:
+                    type: string
+                  url:
+                    type: string
+                    format: uri
+              example:
+                ticket: O55Dik22Uc5E2KqAkQ0haBH3wjG3zkqnUeKmIEOd6BY
+                url: https://notes.example.org/api/auth/oidc/start?ticket=O55Dik22Uc5E2KqAkQ0haBH3wjG3zkqnUeKmIEOd6BY
+        "429":
+          description: |
+            Rate limit exceeded. Carries a `Retry-After` header in seconds.
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+                minimum: 1
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: too many requests }
+
+  /api/auth/handoff/{ticket}:
+    get:
+      operationId: redeemLoginHandoff
+      tags: [auth]
+      security: []
+      summary: Poll a Login Hand-off ticket (OIDC mode only)
+      description: |
+        Mounted only when `AUTH_MODE=oidc`. Takes no credentials: the ticket
+        is the credential, which is why it is single-use and short-lived.
+
+        Poll this until it stops answering `202`. Once the browser has
+        finished, one call returns the session and consumes the ticket; every
+        call after that is a `404`. Not rate limited, so an app can poll on
+        whatever interval suits it.
+
+        A fulfilled ticket holds its session for 5 minutes from the callback,
+        not from minting, so a slow login does not shorten the app's window.
+      parameters:
+        - name: ticket
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: |
+            The same `{user, token}` body `LoginSuccess` carries, but no
+            `Set-Cookie`: the browser already holds its own session cookie
+            from the callback, and this session belongs to the app. The
+            session is opened at redemption, so its 7 days start here.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user, token]
+                properties:
+                  user:
+                    $ref: "#/components/schemas/User"
+                  token:
+                    type: string
+                    description: |
+                      Raw session token, 32 random bytes hex-encoded. Only
+                      its SHA-256 hash is stored server-side.
+        "202":
+          description: |
+            The person has not finished the browser login yet. Empty body.
+        "404":
+          description: |
+            Unknown ticket, already redeemed, refused, or expired.
+            Deliberately the same answer for all four, so polling never
+            reveals whether a ticket exists. Mint a new one.
+
+            "Refused" covers the `signup_not_open` case: the callback spends
+            the ticket when it turns an identity away, so an app stops
+            waiting on a login that is never coming instead of polling out
+            the rest of the ticket's life.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: not found }
 
   /api/auth:
     get:
@@ -1373,6 +1501,26 @@ components:
                   code:
                     type: string
                     enum: [invalid_session]
+    SignupNotOpen:
+      description: |
+        The identity the provider authenticated is not allowed to sign up.
+        During the internal MVP the hosted service limits sign-in to the
+        email domains in `HOSTED_ALLOWED_EMAIL_DOMAINS` (comma-separated,
+        compared case-insensitively). Checked at the callback before any user
+        row exists, so a rejected person leaves no account behind. Unset the
+        variable to admit every identity the provider authenticates.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error, code]
+            properties:
+              error:
+                type: string
+              code:
+                type: string
+                enum: [signup_not_open]
+          example: { error: sign-up is not open yet, code: signup_not_open }
     NotFound:
       description: |
         Not found, or not owned by the caller — `404` rather than `403` so

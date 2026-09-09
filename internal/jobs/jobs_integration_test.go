@@ -69,6 +69,30 @@ func TestRecurringJobs(t *testing.T) {
 		assertRowCount(t, database, `SELECT count(*) FROM sessions WHERE id = $1`, 1, liveID)
 	})
 
+	t.Run("login hand-off reaper", func(t *testing.T) {
+		if _, err := jobs.ReapLoginHandoffs(ctx, database); err != nil {
+			t.Fatal(err)
+		}
+		expiredTicket, liveTicket := "expired-"+uuid.NewV7().String(), "live-"+uuid.NewV7().String()
+		if _, err := database.ExecContext(ctx, `INSERT INTO login_handoffs
+			(ticket, expires_at) VALUES
+			($1, now() - interval '1 second'),
+			($2, now() + interval '1 hour')`, expiredTicket, liveTicket); err != nil {
+			t.Fatal(err)
+		}
+		defer database.ExecContext(ctx, `DELETE FROM login_handoffs WHERE ticket IN ($1, $2)`, expiredTicket, liveTicket)
+
+		result, err := jobs.ReapLoginHandoffs(ctx, database)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Reaped != 1 {
+			t.Fatalf("reaped = %d, want 1", result.Reaped)
+		}
+		assertRowCount(t, database, `SELECT count(*) FROM login_handoffs WHERE ticket = $1`, 0, expiredTicket)
+		assertRowCount(t, database, `SELECT count(*) FROM login_handoffs WHERE ticket = $1`, 1, liveTicket)
+	})
+
 	t.Run("storage reconciliation", func(t *testing.T) {
 		store := &blobs.Store{Dir: t.TempDir()}
 		orphanKey := userID + "/" + uuid.NewV7().String()

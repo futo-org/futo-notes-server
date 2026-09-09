@@ -126,6 +126,23 @@ GET $BASE/api/auth/oidc/callback  → completes the flow
 - `callback` requires that cookie and a matching `state` query parameter (`400` otherwise), exchanges the `code`, reads `sub`/`email`/`name` from the identity provider's userinfo endpoint, and upserts the user by `sub`. `502` if the provider omits `sub` or `email`.
 - On success: if the server runs with `DEV_UI=true`, redirects to `/dev`; otherwise returns the same `{ user, token }` body as password/dev login.
 - Rate limited like password login.
+- `403 { "error": "sign-up is not open yet", "code": "signup_not_open" }` when `HOSTED_ALLOWED_EMAIL_DOMAINS` is set and the identity's email domain is not on it. Checked before any user row exists, compared case-insensitively. Unset the variable to admit everyone.
+
+#### Login Hand-off (apps)
+
+An app can't drive a browser redirect, so it hands the login off to one and redeems the result. It never sees identity-provider tokens.
+
+```
+POST $BASE/api/auth/handoff           → 200 { "ticket": "...", "url": "..." }   // no body, no credentials
+GET  $BASE/api/auth/handoff/{ticket}  → 202 (empty)  while the person is still in the browser
+                                      → 200 { "user": {...}, "token": "..." }   // exactly once
+                                      → 404 afterwards, and for unknown or expired tickets
+```
+- `url` is the `oidc/start` route carrying the ticket, on the origin from `OIDC_REDIRECT_URI` — whose path has to end in `/api/auth/oidc/callback`, since the start route is its sibling.  Open it in a system browser, auth sheet, or webview — the server does not care.
+- The browser lands on a small "go back to the app" page instead of the login JSON, and keeps its own session cookie. The token you redeem is a separate session, opened at redemption, so logging out in one place does not end the other.
+- A ticket records which account authenticated, never a session token.
+- Tickets stay claimable for 10 minutes; a fulfilled one stays redeemable for 5 minutes from the callback. A ticket whose identity is turned away by `HOSTED_ALLOWED_EMAIL_DOMAINS` is spent, so the poll answers `404` immediately rather than leaving you waiting.
+- Poll on whatever interval suits you — this route is not rate limited. Minting is.
 
 ### Session endpoints (all modes)
 

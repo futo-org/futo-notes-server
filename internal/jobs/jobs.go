@@ -35,6 +35,21 @@ func ReapSessions(ctx context.Context, database *appdb.DB) (SessionReapResult, e
 	return SessionReapResult{Reaped: reaped}, err
 }
 
+type HandoffReapResult struct {
+	Reaped int64 `json:"reaped"`
+}
+
+// ReapLoginHandoffs deletes Login Hand-off tickets past their window,
+// whether they were ever fulfilled or not.
+func ReapLoginHandoffs(ctx context.Context, database *appdb.DB) (HandoffReapResult, error) {
+	result, err := database.ExecContext(ctx, `DELETE FROM login_handoffs WHERE expires_at < $1`, appdb.Timestamp(clock()))
+	if err != nil {
+		return HandoffReapResult{}, err
+	}
+	reaped, err := result.RowsAffected()
+	return HandoffReapResult{Reaped: reaped}, err
+}
+
 type ReconciliationResult struct {
 	Adopted int  `json:"adopted"`
 	Skipped int  `json:"skipped"`
