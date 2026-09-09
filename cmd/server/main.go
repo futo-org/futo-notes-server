@@ -67,7 +67,11 @@ func handleCapability(authMode string) http.HandlerFunc {
 		Version:  serverVersion,
 		AuthMode: authMode,
 		Signup:   signup,
-		Billing:  false,
+		// Hosted mode is oidc plus Polar, and oidc mode will not boot
+		// without Polar, so the auth mode is what says whether this server
+		// sells subscriptions. The app shows the sign-up path when it sees
+		// both.
+		Billing: authMode == "oidc",
 		MutationIDs: mutationIDs{
 			Supported:                true,
 			Required:                 false,
@@ -104,6 +108,14 @@ func routes(cfg config.Config, database *db.DB, blobStore *blobs.Store, eventHub
 	// constant.
 	quotaEnforced := cfg.AuthMode == "oidc"
 
+	// Entitlement gates the routes that mutate collection contents or stage
+	// blobs, plus the vault key write. Reads, pulls, downloads, batch fetch,
+	// the SSE stream, capability, auth, hand-off, and billing itself are
+	// never gated: a lapsed card must not strand a device or hide the data
+	// someone already stored. Claiming or deleting the vault stays open too,
+	// so a lapsed account can still find its collection and clear it out.
+	entitled := requireEntitlement(cfg, database)
+
 	api := http.NewServeMux()
 	if cfg.AuthMode == "dev" {
 		api.HandleFunc("POST /api/auth/dev/login", handleDevLogin(cfg, database))
@@ -128,17 +140,17 @@ func routes(cfg config.Config, database *db.DB, blobStore *blobs.Store, eventHub
 	api.HandleFunc("GET /api/collections/{id}", handleGetCollection(database))
 	api.HandleFunc("DELETE /api/collections/{id}", handleDeleteCollection(database))
 	api.HandleFunc("GET /api/collections/{id}/key", handleGetCollectionKey(database))
-	api.HandleFunc("PUT /api/collections/{id}/key", handlePutCollectionKey(database))
+	api.HandleFunc("PUT /api/collections/{id}/key", entitled(handlePutCollectionKey(database)))
 	api.HandleFunc("GET /api/collections/{id}/objects", handleListObjects(database))
-	api.HandleFunc("POST /api/collections/{id}/objects", handleCreateObject(database, publisher, quotaEnforced))
+	api.HandleFunc("POST /api/collections/{id}/objects", entitled(handleCreateObject(database, publisher, quotaEnforced)))
 	api.HandleFunc("GET /api/collections/{id}/objects/{objectId}", handleGetObject(database))
-	api.HandleFunc("PUT /api/collections/{id}/objects/{objectId}", handleUpdateObject(database, publisher, quotaEnforced))
-	api.HandleFunc("DELETE /api/collections/{id}/objects/{objectId}", handleDeleteObject(database, publisher))
-	api.HandleFunc("POST /api/collections/{id}/blob-objects", handleCreateBlobObject(database, blobStore, publisher, quotaEnforced))
-	api.HandleFunc("PUT /api/collections/{id}/blob-objects/{objectId}", handleUpdateBlobObject(database, blobStore, publisher, quotaEnforced))
-	api.HandleFunc("POST /api/collections/{id}/blob-objects/batch", handleBatchBlobObjects(database, blobStore, publisher, quotaEnforced))
+	api.HandleFunc("PUT /api/collections/{id}/objects/{objectId}", entitled(handleUpdateObject(database, publisher, quotaEnforced)))
+	api.HandleFunc("DELETE /api/collections/{id}/objects/{objectId}", entitled(handleDeleteObject(database, publisher)))
+	api.HandleFunc("POST /api/collections/{id}/blob-objects", entitled(handleCreateBlobObject(database, blobStore, publisher, quotaEnforced)))
+	api.HandleFunc("PUT /api/collections/{id}/blob-objects/{objectId}", entitled(handleUpdateBlobObject(database, blobStore, publisher, quotaEnforced)))
+	api.HandleFunc("POST /api/collections/{id}/blob-objects/batch", entitled(handleBatchBlobObjects(database, blobStore, publisher, quotaEnforced)))
 	api.HandleFunc("GET /api/collections/{id}/create-mutations/{mutationId}", handleRecoverCreate(database))
-	api.HandleFunc("POST /api/blobs", handleUploadBlob(database, blobStore, quotaEnforced))
+	api.HandleFunc("POST /api/blobs", entitled(handleUploadBlob(database, blobStore, quotaEnforced)))
 	api.HandleFunc("POST /api/blobs/batch", handleBatchFetchBlobs(blobStore))
 	api.HandleFunc("GET /api/blobs/{userId}/{blobId}", handleDownloadBlob(blobStore))
 	api.HandleFunc("DELETE /api/blobs/{userId}/{blobId}", handleDeleteBlob(database, blobStore))
@@ -153,11 +165,23 @@ func routes(cfg config.Config, database *db.DB, blobStore *blobs.Store, eventHub
 	mux.HandleFunc("GET /{$}", handleCapability(cfg.AuthMode))
 	mux.HandleFunc("GET /health", handleHealth(database))
 	mux.Handle("/api/", requireAuth(cfg, database, api))
+	var polarWebhook http.HandlerFunc
+	if cfg.AuthMode == "oidc" {
+		// Polar authenticates with a signature over the body rather than a
+		// session, so the webhook is mounted outside requireAuth. The
+		// literal pattern takes precedence over "/api/".
+		polarWebhook = handlePolarWebhook(cfg, database)
+		mux.HandleFunc("POST /api/billing/polar/webhook", polarWebhook)
+	}
 	if cfg.DevUI {
 		mux.HandleFunc("GET /dev", handleDevUI(database))
 		mux.HandleFunc("POST /dev/panic", handleDevPanic)
 		registerDevJobHandlers(mux, database, blobStore)
 		mux.HandleFunc("POST /dev/plan", handleDevPlan(database))
+		if polarWebhook != nil {
+			mux.HandleFunc("POST /dev/subscription", handleDevSubscription(cfg, database, polarWebhook))
+			mux.HandleFunc("GET /dev/subscription/last", handleDevLastWebhook(database))
+		}
 		slog.Info("dev UI enabled", "path", "/dev")
 	}
 

@@ -34,6 +34,14 @@ type Config struct {
 	OIDCClientSecret   string // OIDC_CLIENT_SECRET
 	OIDCRedirectURI    string // OIDC_REDIRECT_URI
 
+	// Polar, the billing provider. Hosted mode is AUTH_MODE=oidc plus these
+	// four; a server without them cannot tell an entitled account from a
+	// lapsed one, so it refuses to boot rather than let everyone write.
+	PolarBaseURL       string // POLAR_BASE_URL, the sandbox or production API
+	PolarAccessToken   string // POLAR_ACCESS_TOKEN
+	PolarProductID     string // POLAR_PRODUCT_ID, the subscribed product
+	PolarWebhookSecret string // POLAR_WEBHOOK_SECRET, the Standard Webhooks signing secret
+
 	// HOSTED_ALLOWED_EMAIL_DOMAINS, lowercased. Empty admits every identity
 	// the provider authenticates; otherwise sign-in is limited to these
 	// email domains. Internal-MVP gate, removed before public sign-up.
@@ -59,6 +67,10 @@ func Load() (Config, error) {
 		OIDCClientID:       os.Getenv("OIDC_CLIENT_ID"),
 		OIDCClientSecret:   os.Getenv("OIDC_CLIENT_SECRET"),
 		OIDCRedirectURI:    os.Getenv("OIDC_REDIRECT_URI"),
+		PolarBaseURL:       strings.TrimSuffix(os.Getenv("POLAR_BASE_URL"), "/"),
+		PolarAccessToken:   os.Getenv("POLAR_ACCESS_TOKEN"),
+		PolarProductID:     os.Getenv("POLAR_PRODUCT_ID"),
+		PolarWebhookSecret: os.Getenv("POLAR_WEBHOOK_SECRET"),
 
 		HostedAllowedEmailDomains: emailDomains(os.Getenv("HOSTED_ALLOWED_EMAIL_DOMAINS")),
 	}
@@ -86,6 +98,18 @@ func Load() (Config, error) {
 		}
 		if cfg.OIDCRedirectURI == "" {
 			missing = append(missing, "OIDC_REDIRECT_URI")
+		}
+		if cfg.PolarBaseURL == "" {
+			missing = append(missing, "POLAR_BASE_URL")
+		}
+		if cfg.PolarAccessToken == "" {
+			missing = append(missing, "POLAR_ACCESS_TOKEN")
+		}
+		if cfg.PolarProductID == "" {
+			missing = append(missing, "POLAR_PRODUCT_ID")
+		}
+		if cfg.PolarWebhookSecret == "" {
+			missing = append(missing, "POLAR_WEBHOOK_SECRET")
 		}
 		if len(missing) > 0 {
 			return Config{}, fmt.Errorf("%s required when AUTH_MODE=oidc", strings.Join(missing, ", "))

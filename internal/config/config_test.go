@@ -78,6 +78,63 @@ func TestPasswordConfigurationRequiresExactlyOneCredential(t *testing.T) {
 	}
 }
 
+// setPolarEnv supplies the Polar configuration hosted mode requires, so a
+// test about something else is not tripped by it.
+func setPolarEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("POLAR_BASE_URL", "https://sandbox-api.polar.sh")
+	t.Setenv("POLAR_ACCESS_TOKEN", "polar_oat_test")
+	t.Setenv("POLAR_PRODUCT_ID", "prod_test")
+	t.Setenv("POLAR_WEBHOOK_SECRET", "whsec_cG9sYXItd2ViaG9vay1rZXk=")
+}
+
+func TestHostedModeRequiresThePolarConfiguration(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("DATABASE_URL", "postgres://example.test/notes")
+	t.Setenv("AUTH_MODE", "oidc")
+	t.Setenv("OIDC_ISSUER", "https://idp.example.test")
+	t.Setenv("OIDC_CLIENT_ID", "client-id")
+	t.Setenv("OIDC_CLIENT_SECRET", "client-secret")
+	t.Setenv("OIDC_REDIRECT_URI", "http://localhost:3005/api/auth/oidc/callback")
+
+	err := errorFromLoad(t)
+	// One error, naming every missing value, so an operator fixes them in one pass.
+	for _, name := range []string{"POLAR_BASE_URL", "POLAR_ACCESS_TOKEN", "POLAR_PRODUCT_ID", "POLAR_WEBHOOK_SECRET"} {
+		if !strings.Contains(err.Error(), name) {
+			t.Fatalf("Load() error = %v, want it to name %s", err, name)
+		}
+	}
+
+	setPolarEnv(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() with the Polar configuration set: %v", err)
+	}
+	if cfg.PolarBaseURL != "https://sandbox-api.polar.sh" || cfg.PolarProductID != "prod_test" {
+		t.Fatalf("Polar configuration = %+v", cfg)
+	}
+}
+
+func TestSelfHostedModesDoNotAskForPolar(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("DATABASE_URL", "sqlite:notes.db")
+	t.Setenv("AUTH_MODE", "password")
+	t.Setenv("FUTO_NOTES_PASSWORD", "correct password")
+
+	if _, err := Load(); err != nil {
+		t.Fatalf("Load() in password mode asked for Polar configuration: %v", err)
+	}
+}
+
+func errorFromLoad(t *testing.T) error {
+	t.Helper()
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() error = nil, want a configuration error")
+	}
+	return err
+}
+
 func TestOIDCConfigurationRequiresAllFourVars(t *testing.T) {
 	t.Chdir(t.TempDir())
 	t.Setenv("DATABASE_URL", "postgres://example.test/notes")
@@ -101,6 +158,7 @@ func TestOIDCConfigurationRequiresAllFourVars(t *testing.T) {
 	t.Setenv("OIDC_CLIENT_ID", "client-id")
 	t.Setenv("OIDC_CLIENT_SECRET", "client-secret")
 	t.Setenv("OIDC_REDIRECT_URI", "http://localhost:3005/api/auth/oidc/callback")
+	setPolarEnv(t)
 
 	cfg, err := Load()
 	if err != nil {
@@ -119,6 +177,7 @@ func TestOIDCRedirectURIMustBeAbsolute(t *testing.T) {
 	t.Setenv("OIDC_CLIENT_ID", "client-id")
 	t.Setenv("OIDC_CLIENT_SECRET", "client-secret")
 	t.Setenv("OIDC_REDIRECT_URI", "/api/auth/oidc/callback")
+	setPolarEnv(t)
 
 	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "absolute") {
 		t.Fatalf("Load() error = %v, want absolute redirect URI error", err)
@@ -132,6 +191,7 @@ func TestOIDCRedirectURIMustBeTheCallbackRoute(t *testing.T) {
 	t.Setenv("OIDC_ISSUER", "https://idp.example.test")
 	t.Setenv("OIDC_CLIENT_ID", "client-id")
 	t.Setenv("OIDC_CLIENT_SECRET", "client-secret")
+	setPolarEnv(t)
 
 	// The Login Hand-off login URL is the callback's start sibling, so a
 	// redirect URI aimed elsewhere would hand apps a URL that 404s.

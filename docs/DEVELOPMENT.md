@@ -10,8 +10,8 @@ want to run the server, see the [README](../README.md).
 without external dependencies. Postgres-backed tests also run when
 `OBJECTS_TEST_DATABASE_URL`, `EVENTS_TEST_DATABASE_URL`,
 `JOBS_TEST_DATABASE_URL`, `BLOBS_TEST_DATABASE_URL`,
-`USAGE_TEST_DATABASE_URL`, and `SERVER_TEST_DATABASE_URL` are set to scratch
-databases. The Postgres-to-SQLite
+`USAGE_TEST_DATABASE_URL`, `SUBSCRIPTIONS_TEST_DATABASE_URL`, and
+`SERVER_TEST_DATABASE_URL` are set to scratch databases. The Postgres-to-SQLite
 copy test also runs when `MIGRATION_TEST_DATABASE_URL` is set. Every URL must
 identify a scratch database that tests may freely write to; never use a
 development or production database.
@@ -24,7 +24,7 @@ docker exec futo-notes-postgres createdb -U futo_notes notes_test
 URL='postgres://futo_notes:futo_notes@localhost:5433/notes_test'
 OBJECTS_TEST_DATABASE_URL=$URL EVENTS_TEST_DATABASE_URL=$URL \
 JOBS_TEST_DATABASE_URL=$URL BLOBS_TEST_DATABASE_URL=$URL \
-USAGE_TEST_DATABASE_URL=$URL \
+USAGE_TEST_DATABASE_URL=$URL SUBSCRIPTIONS_TEST_DATABASE_URL=$URL \
 SERVER_TEST_DATABASE_URL=$URL MIGRATION_TEST_DATABASE_URL=$URL \
 go test -race -count=1 -p 1 ./...
 ```
@@ -40,24 +40,31 @@ The default developer server uses SQLite and needs no database setup:
 AUTH_MODE=dev GOTOOLCHAIN=auto go run ./cmd/server
 ```
 
-Hosted mode needs the four `OIDC_*` variables and, during the internal MVP,
-the sign-up gate:
+Hosted mode needs the four `OIDC_*` variables, the four `POLAR_*` ones, and,
+during the internal MVP, the sign-up gate:
 
 ```bash
 AUTH_MODE=oidc DEV_UI=true COOKIE_SECURE=false \
   OIDC_ISSUER=https://<instance>.zitadel.cloud \
   OIDC_CLIENT_ID=... OIDC_CLIENT_SECRET=... \
   OIDC_REDIRECT_URI=http://localhost:3005/api/auth/oidc/callback \
+  POLAR_BASE_URL=https://sandbox-api.polar.sh \
+  POLAR_ACCESS_TOKEN=polar_oat_... POLAR_PRODUCT_ID=... \
+  POLAR_WEBHOOK_SECRET=whsec_... \
   HOSTED_ALLOWED_EMAIL_DOMAINS=futo.org \
   GOTOOLCHAIN=auto go run ./cmd/server
 ```
 
 `OIDC_REDIRECT_URI`'s path has to end in `/api/auth/oidc/callback`; the server
 refuses to boot otherwise, because the Login Hand-off login URL is built from
-that route's `start` sibling. `HOSTED_ALLOWED_EMAIL_DOMAINS` is a
-comma-separated list compared case-insensitively — unset it to admit every
-identity the provider authenticates. The `/dev` page's "Start hand-off" card
-drives the whole login end to end.
+that route's `start` sibling. Any missing `OIDC_*` or `POLAR_*` value fails the
+boot with one error naming every one of them, so an operator fixes them in a
+single pass. `HOSTED_ALLOWED_EMAIL_DOMAINS` is a comma-separated list compared
+case-insensitively — unset it to admit every identity the provider
+authenticates. The `/dev` page's "Start hand-off" card drives the whole login
+end to end, and its subscription card signs a Polar-shaped delivery and puts it
+through the real webhook route, so entitlement can be exercised without a
+sandbox subscription.
 
 Postgres remains available for exercising existing-install and hosted paths:
 

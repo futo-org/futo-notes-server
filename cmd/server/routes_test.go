@@ -191,6 +191,13 @@ func doRequest(t *testing.T, client *http.Client, method, url, body, bearer stri
 	if cookie != nil {
 		request.AddCookie(cookie)
 	}
+	return readResponse(t, client, request)
+}
+
+// readResponse sends request and drains the response, for callers that build
+// their own request — a signed webhook delivery, say.
+func readResponse(t *testing.T, client *http.Client, request *http.Request) routeTestResponse {
+	t.Helper()
 	response, err := client.Do(request)
 	if err != nil {
 		t.Fatal(err)

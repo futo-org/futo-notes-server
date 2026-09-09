@@ -37,7 +37,7 @@ func TestSQLiteApplicationLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(applied, []string{"001_baseline", "002_login_handoffs", "003_plans_and_usage"}) {
+	if !slices.Equal(applied, []string{"001_baseline", "002_login_handoffs", "003_plans_and_usage", "004_subscriptions"}) {
 		t.Fatalf("applied migrations = %v", applied)
 	}
 	if again, err := db.Migrate(ctx, database); err != nil || len(again) != 0 {

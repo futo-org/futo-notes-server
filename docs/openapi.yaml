@@ -460,17 +460,43 @@ paths:
         taken per request, and a recurring job recomputes it from the ledger
         and corrects any drift.
 
-        Entitlement fields (`entitled`, `state`, `grace_until`) join this body
-        once the subscription record exists.
+        `entitled` is the only field a client has to act on: it says whether
+        writes will be accepted right now. `state` is Polar's own subscription
+        status behind that answer, and `grace_until` is when a past-due
+        account stops being entitled.
       responses:
         "200":
-          description: The account's plan limits and storage usage
+          description: The account's entitlement, plan limits, and storage usage
           content:
             application/json:
               schema:
                 type: object
-                required: [plan, usage]
+                required: [entitled, state, plan, usage]
                 properties:
+                  entitled:
+                    type: boolean
+                    description: |
+                      Whether the account may currently write. True while the
+                      subscription is active or trialing, and while a past-due
+                      account is inside its Grace Period.
+                  state:
+                    type: string
+                    description: |
+                      Polar's subscription status, stored as delivered:
+                      `incomplete`, `incomplete_expired`, `trialing`,
+                      `active`, `past_due`, `canceled`, `unpaid`, or `paused`.
+                      `none` for an account that has never subscribed.
+                    example: active
+                  grace_until:
+                    type: string
+                    format: date-time
+                    nullable: true
+                    description: |
+                      When the Grace Period after a failed payment ends. Set
+                      to the failure time plus seven days on the first
+                      past-due event, not extended by the ones that follow,
+                      and cleared when payment recovers. `null` at every other
+                      time.
                   plan:
                     type: object
                     required: [storage_quota_bytes, blob_max_bytes]
@@ -496,10 +522,107 @@ paths:
                         type: integer
                         format: int64
               example:
+                entitled: true
+                state: active
+                grace_until: null
                 plan: { storage_quota_bytes: 10000000000, blob_max_bytes: 104857600 }
                 usage: { bytes_used: 4210688 }
         "401":
           $ref: "#/components/responses/Unauthorized"
+
+  /api/billing/polar/webhook:
+    post:
+      operationId: polarWebhook
+      tags: [billing]
+      summary: Subscription events from Polar (OIDC mode only)
+      security: []
+      description: |
+        Mounted only when `AUTH_MODE=oidc`. **Polar calls this, not a client.**
+
+        It is the only writer of the subscription record, and therefore the
+        only way Entitlement changes. Truth lives locally: no sync request
+        ever calls Polar, so a Polar outage cannot stop anyone syncing.
+
+        Unauthenticated by necessity — Polar holds no session — and
+        authenticated in substance by a
+        [Standard Webhooks](https://www.standardwebhooks.com/) signature over
+        the exact bytes delivered, carried in the `webhook-id`,
+        `webhook-timestamp`, and `webhook-signature` headers and checked
+        against `POLAR_WEBHOOK_SECRET`. A delivery whose signature does not
+        verify, or whose timestamp is more than five minutes from now, changes
+        nothing.
+
+        The account is found by Polar's external customer id, which is the
+        account's OIDC `sub`. A delivery naming a customer this server does
+        not know is acknowledged and logged rather than retried, because a
+        retry would not find the account either.
+
+        Acted on: `subscription.created`, `subscription.active`,
+        `subscription.updated`, `subscription.past_due`,
+        `subscription.canceled`, `subscription.revoked`. Every other type is
+        acknowledged and ignored, so an endpoint subscribed to more than this
+        does not accumulate retries.
+
+        Applying the same delivery twice leaves the same record: every stored
+        field is derived from the event, and the Grace Period deadline is set
+        only when the account enters past-due, so a replay cannot push it out.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type, data]
+              properties:
+                type:
+                  type: string
+                  example: subscription.active
+                data:
+                  type: object
+                  description: |
+                    Polar's subscription object. This server reads `id`,
+                    `status`, `customer_id`, `current_period_end`, and
+                    `customer.external_id`.
+      responses:
+        "200":
+          description: |
+            Delivery accepted. `applied` wrote the record, `ignored` was a
+            type this server does not act on, and `unknown_customer` named an
+            external customer id no account carries.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    enum: [applied, ignored, unknown_customer]
+              example: { status: applied }
+        "400":
+          description: Body was unreadable or was not JSON
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: invalid json }
+        "401":
+          description: |
+            The signature did not verify against `POLAR_WEBHOOK_SECRET`, a
+            required header was missing, or the timestamp was outside the
+            five-minute tolerance. Nothing was written.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error, code]
+                properties:
+                  error:
+                    type: string
+                  code:
+                    type: string
+                    enum: [invalid_signature]
+              example: { error: invalid webhook signature, code: invalid_signature }
 
   /api/auth:
     get:
@@ -710,6 +833,8 @@ paths:
                 $ref: "#/components/schemas/Error"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "402":
+          $ref: "#/components/responses/SubscriptionRequired"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -831,6 +956,8 @@ paths:
                 $ref: "#/components/schemas/Error"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "402":
+          $ref: "#/components/responses/SubscriptionRequired"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -916,6 +1043,8 @@ paths:
                 $ref: "#/components/schemas/Error"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "402":
+          $ref: "#/components/responses/SubscriptionRequired"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -981,6 +1110,8 @@ paths:
                 $ref: "#/components/schemas/Error"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "402":
+          $ref: "#/components/responses/SubscriptionRequired"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -1038,6 +1169,8 @@ paths:
                 $ref: "#/components/schemas/Error"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "402":
+          $ref: "#/components/responses/SubscriptionRequired"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -1095,6 +1228,8 @@ paths:
                 $ref: "#/components/schemas/Error"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "402":
+          $ref: "#/components/responses/SubscriptionRequired"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -1179,6 +1314,8 @@ paths:
                 $ref: "#/components/schemas/Error"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "402":
+          $ref: "#/components/responses/SubscriptionRequired"
         "404":
           $ref: "#/components/responses/NotFound"
         "413":
@@ -1286,6 +1423,8 @@ paths:
               example: { error: empty body }
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "402":
+          $ref: "#/components/responses/SubscriptionRequired"
         "413":
           $ref: "#/components/responses/BlobTooLarge"
         "507":
@@ -1615,6 +1754,35 @@ components:
           schema:
             $ref: "#/components/schemas/Error"
           example: { error: blob too large }
+    SubscriptionRequired:
+      description: |
+        The account may not write: it has no subscription, or its
+        subscription lapsed and any Grace Period after a failed payment has
+        ended. Only the hosted deployment (`AUTH_MODE=oidc`) can answer this;
+        a self-hosted server sells nothing and gates nothing.
+
+        Reads are never gated. Pulls, blob downloads, batch fetch, the SSE
+        stream, capability, auth, the Login Hand-off, claiming or deleting the
+        vault, and this billing route all keep working, so a lapsed card never
+        strands a device or hides data someone already stored.
+
+        Deliberately not `403`: nothing about the caller's identity is wrong,
+        and the fix is a payment rather than a permission. `GET /api/billing`
+        says which state produced the refusal.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error, code]
+            properties:
+              error:
+                type: string
+              code:
+                type: string
+                enum: [subscription_required]
+          example:
+            error: an active subscription is required to write
+            code: subscription_required
     QuotaExceeded:
       description: |
         Storing these bytes would put the account past its Storage Quota.
@@ -1692,6 +1860,11 @@ components:
             `open` in `oidc` mode, since any FUTO account can log in.
         billing:
           type: boolean
+          description: |
+            `true` on the hosted service, which is `AUTH_MODE=oidc` plus Polar
+            configuration. The app shows the sign-up path when it sees both
+            `auth_mode: oidc` and `billing: true`. A self-hosted server
+            reports `false` and mounts none of the billing routes.
         mutation_ids:
           type: object
           required: [supported, required, retention_days, successful_create_outcomes]

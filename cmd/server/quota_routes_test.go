@@ -17,16 +17,46 @@ import (
 	"futo-notes-server/internal/oidc"
 )
 
-// quotaHarness is an oidc-mode server with an account already signed in,
-// which is where the Storage Quota is enforced. The dev UI is on so the
-// recurring jobs can be driven over HTTP the way the /dev page drives them.
+// testWebhookSecret is the Standard Webhooks secret the harness's fake Polar
+// signs deliveries with: the whsec_ prefix over a base64 key.
+const testWebhookSecret = "whsec_cG9sYXItd2ViaG9vay1rZXk="
+
+// quotaHarness is an oidc-mode server with an account already signed in —
+// the hosted service, where the Storage Quota is enforced and Entitlement
+// gates writes. The dev UI is on so the recurring jobs can be driven over
+// HTTP the way the /dev page drives them.
 type quotaHarness struct {
 	handoffHarness
 	token        string
 	collectionID string
 }
 
+// newQuotaHarness is a hosted server with an entitled account that has
+// claimed its vault, which is what every write below needs.
 func newQuotaHarness(t *testing.T) quotaHarness {
+	t.Helper()
+	h := newHostedHarness(t)
+	h.deliver(t, "msg_harness_active", "subscription.active", "active")
+
+	claimed := h.do(t, http.MethodPost, "/api/collections", "")
+	if claimed.StatusCode != http.StatusCreated {
+		t.Fatalf("claim collection = %d %q", claimed.StatusCode, claimed.Body)
+	}
+	var claim struct {
+		Collection struct {
+			ID string `json:"id"`
+		} `json:"collection"`
+	}
+	if err := json.Unmarshal([]byte(claimed.Body), &claim); err != nil {
+		t.Fatal(err)
+	}
+	h.collectionID = claim.Collection.ID
+	return h
+}
+
+// newHostedHarness is the same server with the account signed in but nothing
+// subscribed and no vault claimed, which is where a first run starts.
+func newHostedHarness(t *testing.T) quotaHarness {
 	t.Helper()
 	issuerURL, claims := newFakeIssuer(t, handoffClientID, handoffClientSecret)
 	provider, err := oidc.Discover(context.Background(), issuerURL)
@@ -45,6 +75,11 @@ func newQuotaHarness(t *testing.T) quotaHarness {
 		OIDCClientID:     handoffClientID,
 		OIDCClientSecret: handoffClientSecret,
 		OIDCRedirectURI:  handoffRedirectURI,
+
+		PolarBaseURL:       "https://sandbox-api.polar.test",
+		PolarAccessToken:   "polar_oat_test",
+		PolarProductID:     "prod_test",
+		PolarWebhookSecret: testWebhookSecret,
 	}
 	database, err := db.Open(cfg)
 	if err != nil {
@@ -76,20 +111,6 @@ func newQuotaHarness(t *testing.T) quotaHarness {
 		t.Fatal(err)
 	}
 	h.token = login.Token
-
-	claimed := h.do(t, http.MethodPost, "/api/collections", "")
-	if claimed.StatusCode != http.StatusCreated {
-		t.Fatalf("claim collection = %d %q", claimed.StatusCode, claimed.Body)
-	}
-	var claim struct {
-		Collection struct {
-			ID string `json:"id"`
-		} `json:"collection"`
-	}
-	if err := json.Unmarshal([]byte(claimed.Body), &claim); err != nil {
-		t.Fatal(err)
-	}
-	h.collectionID = claim.Collection.ID
 	return h
 }
 

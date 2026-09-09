@@ -2,8 +2,10 @@
 
 Status: decisions settled 2026-09-09 in a design interview. Spec: issue #7. Implemented so
 far: `AUTH_MODE=oidc` (commit cbe395c, MR !19), then build-order steps 1 and 2 — the Login
-Hand-off endpoints and the email-domain allowlist (issue #8) — and step 3, the Plan record,
-the Storage Usage counter, and `quota_exceeded` (issue #9).
+Hand-off endpoints and the email-domain allowlist (issue #8) — step 3, the Plan record,
+the Storage Usage counter, and `quota_exceeded` (issue #9) — and the first half of step 4,
+the subscription record, the Polar webhook, and the Entitlement gate (issue #10). Checkout
+and the customer portal are issue #11.
 
 Goal: a paid sync service, $5/month, that a person signs up for from inside the
 app without visiting the web. Once signed up, hosted and self-hosted must feel
@@ -91,6 +93,53 @@ services and already holds their customers.
 - Verify in Polar before relying on it: whether a $0-after-discount checkout
   still asks for a card, and whether the discount can apply to every renewal
   ("forever"). If it cannot, internal accounts get billed on month two.
+
+Settled while building the webhook and the gate:
+
+- **Polar signs with Standard Webhooks.** Polar's own note is that secrets
+  generated on or after 8 September 2026 follow
+  [Standard Webhooks](https://www.standardwebhooks.com/), and older ones use
+  a Polar-specific HMAC. The server implements the current scheme only —
+  `whsec_`-prefixed base64 key, HMAC-SHA256 over `<id>.<timestamp>.<body>`,
+  base64, carried as space-separated `v1,<sig>` entries — because the MVP's
+  endpoint is being created after that date. A secret older than the cutover
+  would have to be regenerated.
+- **The signature is checked with a five-minute timestamp tolerance**, which
+  is what stops a captured delivery replaying indefinitely. Without it a
+  signature stays valid as long as the secret does.
+- **`state` is Polar's `status`, stored as delivered**, not the event type.
+  That is what makes cancel-at-period-end behave correctly: Polar leaves the
+  status `active` until it revokes the subscription, so a person who cancels
+  keeps writing through the period they paid for.
+- **The five-minute tolerance does not strand a retry.** Standard Webhooks
+  re-signs each attempt: "every time an attempt is retried the timestamp of
+  the attempt is updated, while the timestamp of the original event remains
+  the same." A delivery missed during a restart still verifies hours later,
+  and only a genuine replay of captured bytes is refused.
+- **An unmatched or unhandled delivery is acknowledged, not failed.** A
+  non-2xx would have Polar retrying an event that will never apply: the
+  endpoint is shared with the rest of the organization's Polar traffic, and
+  a customer this server does not know will not appear on a retry.
+
+Not settled by the ticket, decided while building it:
+
+- **`subscription_required` answers `402 Payment Required`**, with
+  `{error, code}`. Issue #10 names no status code; this one was chosen at
+  the keyboard and confirmed. Deliberately not `403`: nothing about the
+  caller's identity is wrong, and the fix is a payment rather than a
+  permission.
+- **Neither the vault claim nor the vault delete is gated.** This one is a
+  reading of an ambiguous criterion and nobody has ruled on it yet. Issue #10's
+  gated list reads "object create, update, delete, batch create, blob stage,
+  batch upload, vault key claim or rotate", under the heading "every route
+  that mutates collection contents or stages blobs". "Vault key claim or
+  rotate" is read as the one route that writes key material,
+  `PUT /api/collections/{id}/key`. `POST /api/collections` writes collection
+  identity, which `CONTEXT.md` says is not collection contents.
+  `DELETE /api/collections/{id}` is the arguable one — it does make the
+  collection's blobs purgeable — but it is not on the ticket's list, and
+  gating it would leave a lapsed account unable to free room or to leave.
+  Both stay open. Revisit if the client needs otherwise.
 
 ### 5. Limits
 

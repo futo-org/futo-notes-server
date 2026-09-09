@@ -82,7 +82,7 @@
     cursor: pointer;
   }
   button:hover { filter: brightness(1.1); }
-  input[type=password], input[type=text], textarea {
+  input[type=password], input[type=text], select, textarea {
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: 6px;
@@ -465,6 +465,87 @@ quotaCard.querySelector('#quota-upload').addEventListener('click', async () => {
     quotaUploadLog.textContent = String(err);
   }
   refreshQuota();
+});
+
+const subscriptionCard = document.createElement('div');
+subscriptionCard.className = 'card oidc-only';
+subscriptionCard.innerHTML = `
+  <div class="row">
+    <span class="method">POST</span>
+    <span class="path">/api/billing/polar/webhook</span>
+    <select id="subscription-event">
+      <option value="subscription.active|active">subscription.active · active</option>
+      <option value="subscription.created|trialing">subscription.created · trialing</option>
+      <option value="subscription.past_due|past_due">subscription.past_due · past_due</option>
+      <option value="subscription.canceled|canceled">subscription.canceled · canceled</option>
+      <option value="subscription.revoked|canceled">subscription.revoked · canceled</option>
+      <option value="order.paid|paid">order.paid · a type the server ignores</option>
+    </select>
+    <button id="subscription-send">Send webhook</button>
+  </div>
+  <p class="desc">POST /dev/subscription signs a Polar-shaped delivery for the signed-in account and puts it through the real webhook route, signature check included; in production Polar sends these</p>
+  <div class="result shown">
+    <span class="status"></span>
+    <pre id="subscription-entitlement">(not loaded)</pre>
+  </div>
+  <div class="job">
+    <div class="row">
+      <span class="path">last webhook received</span>
+      <button id="subscription-refresh">Refresh</button>
+    </div>
+    <p class="desc">the delivery the subscription record was last written from, and the Entitlement it produced</p>
+    <div class="result shown"><pre id="subscription-last">(none received)</pre></div>
+  </div>`;
+cards.appendChild(subscriptionCard);
+
+const subscriptionStatus = subscriptionCard.querySelector('.status');
+const subscriptionEntitlement = subscriptionCard.querySelector('#subscription-entitlement');
+const subscriptionLast = subscriptionCard.querySelector('#subscription-last');
+
+async function refreshSubscription() {
+  try {
+    const response = await fetch('/api/billing');
+    showStatus(subscriptionStatus, response);
+    if (!response.ok) {
+      subscriptionEntitlement.textContent = renderJSON(await response.text());
+      return;
+    }
+    const status = await response.json();
+    subscriptionEntitlement.textContent =
+      `${status.entitled ? 'entitled' : 'not entitled'} · state ${status.state} · grace_until ${status.grace_until ?? 'null'}`;
+  } catch (err) {
+    subscriptionStatus.textContent = 'network error';
+    subscriptionStatus.className = 'status s5';
+    subscriptionEntitlement.textContent = String(err);
+  }
+  try {
+    const last = await fetch('/dev/subscription/last');
+    subscriptionLast.textContent = last.status === 404
+      ? '(none received)'
+      : renderJSON(await last.text());
+  } catch (err) {
+    subscriptionLast.textContent = String(err);
+  }
+}
+
+subscriptionCard.querySelector('#subscription-refresh').addEventListener('click', refreshSubscription);
+
+subscriptionCard.querySelector('#subscription-send').addEventListener('click', async () => {
+  const [type, status] = subscriptionCard.querySelector('#subscription-event').value.split('|');
+  try {
+    const response = await fetch('/dev/subscription', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type, status }),
+    });
+    showStatus(subscriptionStatus, response);
+    subscriptionEntitlement.textContent = renderJSON(await response.text());
+  } catch (err) {
+    subscriptionStatus.textContent = 'network error';
+    subscriptionStatus.className = 'status s5';
+    subscriptionEntitlement.textContent = String(err);
+  }
+  refreshSubscription();
 });
 
 const sseCard = document.createElement('div');

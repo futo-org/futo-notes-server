@@ -72,6 +72,10 @@ GET $BASE/
 
 - `auth_mode` is `"dev"`, `"password"`, or `"oidc"`. It tells you which login endpoint to use.
 - `signup` is `"closed"`, except `"open"` in `oidc` mode, since any FUTO account can log in.
+- `billing` is `true` on the hosted service and `false` on a self-hosted server. When it is
+  `true` alongside `auth_mode: "oidc"`, the server sells subscriptions: show the sign-up path,
+  and expect a write to be refused with `402 subscription_required` until the account is
+  entitled. Reads are never refused for billing reasons.
 - `mutation_ids` advertises retry-safe object mutations. They are supported but
   optional for backward compatibility. Successful create outcomes remain
   available for the collection lifetime; other recorded outcomes are retained for

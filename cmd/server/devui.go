@@ -6,11 +6,18 @@ import (
 	_ "embed"
 	"encoding/json"
 	"html"
+	"io"
 	"net/http"
+	"net/url"
+	"time"
 
+	"futo-notes-server/internal/auth"
 	"futo-notes-server/internal/blobs"
+	"futo-notes-server/internal/config"
 	"futo-notes-server/internal/db"
 	"futo-notes-server/internal/jobs"
+	"futo-notes-server/internal/polar"
+	"futo-notes-server/internal/subscriptions"
 	"futo-notes-server/internal/usage"
 )
 
@@ -90,4 +97,113 @@ func handleDevJob[T any](run func(context.Context) (T, error)) http.HandlerFunc 
 		}
 		writeJSON(w, http.StatusOK, result)
 	}
+}
+
+// handleDevSubscription is the /dev card's stand-in for Polar: it builds a
+// subscription event for the signed-in account, signs it with the configured
+// webhook secret, and puts it through the real webhook route. Signature
+// verification runs for real, so the card demonstrates the whole path rather
+// than a shortcut around it. Dev UI only, and only in hosted mode.
+func handleDevSubscription(cfg config.Config, database *db.DB, webhook http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Type   string `json:"type"`
+			Status string `json:"status"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid json")
+			return
+		}
+		if body.Type == "" || body.Status == "" {
+			writeError(w, http.StatusBadRequest, "type and status are required")
+			return
+		}
+
+		session, ok := devSession(w, r, database)
+		if !ok {
+			return
+		}
+		var sub string
+		if err := database.QueryRowContext(r.Context(),
+			`SELECT sub FROM users WHERE id = $1`, session.User.ID).Scan(&sub); err != nil {
+			serverError(w, r, "reading the signed-in account's sub", err)
+			return
+		}
+		now := time.Now()
+		delivery, err := json.Marshal(map[string]any{
+			"type": body.Type,
+			"data": map[string]any{
+				"id":                 "dev_subscription",
+				"status":             body.Status,
+				"customer_id":        "dev_customer",
+				"current_period_end": now.AddDate(0, 1, 0).UTC().Format(time.RFC3339),
+				"customer":           map[string]any{"external_id": sub},
+			},
+		})
+		if err != nil {
+			serverError(w, r, "building a dev Polar delivery", err)
+			return
+		}
+		header, err := polar.Sign(cfg.PolarWebhookSecret, "dev_"+db.Timestamp(now), now, delivery)
+		if err != nil {
+			serverError(w, r, "signing a dev Polar delivery", err)
+			return
+		}
+
+		// The signed delivery goes through the webhook handler itself and
+		// answers straight into this response, so what the card shows is
+		// what Polar would have got.
+		signed := r.Clone(r.Context())
+		signed.Method = http.MethodPost
+		signed.URL = &url.URL{Path: "/api/billing/polar/webhook"}
+		signed.Header = header
+		signed.Body = io.NopCloser(bytes.NewReader(delivery))
+		signed.ContentLength = int64(len(delivery))
+		webhook(w, signed)
+	}
+}
+
+// handleDevLastWebhook shows the delivery the subscription record was last
+// written from, so the /dev card can display what Polar actually said rather
+// than only what the server concluded. Dev UI only.
+func handleDevLastWebhook(database *db.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		session, ok := devSession(w, r, database)
+		if !ok {
+			return
+		}
+		record, err := subscriptions.Of(r.Context(), database, session.User.ID)
+		if err != nil {
+			serverError(w, r, "reading the last Polar delivery", err)
+			return
+		}
+		if record.LastEvent == "" {
+			writeError(w, http.StatusNotFound, "no webhook received yet")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"received_at": db.Timestamp(record.UpdatedAt),
+			"event":       json.RawMessage(record.LastEvent),
+		})
+	}
+}
+
+// devSession resolves the account whose session cookie is on the request.
+// The /dev routes sit outside requireAuth, so these handlers look it up.
+func devSession(w http.ResponseWriter, r *http.Request, database *db.DB) (*auth.Session, bool) {
+	cookie, err := r.Cookie("session")
+	if err != nil || cookie.Value == "" {
+		writeError(w, http.StatusUnauthorized, "sign in on /dev first")
+		return nil, false
+	}
+	session, err := auth.ValidateSession(r.Context(), database, cookie.Value)
+	if err != nil {
+		serverError(w, r, "validating the dev session", err)
+		return nil, false
+	}
+	if session == nil {
+		writeError(w, http.StatusUnauthorized, "sign in on /dev first")
+		return nil, false
+	}
+	return session, true
 }

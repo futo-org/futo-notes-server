@@ -42,6 +42,10 @@ func TestDevUIIncludesRecurringJobPanel(t *testing.T) {
 		"/dev/plan",
 		"Set quota",
 		"upload near the limit",
+		"/api/billing/polar/webhook",
+		"/dev/subscription",
+		"Send webhook",
+		"last webhook received",
 		"Run now",
 		"sqlite: /var/lib/futo/notes.db",
 	} {

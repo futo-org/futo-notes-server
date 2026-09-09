@@ -1,25 +1,77 @@
 package main
 
 import (
+	"io"
+	"log/slog"
 	"net/http"
+	"time"
 
+	"futo-notes-server/internal/config"
 	"futo-notes-server/internal/db"
+	"futo-notes-server/internal/polar"
+	"futo-notes-server/internal/subscriptions"
 	"futo-notes-server/internal/usage"
 )
 
-// handleBillingStatus answers what an app needs to show an account's limits:
-// the Plan it is on and how much of its Storage Quota it has used.
-// Entitlement fields join this body once a subscription record exists.
+// requireEntitlement refuses a write from an account that may not currently
+// write. It is middleware rather than a check inside the sync handlers, so
+// the sync layer stays unaware that billing exists: adding a write path adds
+// a line here, not a branch there.
+//
+// Off the hosted service it is the identity function. A self-hosted server
+// sells nothing, so it gates nothing and takes no extra read per request.
+func requireEntitlement(cfg config.Config, database *db.DB) func(http.HandlerFunc) http.HandlerFunc {
+	if cfg.AuthMode != "oidc" {
+		return func(next http.HandlerFunc) http.HandlerFunc { return next }
+	}
+	return func(next http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			// One primary-key read against the local record. Polar is never
+			// on this path, so a Polar outage cannot stop people syncing.
+			record, err := subscriptions.Of(r.Context(), database, sessionFrom(r).User.ID)
+			if err != nil {
+				serverError(w, r, "reading the account's Entitlement", err)
+				return
+			}
+			if !record.Entitled(time.Now()) {
+				writeJSON(w, http.StatusPaymentRequired, map[string]string{
+					"error": "an active subscription is required to write",
+					"code":  "subscription_required",
+				})
+				return
+			}
+			next(w, r)
+		}
+	}
+}
+
+// handleBillingStatus answers what an app needs to show an account's
+// standing: whether it may write, the subscription state behind that, the
+// Plan it is on, and how much of its Storage Quota it has used.
 func handleBillingStatus(database *db.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		account, err := usage.Of(r.Context(), database, sessionFrom(r).User.ID)
+		userID := sessionFrom(r).User.ID
+		account, err := usage.Of(r.Context(), database, userID)
 		if err != nil {
 			serverError(w, r, "reading billing status", err)
 			return
 		}
+		record, err := subscriptions.Of(r.Context(), database, userID)
+		if err != nil {
+			serverError(w, r, "reading the subscription record", err)
+			return
+		}
+		var graceUntil *string
+		if record.GraceUntil != nil {
+			formatted := db.Timestamp(*record.GraceUntil)
+			graceUntil = &formatted
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"plan":  account.Plan,
-			"usage": map[string]int64{"bytes_used": account.BytesUsed},
+			"entitled":    record.Entitled(time.Now()),
+			"state":       record.State,
+			"grace_until": graceUntil,
+			"plan":        account.Plan,
+			"usage":       map[string]int64{"bytes_used": account.BytesUsed},
 		})
 	}
 }
@@ -98,5 +150,60 @@ func accountQuotaExceededEntry(account usage.Account) map[string]any {
 		"status":      "quota_exceeded",
 		"quota_bytes": account.Plan.StorageQuotaBytes,
 		"bytes_used":  account.BytesUsed,
+	}
+}
+
+// maxWebhookBody caps one Polar delivery. Subscription payloads are a few
+// kilobytes; the cap is what keeps an unauthenticated route from buffering
+// whatever an unsigned caller sends.
+const maxWebhookBody = 1 << 20
+
+// handlePolarWebhook is how the subscription record learns anything. It is
+// unauthenticated by necessity — Polar has no session — and authenticated in
+// substance by the signature over the exact bytes delivered. A delivery that
+// does not verify changes nothing.
+func handlePolarWebhook(cfg config.Config, database *db.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxWebhookBody))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "could not read body")
+			return
+		}
+		if err := polar.Verify(cfg.PolarWebhookSecret, r.Header, body, time.Now()); err != nil {
+			slog.Warn("rejected a Polar webhook delivery", "err", err)
+			writeJSON(w, http.StatusUnauthorized, map[string]string{
+				"error": "invalid webhook signature",
+				"code":  "invalid_signature",
+			})
+			return
+		}
+
+		event, err := polar.ParseEvent(body)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid json")
+			return
+		}
+		// The endpoint may be subscribed to more event types than this
+		// server acts on. Acknowledging the rest is what stops Polar
+		// retrying deliveries nothing will ever read.
+		if !event.IsSubscription() {
+			writeJSON(w, http.StatusOK, map[string]string{"status": "ignored"})
+			return
+		}
+
+		matched, err := subscriptions.Apply(r.Context(), database, event, body, time.Now())
+		if err != nil {
+			serverError(w, r, "applying a Polar subscription event", err)
+			return
+		}
+		if !matched {
+			// A retry would not find the account either, so this is an
+			// acknowledgement with a log line rather than a failure.
+			slog.Warn("Polar subscription event names an unknown customer",
+				"type", event.Type, "external_customer_id", event.Subscription.ExternalCustomerID)
+			writeJSON(w, http.StatusOK, map[string]string{"status": "unknown_customer"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "applied"})
 	}
 }
