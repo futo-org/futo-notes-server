@@ -109,11 +109,13 @@ func routes(cfg config.Config, database *db.DB, blobStore *blobs.Store, eventHub
 	quotaEnforced := cfg.AuthMode == "oidc"
 
 	// Entitlement gates the routes that mutate collection contents or stage
-	// blobs, plus the vault key write. Reads, pulls, downloads, batch fetch,
-	// the SSE stream, capability, auth, hand-off, and billing itself are
-	// never gated: a lapsed card must not strand a device or hide the data
-	// someone already stored. Claiming or deleting the vault stays open too,
-	// so a lapsed account can still find its collection and clear it out.
+	// blobs, plus the vault key write and the vault delete. Reads, pulls,
+	// downloads, batch fetch, the SSE stream, capability, auth, hand-off,
+	// and billing itself are never gated: a lapsed card must not strand a
+	// device or hide the data someone already stored. Claiming the vault
+	// stays open, because it writes collection identity rather than
+	// contents and a lapsed account still has to find its collection to
+	// pull from it.
 	entitled := requireEntitlement(cfg, database)
 
 	api := http.NewServeMux()
@@ -138,7 +140,7 @@ func routes(cfg config.Config, database *db.DB, blobStore *blobs.Store, eventHub
 	api.HandleFunc("POST /api/collections", handleClaimCollection(database))
 	api.HandleFunc("GET /api/collections", handleListCollections(database))
 	api.HandleFunc("GET /api/collections/{id}", handleGetCollection(database))
-	api.HandleFunc("DELETE /api/collections/{id}", handleDeleteCollection(database))
+	api.HandleFunc("DELETE /api/collections/{id}", entitled(handleDeleteCollection(database)))
 	api.HandleFunc("GET /api/collections/{id}/key", handleGetCollectionKey(database))
 	api.HandleFunc("PUT /api/collections/{id}/key", entitled(handlePutCollectionKey(database)))
 	api.HandleFunc("GET /api/collections/{id}/objects", handleListObjects(database))

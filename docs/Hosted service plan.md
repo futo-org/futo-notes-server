@@ -128,18 +128,18 @@ Not settled by the ticket, decided while building it:
   the keyboard and confirmed. Deliberately not `403`: nothing about the
   caller's identity is wrong, and the fix is a payment rather than a
   permission.
-- **Neither the vault claim nor the vault delete is gated.** This one is a
-  reading of an ambiguous criterion and nobody has ruled on it yet. Issue #10's
-  gated list reads "object create, update, delete, batch create, blob stage,
-  batch upload, vault key claim or rotate", under the heading "every route
-  that mutates collection contents or stages blobs". "Vault key claim or
-  rotate" is read as the one route that writes key material,
-  `PUT /api/collections/{id}/key`. `POST /api/collections` writes collection
-  identity, which `CONTEXT.md` says is not collection contents.
-  `DELETE /api/collections/{id}` is the arguable one — it does make the
-  collection's blobs purgeable — but it is not on the ticket's list, and
-  gating it would leave a lapsed account unable to free room or to leave.
-  Both stay open. Revisit if the client needs otherwise.
+- **The vault claim is not gated; the vault delete is.** Issue #10's gated
+  list reads "object create, update, delete, batch create, blob stage, batch
+  upload, vault key claim or rotate", under the heading "every route that
+  mutates collection contents or stages blobs". "Vault key claim or rotate"
+  is read as the one route that writes key material,
+  `PUT /api/collections/{id}/key`. `POST /api/collections` stays open: it
+  writes collection identity, which `CONTEXT.md` says is not collection
+  contents, and a lapsed account still has to find its collection to pull
+  from it. `DELETE /api/collections/{id}` is gated — deleting a collection
+  makes its blobs purgeable, so it is a contents mutation like any other.
+  Someone who wants their data gone after lapsing asks for it to be deleted;
+  what is left sitting there is ciphertext the server cannot read.
 
 ### 5. Limits
 

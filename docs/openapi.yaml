@@ -738,6 +738,8 @@ paths:
           description: Deleted
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "402":
+          $ref: "#/components/responses/SubscriptionRequired"
         "404":
           $ref: "#/components/responses/NotFound"
 
@@ -1762,9 +1764,11 @@ components:
         a self-hosted server sells nothing and gates nothing.
 
         Reads are never gated. Pulls, blob downloads, batch fetch, the SSE
-        stream, capability, auth, the Login Hand-off, claiming or deleting the
-        vault, and this billing route all keep working, so a lapsed card never
-        strands a device or hides data someone already stored.
+        stream, capability, auth, the Login Hand-off, claiming the vault, and
+        this billing route all keep working, so a lapsed card never strands a
+        device or hides data someone already stored. Deleting the vault is
+        gated, like every other write: someone who wants their data gone
+        after lapsing asks for it to be deleted.
 
         Deliberately not `403`: nothing about the caller's identity is wrong,
         and the fix is a payment rather than a permission. `GET /api/billing`

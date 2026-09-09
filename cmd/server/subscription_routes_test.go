@@ -246,7 +246,8 @@ func TestBillingStatusReportsTheGracePeriodAfterAFailedPayment(t *testing.T) {
 }
 
 // gatedWrites is every route the Entitlement gate covers: the ones that
-// mutate collection contents or stage blobs, plus the vault key write.
+// mutate collection contents or stage blobs, plus the vault key write and
+// the vault delete.
 func (h quotaHarness) gatedWrites(objectID string) []struct {
 	name, method, path, body string
 } {
@@ -261,6 +262,8 @@ func (h quotaHarness) gatedWrites(objectID string) []struct {
 		{"blob stage", http.MethodPost, "/api/blobs", "ciphertext"},
 		{"vault key write", http.MethodPut, collection + "/key",
 			`{"key_salt":"s","key_kdf":{"n":1},"encrypted_vault_key":"k"}`},
+		// Listed last: entitled, this one really would delete the vault.
+		{"vault delete", http.MethodDelete, collection, ""},
 	}
 }
 
