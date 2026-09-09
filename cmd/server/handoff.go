@@ -1,7 +1,6 @@
 package main
 
 import (
-	_ "embed"
 	"net/http"
 	"net/url"
 	"path"
@@ -10,12 +9,6 @@ import (
 	"futo-notes-server/internal/db"
 	"futo-notes-server/internal/handoff"
 )
-
-// handoffDoneHTML is the page the browser lands on after a hand-off login,
-// telling the person to go back to the app that is polling for the session.
-//
-//go:embed handoff_done.html
-var handoffDoneHTML []byte
 
 // handoffTicketParam names the Login Hand-off ticket in the start route's
 // query string, which is how an app's ticket enters the OIDC flow.

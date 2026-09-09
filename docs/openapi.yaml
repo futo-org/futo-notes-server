@@ -530,6 +530,116 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
 
+  /api/billing/checkout:
+    post:
+      operationId: createBillingCheckout
+      tags: [billing]
+      summary: Start a subscription (OIDC mode only)
+      description: |
+        Mounted only when `AUTH_MODE=oidc`. A self-hosted server answers `404`
+        and sells nothing.
+
+        Answers with a Polar checkout URL for the app to open in a browser —
+        system browser, auth sheet, or webview, whichever the client picks.
+        The person pays there, and Polar returns the browser to a page on this
+        server that says to go back to the app. Nothing on this route tells
+        the app whether payment succeeded: Entitlement moves only when Polar's
+        webhook lands, so the app re-reads `GET /api/billing` afterwards.
+
+        The account is registered with Polar the first time it reaches this
+        route or the portal, under its OIDC `sub` as Polar's external customer
+        id and its email address. That is the same id the webhook names the
+        account by, so both ends of the round trip agree without a lookup
+        table. Polar refuses a second customer carrying an external id it has
+        already seen, so the id is stored and reused: abandoning a checkout
+        and starting another registers nothing new.
+
+        The checkout is for `POLAR_PRODUCT_ID`. While `POLAR_DISCOUNT_ID` is
+        set it is applied to the checkout, which is how the internal MVP runs
+        the real product's checkout at no charge; dropping the variable is the
+        launch flip, with no product swap on the day.
+
+        **An account that may already write gets its billing status instead of
+        a URL**, in exactly the body `GET /api/billing` returns. Sending it to
+        pay again would open a second subscription. The two answers are told
+        apart by the presence of `url`.
+      responses:
+        "200":
+          description: |
+            Either a checkout URL to open, or — for an account that is already
+            entitled — the billing status body.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    required: [url]
+                    properties:
+                      url:
+                        type: string
+                        description: Polar checkout URL to open in a browser.
+                  - type: object
+                    required: [entitled, state, plan, usage]
+                    description: |
+                      The same body as `GET /api/billing`, returned when the
+                      account may already write.
+              example: { url: "https://buy.polar.sh/polar_cl_xxx" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          description: |
+            Polar refused or was unreachable. Nothing was charged and nothing
+            about the account changed; the same request may be retried.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/billing/portal:
+    get:
+      operationId: getBillingPortal
+      tags: [billing]
+      summary: Manage or cancel a subscription (OIDC mode only)
+      description: |
+        Mounted only when `AUTH_MODE=oidc`. A self-hosted server answers `404`.
+
+        Answers with a pre-authenticated Polar customer portal URL for the app
+        to open in a browser. Cancelling, changing a card, and reading
+        invoices all happen there — this server implements none of it, and the
+        app shows no billing UI of its own.
+
+        Like the checkout, this registers the account with Polar on first use,
+        so reaching the portal without ever having checked out works. The
+        session URL is short-lived; ask for a new one rather than storing it.
+
+        A cancellation reaches this server as a webhook. Polar leaves a
+        subscription `active` until the period paid for runs out, so
+        `GET /api/billing` keeps reporting `entitled: true` until Polar
+        revokes it — which is what lets someone who cancels keep writing
+        through the period they paid for.
+      responses:
+        "200":
+          description: A customer portal URL to open in a browser
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [url]
+                properties:
+                  url:
+                    type: string
+              example: { url: "https://polar.sh/futo/portal?customer_session_token=xxx" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          description: |
+            Polar refused or was unreachable. Nothing about the account
+            changed; the same request may be retried.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /api/billing/polar/webhook:
     post:
       operationId: polarWebhook

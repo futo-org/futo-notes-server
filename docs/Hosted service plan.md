@@ -3,9 +3,12 @@
 Status: decisions settled 2026-09-09 in a design interview. Spec: issue #7. Implemented so
 far: `AUTH_MODE=oidc` (commit cbe395c, MR !19), then build-order steps 1 and 2 — the Login
 Hand-off endpoints and the email-domain allowlist (issue #8) — step 3, the Plan record,
-the Storage Usage counter, and `quota_exceeded` (issue #9) — and the first half of step 4,
-the subscription record, the Polar webhook, and the Entitlement gate (issue #10). Checkout
-and the customer portal are issue #11.
+the Storage Usage counter, and `quota_exceeded` (issue #9) — then step 4: the
+subscription record, the Polar webhook, and the Entitlement gate (issue #10), and
+checkout, the customer portal, and the success page (issue #11). Step 4's code is
+done; one thing in it is not, and it gates the MVP being usable — **nobody has run
+a checkout against the Polar sandbox yet**, so the 100%-forever discount below is
+documented rather than observed. Step 5 is the Manifest deployment.
 
 Goal: a paid sync service, $5/month, that a person signs up for from inside the
 app without visiting the web. Once signed up, hosted and self-hosted must feel
@@ -90,9 +93,28 @@ services and already holds their customers.
   created with a pre-applied 100% discount (`POLAR_DISCOUNT_ID`); dropping the
   variable is the launch flip. No product-ID swap on launch day and no
   hand-rolled mock.
-- Verify in Polar before relying on it: whether a $0-after-discount checkout
-  still asks for a card, and whether the discount can apply to every renewal
-  ("forever"). If it cannot, internal accounts get billed on month two.
+
+**Both questions answered, from Polar's own documentation
+([Discounts](https://polar.sh/docs/features/discounts), read 2026-09-09):**
+
+- **A recurring discount can cover every renewal.** A discount's duration is
+  one of Once, Several Months, or Forever, and Forever "is applied
+  indefinitely". So `POLAR_DISCOUNT_ID` has to point at a **100% percentage
+  discount with duration Forever**. A "Once" discount at 100% would make month
+  one free and bill $5 in month two, which is exactly the failure the MVP
+  cannot have.
+- **A 100%-forever checkout does not ask for a card.** Polar's wording, in the
+  per-customer-limits section: "Free products and 100% forever subscriptions
+  never ask for a card, so those match on ID and email alone." That sentence
+  is scoped to the *forever* case, which is another reason the discount has to
+  be Forever rather than Several Months: a discount that lapses has a charge
+  coming, so Polar would collect a card up front.
+
+Not yet done against the live sandbox — nobody has created the discount there
+or run a checkout through it. The two facts above come from Polar's docs, not
+from a checkout anyone has watched. **Confirm both on the first real sandbox
+run, and check the discount's duration reads Forever in the Polar dashboard
+before pointing `POLAR_DISCOUNT_ID` at it.**
 
 Settled while building the webhook and the gate:
 
@@ -140,6 +162,58 @@ Not settled by the ticket, decided while building it:
   makes its blobs purgeable, so it is a contents mutation like any other.
   Someone who wants their data gone after lapsing asks for it to be deleted;
   what is left sitting there is ciphertext the server cannot read.
+
+Settled while building checkout and the portal:
+
+- **A Polar customer is created lazily, at most once per account.** The first
+  checkout or portal request registers the account with `POST /v1/customers/`
+  under its OIDC `sub` as Polar's external customer id and its email address,
+  and stores Polar's customer id on the subscription row. That is the same id
+  the webhook names the account by, so the round trip needs no lookup table.
+  Polar refuses a second customer carrying an external id it has already seen,
+  so the stored id is what makes abandoning a checkout and starting another
+  safe. Registering at login instead would create a Polar customer for every
+  person who never pays.
+- **The customer id lives on the subscription row, which meant relaxing two
+  columns.** `polar_subscription_id` and `last_event` became nullable
+  (migration `015` / sqlite `005`): a row that holds only a customer describes
+  a subscription that has not happened yet, and a sentinel there would read
+  like a real subscription and a real delivery. `state` on such a row is
+  `none`, which is what an account with no row already read as, so nothing
+  about `GET /api/billing` changed. Saving a customer id never overwrites a
+  live subscription — opening the portal must not roll an active account back
+  to unsubscribed.
+- **The checkout's success URL is derived from `OIDC_REDIRECT_URI`.** The
+  server has no configured public origin of its own, and that variable already
+  has to be an absolute URL whose path ends in the OIDC callback, so trimming
+  the callback off leaves the origin. Same trick the Login Hand-off uses to
+  build its login URL. Adding a second "what is my public URL" setting would
+  give an operator two chances to get it wrong.
+- **The success page is `GET /billing/done`**, served outside `requireAuth`
+  because the browser Polar returns holds no app session, and mounted only in
+  oidc mode. It says "go back to FUTO Notes" and nothing about the account:
+  Entitlement moves when the webhook lands, not when the browser arrives, so
+  the page cannot honestly report success. The app learns by re-reading
+  `GET /api/billing`.
+- **An entitled account asking for a checkout gets its billing status
+  instead**, in exactly the body `GET /api/billing` returns. Handing it a
+  checkout URL would let it open a second subscription. The client tells the
+  two answers apart by whether `url` is present.
+- **Polar failures are `500`, and nothing is written.** Both routes call Polar
+  synchronously; a refusal or a timeout leaves the account exactly as it was
+  and the same request can be retried. This is the only place the server waits
+  on Polar — the sync path never does.
+- **Known gap: a lost customer id cannot be recovered.** Registering the
+  customer is read-then-create-then-store with nothing atomic across the
+  three. Two checkouts started at the same instant are fine — the loser gets
+  Polar's "external_id is already used" as a `500` and its retry finds the
+  stored id — but if the create succeeds and the *store* fails, Polar holds a
+  customer this server has no id for, and every later checkout or portal
+  request for that account 500s forever. The escape is one extra Polar call,
+  `GET /v1/customers/external/{external_id}`, on the create-refused path;
+  issue #11 asked for three calls and got three, so this is written down
+  rather than built. Worth doing before anyone outside FUTO signs up, or the
+  first time it happens.
 
 ### 5. Limits
 
@@ -239,6 +313,8 @@ them.
 - Answer the Login Hand-off phishing risk in decision 1. The allowlist is what
   makes it tolerable now; removing the allowlist removes the mitigation, so
   these two are one piece of work, not two.
+- Recover a lost Polar customer id rather than 500ing forever — see the last
+  bullet under decision 4.
 
 ## Flagged, owned by the client team
 

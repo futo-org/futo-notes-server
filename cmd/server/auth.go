@@ -310,8 +310,7 @@ func handleOIDCCallback(cfg config.Config, provider *oidc.Provider, database *db
 				serverError(w, r, "oidc callback: parking the login hand-off", err)
 				return
 			}
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			_, _ = w.Write(handoffDoneHTML)
+			writeBrowserDonePage(w, handoffDonePage)
 			return
 		}
 		if cfg.DevUI {

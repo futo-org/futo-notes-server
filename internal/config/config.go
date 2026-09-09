@@ -11,10 +11,15 @@ import (
 	"time"
 )
 
-// oidcCallbackPath is the route OIDC_REDIRECT_URI has to point at. The Login
+// OIDCCallbackPath is the route OIDC_REDIRECT_URI has to point at. The Login
 // Hand-off login URL is built by swapping this route for its start sibling,
 // so a redirect URI aimed anywhere else would produce a URL that 404s.
-const oidcCallbackPath = "/api/auth/oidc/callback"
+//
+// It is exported because the same suffix is what a caller trims to recover
+// the server's own public origin — the only origin the server is ever told.
+// Two copies of this string that drifted would leave the boot check passing
+// and the trim silently doing nothing.
+const OIDCCallbackPath = "/api/auth/oidc/callback"
 
 type Config struct {
 	DatabaseURL        string
@@ -41,6 +46,13 @@ type Config struct {
 	PolarAccessToken   string // POLAR_ACCESS_TOKEN
 	PolarProductID     string // POLAR_PRODUCT_ID, the subscribed product
 	PolarWebhookSecret string // POLAR_WEBHOOK_SECRET, the Standard Webhooks signing secret
+
+	// POLAR_DISCOUNT_ID, applied to every checkout while set. The internal
+	// MVP points it at a 100%-forever discount so FUTO people pay nothing
+	// while going through the real product's checkout; dropping the
+	// variable is the launch flip, with no product-ID swap on the day.
+	// Optional, so a server without it sells at list price.
+	PolarDiscountID string
 
 	// HOSTED_ALLOWED_EMAIL_DOMAINS, lowercased. Empty admits every identity
 	// the provider authenticates; otherwise sign-in is limited to these
@@ -71,6 +83,7 @@ func Load() (Config, error) {
 		PolarAccessToken:   os.Getenv("POLAR_ACCESS_TOKEN"),
 		PolarProductID:     os.Getenv("POLAR_PRODUCT_ID"),
 		PolarWebhookSecret: os.Getenv("POLAR_WEBHOOK_SECRET"),
+		PolarDiscountID:    os.Getenv("POLAR_DISCOUNT_ID"),
 
 		HostedAllowedEmailDomains: emailDomains(os.Getenv("HOSTED_ALLOWED_EMAIL_DOMAINS")),
 	}
@@ -118,8 +131,8 @@ func Load() (Config, error) {
 		if err != nil || !u.IsAbs() {
 			return Config{}, fmt.Errorf("OIDC_REDIRECT_URI must be an absolute URL, got %q", cfg.OIDCRedirectURI)
 		}
-		if !strings.HasSuffix(u.Path, oidcCallbackPath) {
-			return Config{}, fmt.Errorf("OIDC_REDIRECT_URI path must end in %s, got %q", oidcCallbackPath, cfg.OIDCRedirectURI)
+		if !strings.HasSuffix(u.Path, OIDCCallbackPath) {
+			return Config{}, fmt.Errorf("OIDC_REDIRECT_URI path must end in %s, got %q", OIDCCallbackPath, cfg.OIDCRedirectURI)
 		}
 	}
 

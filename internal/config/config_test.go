@@ -196,12 +196,12 @@ func TestOIDCRedirectURIMustBeTheCallbackRoute(t *testing.T) {
 	// The Login Hand-off login URL is the callback's start sibling, so a
 	// redirect URI aimed elsewhere would hand apps a URL that 404s.
 	t.Setenv("OIDC_REDIRECT_URI", "https://notes.example.test/callback")
-	if _, err := Load(); err == nil || !strings.Contains(err.Error(), oidcCallbackPath) {
-		t.Fatalf("Load() error = %v, want it to name %s", err, oidcCallbackPath)
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), OIDCCallbackPath) {
+		t.Fatalf("Load() error = %v, want it to name %s", err, OIDCCallbackPath)
 	}
 
 	// A server mounted under a path prefix still passes.
-	t.Setenv("OIDC_REDIRECT_URI", "https://notes.example.test/notes"+oidcCallbackPath)
+	t.Setenv("OIDC_REDIRECT_URI", "https://notes.example.test/notes"+OIDCCallbackPath)
 	if _, err := Load(); err != nil {
 		t.Fatalf("Load() rejected a prefixed callback route: %v", err)
 	}

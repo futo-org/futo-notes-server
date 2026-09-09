@@ -29,6 +29,10 @@ type quotaHarness struct {
 	handoffHarness
 	token        string
 	collectionID string
+
+	// polar is the fake Polar the checkout and portal routes call. Nothing
+	// in the harness reaches the real API.
+	polar *fakePolar
 }
 
 // newQuotaHarness is a hosted server with an entitled account that has
@@ -65,6 +69,7 @@ func newHostedHarness(t *testing.T) quotaHarness {
 	}
 
 	root := t.TempDir()
+	fakePolar := newFakePolar(t)
 	cfg := config.Config{
 		DatabaseURL:      "sqlite:" + filepath.Join(root, "notes.db"),
 		AuthMode:         "oidc",
@@ -76,9 +81,10 @@ func newHostedHarness(t *testing.T) quotaHarness {
 		OIDCClientSecret: handoffClientSecret,
 		OIDCRedirectURI:  handoffRedirectURI,
 
-		PolarBaseURL:       "https://sandbox-api.polar.test",
+		PolarBaseURL:       fakePolar.URL,
 		PolarAccessToken:   "polar_oat_test",
-		PolarProductID:     "prod_test",
+		PolarProductID:     testPolarProductID,
+		PolarDiscountID:    testPolarDiscountID,
 		PolarWebhookSecret: testWebhookSecret,
 	}
 	database, err := db.Open(cfg)
@@ -96,7 +102,7 @@ func newHostedHarness(t *testing.T) quotaHarness {
 
 	h := quotaHarness{handoffHarness: handoffHarness{
 		url: server.URL, client: serverClient(server), claims: claims, database: database,
-	}}
+	}, polar: fakePolar}
 
 	minted := h.mint(t)
 	if callback := h.login(t, minted.Ticket, "quota-code"); callback.StatusCode != http.StatusOK {

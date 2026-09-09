@@ -40,8 +40,9 @@ The default developer server uses SQLite and needs no database setup:
 AUTH_MODE=dev GOTOOLCHAIN=auto go run ./cmd/server
 ```
 
-Hosted mode needs the four `OIDC_*` variables, the four `POLAR_*` ones, and,
-during the internal MVP, the sign-up gate:
+Hosted mode needs the four `OIDC_*` variables, the four required `POLAR_*`
+ones, and, during the internal MVP, the sign-up gate and the discount that
+makes the checkout free:
 
 ```bash
 AUTH_MODE=oidc DEV_UI=true COOKIE_SECURE=false \
@@ -51,6 +52,7 @@ AUTH_MODE=oidc DEV_UI=true COOKIE_SECURE=false \
   POLAR_BASE_URL=https://sandbox-api.polar.sh \
   POLAR_ACCESS_TOKEN=polar_oat_... POLAR_PRODUCT_ID=... \
   POLAR_WEBHOOK_SECRET=whsec_... \
+  POLAR_DISCOUNT_ID=... \
   HOSTED_ALLOWED_EMAIL_DOMAINS=futo.org \
   GOTOOLCHAIN=auto go run ./cmd/server
 ```
@@ -61,10 +63,18 @@ that route's `start` sibling. Any missing `OIDC_*` or `POLAR_*` value fails the
 boot with one error naming every one of them, so an operator fixes them in a
 single pass. `HOSTED_ALLOWED_EMAIL_DOMAINS` is a comma-separated list compared
 case-insensitively — unset it to admit every identity the provider
-authenticates. The `/dev` page's "Start hand-off" card drives the whole login
-end to end, and its subscription card signs a Polar-shaped delivery and puts it
-through the real webhook route, so entitlement can be exercised without a
-sandbox subscription.
+authenticates.
+
+`POLAR_DISCOUNT_ID` is the one optional Polar setting: while it is set, every
+checkout is created with that discount applied. Point it at a **100%
+percentage discount whose duration is Forever** — anything shorter starts
+billing when it lapses. Dropping the variable is the launch flip.
+
+The `/dev` page's "Start hand-off" card drives the whole login end to end. Its
+subscription card signs a Polar-shaped delivery and puts it through the real
+webhook route, so entitlement can be exercised without a sandbox subscription;
+its checkout card calls the real `POLAR_BASE_URL`, so point that at the sandbox
+before pressing anything there.
 
 Postgres remains available for exercising existing-install and hosted paths:
 

@@ -17,6 +17,7 @@ import (
 	"futo-notes-server/internal/events"
 	"futo-notes-server/internal/jobs"
 	"futo-notes-server/internal/oidc"
+	"futo-notes-server/internal/polar"
 )
 
 const (
@@ -127,6 +128,9 @@ func routes(cfg config.Config, database *db.DB, blobStore *blobs.Store, eventHub
 			rateLimited(auth.NewRateLimiter(), handlePasswordLogin(cfg, database)))
 	}
 	if cfg.AuthMode == "oidc" {
+		// One Polar client per server, used by the checkout and portal
+		// routes only; nothing on the sync path ever calls Polar.
+		polarClient := &polar.Client{BaseURL: cfg.PolarBaseURL, AccessToken: cfg.PolarAccessToken}
 		api.HandleFunc("GET /api/auth/oidc/start", handleOIDCStart(cfg, provider))
 		api.HandleFunc("GET /api/auth/oidc/callback",
 			rateLimited(auth.NewRateLimiter(), handleOIDCCallback(cfg, provider, database)))
@@ -134,6 +138,8 @@ func routes(cfg config.Config, database *db.DB, blobStore *blobs.Store, eventHub
 			rateLimited(auth.NewRateLimiter(), handleMintHandoff(cfg, database)))
 		api.HandleFunc("GET /api/auth/handoff/{ticket}", handleRedeemHandoff(database))
 		api.HandleFunc("GET /api/billing", handleBillingStatus(database))
+		api.HandleFunc("POST /api/billing/checkout", handleBillingCheckout(cfg, database, polarClient))
+		api.HandleFunc("GET /api/billing/portal", handleBillingPortal(database, polarClient))
 	}
 	api.HandleFunc("GET /api/auth", handleCurrentUser)
 	api.HandleFunc("POST /api/auth/logout", handleLogout(database))
@@ -174,6 +180,9 @@ func routes(cfg config.Config, database *db.DB, blobStore *blobs.Store, eventHub
 		// literal pattern takes precedence over "/api/".
 		polarWebhook = handlePolarWebhook(cfg, database)
 		mux.HandleFunc("POST /api/billing/polar/webhook", polarWebhook)
+		// Polar returns the browser here after a checkout. It holds no
+		// session, so it sits outside requireAuth too.
+		mux.HandleFunc("GET "+billingDonePath, handleBillingDone)
 	}
 	if cfg.DevUI {
 		mux.HandleFunc("GET /dev", handleDevUI(database))

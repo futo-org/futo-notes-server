@@ -548,6 +548,74 @@ subscriptionCard.querySelector('#subscription-send').addEventListener('click', a
   refreshSubscription();
 });
 
+const checkoutCard = document.createElement('div');
+checkoutCard.className = 'card oidc-only';
+checkoutCard.innerHTML = `
+  <div class="row">
+    <span class="method">POST</span>
+    <span class="path">/api/billing/checkout</span>
+    <button id="checkout-open">Open checkout</button>
+    <button id="portal-open">Open portal</button>
+  </div>
+  <p class="desc">both talk to the real Polar at POLAR_BASE_URL — point it at the sandbox; the checkout registers this account as a Polar customer the first time and applies POLAR_DISCOUNT_ID when it is set, the portal (GET /api/billing/portal) is where a card or a cancellation is changed</p>
+  <div class="result shown">
+    <span class="status"></span>
+    <pre id="checkout-url">(not opened)</pre>
+  </div>
+  <div class="job">
+    <div class="row">
+      <span class="path">entitlement after paying</span>
+      <button id="checkout-refresh">Re-read status</button>
+    </div>
+    <p class="desc">the checkout ends on /billing/done, which tells the person to go back to the app; the app learns it worked by re-reading GET /api/billing once the Polar webhook has landed</p>
+    <div class="result shown"><pre id="checkout-entitlement">(not loaded)</pre></div>
+  </div>`;
+cards.appendChild(checkoutCard);
+
+const checkoutStatus = checkoutCard.querySelector('.status');
+const checkoutURL = checkoutCard.querySelector('#checkout-url');
+const checkoutEntitlement = checkoutCard.querySelector('#checkout-entitlement');
+
+async function refreshCheckoutEntitlement() {
+  try {
+    const response = await fetch('/api/billing');
+    if (!response.ok) {
+      checkoutEntitlement.textContent = renderJSON(await response.text());
+      return;
+    }
+    const status = await response.json();
+    checkoutEntitlement.textContent =
+      `${status.entitled ? 'entitled' : 'not entitled'} · state ${status.state} · grace_until ${status.grace_until ?? 'null'}`;
+  } catch (err) {
+    checkoutEntitlement.textContent = String(err);
+  }
+}
+
+async function openBilling(path, method) {
+  try {
+    const response = await fetch(path, { method });
+    showStatus(checkoutStatus, response);
+    const body = await response.text();
+    let opened = null;
+    try {
+      opened = JSON.parse(body).url ?? null;
+    } catch {}
+    checkoutURL.textContent = opened ?? renderJSON(body);
+    if (opened) window.open(opened, '_blank', 'noopener');
+  } catch (err) {
+    checkoutStatus.textContent = 'network error';
+    checkoutStatus.className = 'status s5';
+    checkoutURL.textContent = String(err);
+  }
+  refreshCheckoutEntitlement();
+}
+
+checkoutCard.querySelector('#checkout-open')
+  .addEventListener('click', () => openBilling('/api/billing/checkout', 'POST'));
+checkoutCard.querySelector('#portal-open')
+  .addEventListener('click', () => openBilling('/api/billing/portal', 'GET'));
+checkoutCard.querySelector('#checkout-refresh').addEventListener('click', refreshCheckoutEntitlement);
+
 const sseCard = document.createElement('div');
 sseCard.className = 'card';
 sseCard.innerHTML = `

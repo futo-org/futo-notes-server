@@ -61,6 +61,10 @@ _Avoid_: Device flow, deep-link login, token relay
 
 ## Subscription
 
+**Billing Customer**:
+The account as the payment provider knows it, created the first time someone opens a checkout or the customer portal and never before. The account's sign-in `sub` is the external id both systems agree on, so a subscription event names the account without a lookup table. Code and comments at the provider boundary name the provider outright — "the account's Polar customer" — because there the concrete object is the point; the neutral term is for describing the concept.
+_Avoid_: Payer, billing account, customer record
+
 **Entitlement**:
 Whether an account may currently write to the service. An account is entitled while its subscription is active or within the grace period after a failed payment; reads never depend on entitlement.
 _Avoid_: Paid status, plan check, billing gate

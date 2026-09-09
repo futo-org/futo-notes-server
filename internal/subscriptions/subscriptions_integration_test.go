@@ -120,3 +120,86 @@ func TestSubscriptionsOnPostgres(t *testing.T) {
 		t.Fatalf("a revoked subscription is still entitled on Postgres; record = %+v", record)
 	}
 }
+
+// TestPolarCustomerOnPostgres covers the customer half of the row on the
+// engine the hosted service deploys on, where polar_customer_id sits beside
+// a nullable jsonb last_event and the upsert has to leave a live
+// subscription alone.
+func TestPolarCustomerOnPostgres(t *testing.T) {
+	databaseURL := os.Getenv("SUBSCRIPTIONS_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("SUBSCRIPTIONS_TEST_DATABASE_URL is not set")
+	}
+	rawDatabase, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dialect, err := databasepkg.ParseDialect(databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	database := databasepkg.Wrap(rawDatabase, dialect)
+	defer database.Close()
+	ctx := context.Background()
+	if _, err := databasepkg.Migrate(ctx, database); err != nil {
+		t.Fatal(err)
+	}
+
+	userID := uuid.NewV7().String()
+	sub := "customer-test-" + userID
+	email := userID + "@example.invalid"
+	if _, err := database.ExecContext(ctx, `INSERT INTO users (id, sub, name, email)
+		VALUES ($1, $2, 'customer test', $3)`, userID, sub, email); err != nil {
+		t.Fatal(err)
+	}
+	defer database.ExecContext(ctx, `DELETE FROM users WHERE id = $1`, userID)
+
+	customer, err := subscriptions.CustomerOf(ctx, database, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if customer.ID != "" || customer.ExternalID != sub || customer.Email != email {
+		t.Fatalf("CustomerOf() before any checkout = %+v", customer)
+	}
+
+	if err := subscriptions.SaveCustomerID(ctx, database, userID, "cus_pg_1", noon); err != nil {
+		t.Fatal(err)
+	}
+	// A row with no delivery yet leaves last_event as SQL NULL, which reads
+	// back as the empty string the /dev card treats as "none received".
+	record, err := subscriptions.Of(ctx, database, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.State != subscriptions.StateNone || record.LastEvent != "" || record.Entitled(noon) {
+		t.Fatalf("record after only a customer = %+v", record)
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"type": "subscription.active",
+		"data": map[string]any{
+			"id": "sub_pg_2", "status": "active", "customer_id": "cus_pg_1",
+			"customer": map[string]any{"external_id": sub},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	event, err := polar.ParseEvent(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if matched, err := subscriptions.Apply(ctx, database, event, body, noon); err != nil || !matched {
+		t.Fatalf("Apply() = %v, %v", matched, err)
+	}
+	if err := subscriptions.SaveCustomerID(ctx, database, userID, "cus_pg_1", noon); err != nil {
+		t.Fatal(err)
+	}
+	record, err = subscriptions.Of(ctx, database, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !record.Entitled(noon) || record.LastEvent == "" {
+		t.Fatalf("saving a customer id rolled a live subscription back: %+v", record)
+	}
+}

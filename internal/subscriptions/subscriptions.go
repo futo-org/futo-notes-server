@@ -69,10 +69,14 @@ func Of(ctx context.Context, database *db.DB, userID string) (Record, error) {
 	var record Record
 	var currentPeriodEnd, graceUntil db.NullTime
 	var updatedAt db.Time
+	// last_event is null on a row a checkout created before any delivery
+	// arrived, and empty is how the rest of the server already spells "no
+	// webhook received yet".
+	var lastEvent sql.NullString
 	err := database.QueryRowContext(ctx,
 		`SELECT state, current_period_end, grace_until, last_event, updated_at
 		 FROM subscriptions WHERE user_id = $1`, userID).
-		Scan(&record.State, &currentPeriodEnd, &graceUntil, &record.LastEvent, &updatedAt)
+		Scan(&record.State, &currentPeriodEnd, &graceUntil, &lastEvent, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Record{State: StateNone}, nil
 	}
@@ -81,6 +85,7 @@ func Of(ctx context.Context, database *db.DB, userID string) (Record, error) {
 	}
 	record.CurrentPeriodEnd = nullableTime(currentPeriodEnd)
 	record.GraceUntil = nullableTime(graceUntil)
+	record.LastEvent = lastEvent.String
 	record.UpdatedAt = updatedAt.Time
 	return record, nil
 }

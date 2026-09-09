@@ -4,6 +4,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"futo-notes-server/internal/config"
@@ -50,30 +52,38 @@ func requireEntitlement(cfg config.Config, database *db.DB) func(http.HandlerFun
 // Plan it is on, and how much of its Storage Quota it has used.
 func handleBillingStatus(database *db.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		userID := sessionFrom(r).User.ID
-		account, err := usage.Of(r.Context(), database, userID)
-		if err != nil {
-			serverError(w, r, "reading billing status", err)
-			return
-		}
-		record, err := subscriptions.Of(r.Context(), database, userID)
-		if err != nil {
-			serverError(w, r, "reading the subscription record", err)
-			return
-		}
-		var graceUntil *string
-		if record.GraceUntil != nil {
-			formatted := db.Timestamp(*record.GraceUntil)
-			graceUntil = &formatted
-		}
-		writeJSON(w, http.StatusOK, map[string]any{
-			"entitled":    record.Entitled(time.Now()),
-			"state":       record.State,
-			"grace_until": graceUntil,
-			"plan":        account.Plan,
-			"usage":       map[string]int64{"bytes_used": account.BytesUsed},
-		})
+		writeBillingStatus(w, r, database)
 	}
+}
+
+// writeBillingStatus answers with the billing status body. The checkout
+// route reuses it for an account that is already entitled, so an app that
+// asks to pay twice gets the standing it should have shown instead, in the
+// shape it already reads.
+func writeBillingStatus(w http.ResponseWriter, r *http.Request, database *db.DB) {
+	userID := sessionFrom(r).User.ID
+	account, err := usage.Of(r.Context(), database, userID)
+	if err != nil {
+		serverError(w, r, "reading billing status", err)
+		return
+	}
+	record, err := subscriptions.Of(r.Context(), database, userID)
+	if err != nil {
+		serverError(w, r, "reading the subscription record", err)
+		return
+	}
+	var graceUntil *string
+	if record.GraceUntil != nil {
+		formatted := db.Timestamp(*record.GraceUntil)
+		graceUntil = &formatted
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"entitled":    record.Entitled(time.Now()),
+		"state":       record.State,
+		"grace_until": graceUntil,
+		"plan":        account.Plan,
+		"usage":       map[string]int64{"bytes_used": account.BytesUsed},
+	})
 }
 
 // storageLimits is what a route accepting ciphertext needs before it reads a
@@ -206,4 +216,127 @@ func handlePolarWebhook(cfg config.Config, database *db.DB) http.HandlerFunc {
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "applied"})
 	}
+}
+
+// billingDonePath is where the page Polar returns the browser to is served,
+// and therefore what every checkout's success URL points at.
+const billingDonePath = "/billing/done"
+
+// checkoutSuccessURL is where Polar sends the browser once the payment goes
+// through. The server has no configured public origin of its own, so it takes
+// the one OIDC_REDIRECT_URI already had to name, the same way the Login
+// Hand-off builds its login URL. Config guarantees that URI is absolute and
+// ends in the OIDC callback, so trimming the callback leaves the origin along
+// with any prefix the server is mounted under.
+func checkoutSuccessURL(redirectURI string) (string, error) {
+	u, err := url.Parse(redirectURI)
+	if err != nil {
+		return "", err
+	}
+	u.Path = strings.TrimSuffix(u.Path, config.OIDCCallbackPath) + billingDonePath
+	return u.String(), nil
+}
+
+// handleBillingDone serves the page Polar returns the browser to. It says
+// nothing about the account on purpose: Entitlement moves when Polar's
+// webhook lands, not when the browser arrives here, so the page cannot
+// honestly report success. The app finds out by re-reading GET /api/billing.
+func handleBillingDone(w http.ResponseWriter, _ *http.Request) {
+	writeBrowserDonePage(w, billingDonePage)
+}
+
+// handleBillingCheckout starts a subscription: it answers with a Polar
+// checkout URL for the app to open in a browser. An account that may already
+// write gets its billing status instead, because sending it to pay a second
+// time would open a second subscription.
+func handleBillingCheckout(cfg config.Config, database *db.DB, client *polar.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		record, err := subscriptions.Of(r.Context(), database, sessionFrom(r).User.ID)
+		if err != nil {
+			serverError(w, r, "reading the subscription record", err)
+			return
+		}
+		if record.Entitled(time.Now()) {
+			writeBillingStatus(w, r, database)
+			return
+		}
+
+		successURL, err := checkoutSuccessURL(cfg.OIDCRedirectURI)
+		if err != nil {
+			serverError(w, r, "building the checkout's success URL", err)
+			return
+		}
+		customerID, ok := polarCustomerID(w, r, database, client)
+		if !ok {
+			return
+		}
+		checkoutURL, err := client.CreateCheckout(r.Context(), polar.CheckoutRequest{
+			ProductID:  cfg.PolarProductID,
+			DiscountID: cfg.PolarDiscountID,
+			CustomerID: customerID,
+			SuccessURL: successURL,
+		})
+		if err != nil {
+			serverError(w, r, "opening a Polar checkout", err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"url": checkoutURL})
+	}
+}
+
+// handleBillingPortal answers with a pre-authenticated Polar customer portal
+// URL, which is where a person cancels or changes a card. The server
+// implements none of that itself.
+//
+// It is a GET that can write: reaching the portal without ever having checked
+// out still needs a Polar customer, so the first call registers one. That is
+// the plan's route shape, and the write is idempotent — the account ends up
+// with the same customer however many times it is asked for.
+func handleBillingPortal(database *db.DB, client *polar.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		customerID, ok := polarCustomerID(w, r, database, client)
+		if !ok {
+			return
+		}
+		portalURL, err := client.CreateCustomerSession(r.Context(), customerID)
+		if err != nil {
+			serverError(w, r, "opening a Polar customer portal session", err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"url": portalURL})
+	}
+}
+
+// polarCustomerID resolves the account's Polar customer, registering it the
+// first time. Registration is lazy because most accounts never reach either
+// of these routes, and Polar's copy of the account is only needed once one
+// does.
+//
+// The account's OIDC sub goes to Polar as the external customer id, which is
+// what the webhook matches a subscription back to, so both ends of the round
+// trip agree without a lookup table. A false second return means the response
+// is done.
+func polarCustomerID(w http.ResponseWriter, r *http.Request, database *db.DB, client *polar.Client) (string, bool) {
+	userID := sessionFrom(r).User.ID
+	customer, err := subscriptions.CustomerOf(r.Context(), database, userID)
+	if err != nil {
+		serverError(w, r, "reading the account's Polar customer", err)
+		return "", false
+	}
+	if customer.ID != "" {
+		return customer.ID, true
+	}
+
+	// Polar refuses a second customer carrying an external id it has
+	// already seen, so this call has to happen at most once per account.
+	customerID, err := client.CreateCustomer(r.Context(), customer.ExternalID, customer.Email)
+	if err != nil {
+		serverError(w, r, "creating the account's Polar customer", err)
+		return "", false
+	}
+	if err := subscriptions.SaveCustomerID(r.Context(), database, userID, customerID, time.Now()); err != nil {
+		serverError(w, r, "storing the account's Polar customer", err)
+		return "", false
+	}
+	return customerID, true
 }
