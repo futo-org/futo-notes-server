@@ -17,8 +17,10 @@ import (
 )
 
 // maxBlobBytes is the largest blob the batch fetch framing will ship, 100
-// MiB. Uploads take their cap from the account's Plan instead; the one plan
-// carries this same value, so the two agree.
+// MiB. Uploads take their cap from the account's Plan instead. The one plan
+// carries this same value, and a plan that outgrew it would let an account
+// upload blobs this route then reports as missing, so the two are pinned
+// together by TestSeededPlanMatchesTheBatchFetchCeiling in internal/usage.
 const maxBlobBytes = 104857600
 
 const (
@@ -36,18 +38,10 @@ const (
 
 func handleUploadBlob(database *db.DB, store *blobs.Store, quotaEnforced bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		limits, ok := loadStorageLimits(w, r, database, quotaEnforced)
-		if !ok {
-			return
-		}
-		body, ok := readBlobBody(w, r, limits.account.Plan.BlobMaxBytes)
-		if !ok {
-			return
-		}
 		// Staged bytes do not count against the quota until an object claims
-		// them, so this refuses the upload the claim would not fit.
-		if limits.exceeded(int64(len(body))) {
-			writeQuotaExceeded(w, limits)
+		// them, so this refuses the upload whose claim would not fit.
+		body, ok := readBlobBodyWithinLimits(w, r, database, quotaEnforced)
+		if !ok {
 			return
 		}
 

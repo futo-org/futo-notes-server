@@ -39,9 +39,9 @@ func newUser(t *testing.T, database *db.DB, email string) string {
 	return user.ID
 }
 
-// stageLedgerRow writes a blob_ledger row directly, standing in for the
-// transitions the sync layer drives.
-func stageLedgerRow(t *testing.T, database *db.DB, userID, key, state string, size int64) {
+// insertLedgerRow writes a blob_ledger row in the given state directly,
+// standing in for the transitions the sync layer drives.
+func insertLedgerRow(t *testing.T, database *db.DB, userID, key, state string, size int64) {
 	t.Helper()
 	_, err := database.ExecContext(context.Background(),
 		`INSERT INTO blob_ledger (blob_key, user_id, size_bytes, state, created_at, state_changed_at)
@@ -116,15 +116,15 @@ func TestReconcileCorrectsDriftFromTheLedger(t *testing.T) {
 	accurate := newUser(t, database, "accurate@example.invalid")
 
 	// Claimed and retained count; staged and purgeable do not.
-	stageLedgerRow(t, database, drifted, drifted+"/a", "claimed", 700)
-	stageLedgerRow(t, database, drifted, drifted+"/b", "retained", 300)
-	stageLedgerRow(t, database, drifted, drifted+"/c", "staged", 5000)
-	stageLedgerRow(t, database, drifted, drifted+"/d", "purgeable", 9000)
+	insertLedgerRow(t, database, drifted, drifted+"/a", "claimed", 700)
+	insertLedgerRow(t, database, drifted, drifted+"/b", "retained", 300)
+	insertLedgerRow(t, database, drifted, drifted+"/c", "staged", 5000)
+	insertLedgerRow(t, database, drifted, drifted+"/d", "purgeable", 9000)
 	if _, err := database.ExecContext(ctx,
 		`INSERT INTO user_usage (user_id, bytes_used) VALUES ($1, 42)`, drifted); err != nil {
 		t.Fatal(err)
 	}
-	stageLedgerRow(t, database, accurate, accurate+"/a", "claimed", 10)
+	insertLedgerRow(t, database, accurate, accurate+"/a", "claimed", 10)
 	if _, err := database.ExecContext(ctx,
 		`INSERT INTO user_usage (user_id, bytes_used) VALUES ($1, 10)`, accurate); err != nil {
 		t.Fatal(err)
@@ -147,5 +147,27 @@ func TestReconcileCorrectsDriftFromTheLedger(t *testing.T) {
 	}
 	if account.BytesUsed != 1000 {
 		t.Fatalf("BytesUsed after reconcile = %d, want 1000", account.BytesUsed)
+	}
+}
+
+// TestSeededPlanMatchesTheBatchFetchCeiling pins the two numbers that have to
+// agree. The batch fetch route reports a blob larger than its framing ceiling
+// as missing, so a plan whose per-blob cap rose above that ceiling would let
+// an account upload blobs it could never fetch back in a batch.
+func TestSeededPlanMatchesTheBatchFetchCeiling(t *testing.T) {
+	// Mirrors maxBlobBytes in cmd/server/blobs.go, which cannot be imported
+	// from a library package.
+	const batchFetchCeiling = 104857600
+
+	database := newDatabase(t)
+	var blobMax int64
+	if err := database.QueryRowContext(context.Background(),
+		`SELECT blob_max_bytes FROM plans WHERE id = 'default'`).Scan(&blobMax); err != nil {
+		t.Fatal(err)
+	}
+	if blobMax != batchFetchCeiling {
+		t.Fatalf("default plan blob_max_bytes = %d, batch fetch ceiling = %d; raising the plan past the "+
+			"ceiling makes an accepted blob unfetchable in a batch, so cmd/server/blobs.go has to move first",
+			blobMax, batchFetchCeiling)
 	}
 }

@@ -37,6 +37,26 @@ type storageLimits struct {
 	quotaEnforced bool
 }
 
+// readBlobBodyWithinLimits is the whole admission check a route accepting one
+// blob of ciphertext performs: the body is read under the Plan's per-blob cap
+// and refused if storing it would cross the account's Storage Quota. It writes
+// the 413 or 507 itself, so a false second return means the response is done.
+func readBlobBodyWithinLimits(w http.ResponseWriter, r *http.Request, database *db.DB, quotaEnforced bool) ([]byte, bool) {
+	limits, ok := loadStorageLimits(w, r, database, quotaEnforced)
+	if !ok {
+		return nil, false
+	}
+	body, ok := readBlobBody(w, r, limits.account.Plan.BlobMaxBytes)
+	if !ok {
+		return nil, false
+	}
+	if limits.exceeded(int64(len(body))) {
+		writeQuotaExceeded(w, limits)
+		return nil, false
+	}
+	return body, true
+}
+
 func loadStorageLimits(w http.ResponseWriter, r *http.Request, database *db.DB, quotaEnforced bool) (storageLimits, bool) {
 	account, err := usage.Of(r.Context(), database, sessionFrom(r).User.ID)
 	if err != nil {

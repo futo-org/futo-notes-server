@@ -242,16 +242,8 @@ func handleCreateBlobObject(database *db.DB, store *blobs.Store, publisher event
 			writeError(w, http.StatusBadRequest, "invalid Mutation-Id")
 			return
 		}
-		limits, ok := loadStorageLimits(w, r, database, quotaEnforced)
+		body, ok := readBlobBodyWithinLimits(w, r, database, quotaEnforced)
 		if !ok {
-			return
-		}
-		body, ok := readBlobBody(w, r, limits.account.Plan.BlobMaxBytes)
-		if !ok {
-			return
-		}
-		if limits.exceeded(int64(len(body))) {
-			writeQuotaExceeded(w, limits)
 			return
 		}
 		userID, collectionID := sessionFrom(r).User.ID, r.PathValue("id")
@@ -294,18 +286,10 @@ func handleUpdateBlobObject(database *db.DB, store *blobs.Store, publisher event
 			writeError(w, http.StatusBadRequest, "invalid version")
 			return
 		}
-		limits, ok := loadStorageLimits(w, r, database, quotaEnforced)
-		if !ok {
-			return
-		}
-		body, ok := readBlobBody(w, r, limits.account.Plan.BlobMaxBytes)
-		if !ok {
-			return
-		}
 		// An update keeps the superseded blob as a merge ancestor, so the new
 		// blob is added to the account's usage rather than swapped for it.
-		if limits.exceeded(int64(len(body))) {
-			writeQuotaExceeded(w, limits)
+		body, ok := readBlobBodyWithinLimits(w, r, database, quotaEnforced)
+		if !ok {
 			return
 		}
 		userID := sessionFrom(r).User.ID

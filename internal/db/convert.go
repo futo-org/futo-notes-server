@@ -30,7 +30,15 @@ var sqliteCopyTables = []copyTable{
 	{name: "mutation_results", columns: []string{"user_id", "mutation_id", "kind", "collection_id", "object_id", "requested_version", "result", "created_at"}, jsonColumns: map[string]bool{"result": true}},
 	{name: "sessions", columns: []string{"id", "user_id", "access_token_hash", "expires_at"}},
 	{name: "server_config", columns: []string{"key", "value"}},
+	{name: "user_usage", columns: []string{"user_id", "bytes_used"}},
 }
+
+// plans and users.plan_id are deliberately not copied. The target's migration
+// seeds the one plan and defaults every account onto it, and that row is
+// guaranteed to exist; carrying a plan_id across could name a plan the target
+// has no row for, which would fail every plan lookup. A converted database is
+// self-hosted, where the Storage Quota is not enforced and the seeded per-blob
+// cap is the value the server has always used.
 
 // MigratePostgresToSQLite copies a consistent Postgres snapshot into a new
 // SQLite database, verifies it, and leaves the source untouched.
