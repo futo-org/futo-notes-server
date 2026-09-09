@@ -8,6 +8,7 @@ import (
 
 	"futo-notes-server/internal/blobs"
 	"futo-notes-server/internal/db"
+	"futo-notes-server/internal/usage"
 )
 
 type Schedule struct {
@@ -74,6 +75,15 @@ func maintenanceJobs(database *db.DB, store *blobs.Store, collectGarbage bool) [
 			},
 		})
 	}
+	// Last, so a pass that adopted files or reclaimed blobs leaves every
+	// account's Storage Usage agreeing with the ledger it just changed.
+	maintenance = append(maintenance, scheduledJob{
+		name: "usage reconciliation",
+		run: func(ctx context.Context) (string, error) {
+			result, err := usage.Reconcile(ctx, database)
+			return fmt.Sprintf("checked %d, corrected %d", result.Checked, result.Corrected), err
+		},
+	})
 	return maintenance
 }
 

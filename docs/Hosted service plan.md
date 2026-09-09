@@ -2,7 +2,8 @@
 
 Status: decisions settled 2026-09-09 in a design interview. Spec: issue #7. Implemented so
 far: `AUTH_MODE=oidc` (commit cbe395c, MR !19), then build-order steps 1 and 2 — the Login
-Hand-off endpoints and the email-domain allowlist (issue #8).
+Hand-off endpoints and the email-domain allowlist (issue #8) — and step 3, the Plan record,
+the Storage Usage counter, and `quota_exceeded` (issue #9).
 
 Goal: a paid sync service, $5/month, that a person signs up for from inside the
 app without visiting the web. Once signed up, hosted and self-hosted must feel
@@ -10,7 +11,7 @@ identical to the client. The first milestone is an internal-only, free MVP that
 still exercises a real checkout.
 
 Vocabulary is in `CONTEXT.md` (Login Hand-off, Entitlement, Grace Period, Plan,
-Storage Quota, Vault). Client-side work is out of scope for this repo and is
+Storage Quota, Storage Usage, Vault). Client-side work is out of scope for this repo and is
 only mentioned where it fixes a server contract.
 
 ## Decisions
@@ -103,6 +104,28 @@ services and already holds their customers.
 Both plan values come from a Plan record, one plan for now. Bytes used is a
 counter maintained by the blob-ledger state transitions (claimed and retained
 count, staged and purgeable do not), never a `SUM` at upload time.
+
+Settled while building step 3:
+
+- **10 GB is decimal**, 10,000,000,000 bytes. The per-blob cap stays 100 MiB,
+  104,857,600 bytes, which is the constant the server already enforced.
+- **The Storage Quota is enforced only in oidc mode.** A self-hosted server
+  has no plan ceiling and stores whatever fits on its disk; giving one a 10 GB
+  limit it never had would be a regression. The per-blob cap does come from
+  the Plan everywhere, and the one plan carries today's value, so nothing
+  changes for a self-hoster.
+- **`quota_exceeded` answers `507 Insufficient Storage`**, with
+  `{error, code, quota_bytes, bytes_used}`. Deliberately not the `413` an
+  over-cap blob gets: a smaller blob may fit under the per-blob cap, but the
+  account being full is a different problem with a different fix.
+- Enforcement sits on every route that accepts ciphertext — `POST /api/blobs`,
+  both inline blob-object routes, and each batch entry. A batch weighs each
+  entry against what the earlier ones claimed, so it cannot walk past the
+  quota one entry at a time.
+- The two-call write path checks at upload, not at claim, so a client that
+  stages many blobs concurrently and claims them all can overshoot by what it
+  had in flight. Reconciliation reports the true number and the next upload is
+  refused; a claim-time check is the fix if that ever matters.
 
 ### 6. Data model: no structural change
 

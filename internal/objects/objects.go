@@ -13,6 +13,7 @@ import (
 
 	appdb "futo-notes-server/internal/db"
 	"futo-notes-server/internal/events"
+	"futo-notes-server/internal/usage"
 )
 
 const objectColumns = `id, collection_id, version, change_seq, deleted,
@@ -547,6 +548,9 @@ func CreateReserved(ctx context.Context, db *appdb.DB, publisher events.Publishe
 		object_id = $3, object_version = 1, state_changed_at = $4 WHERE blob_key = $1`, blobKey, collectionID, objectID, now); err != nil {
 		return MutationOutcome{}, err
 	}
+	if err := usage.Add(ctx, tx, userID, size); err != nil {
+		return MutationOutcome{}, err
+	}
 	replayed := false
 	response := MutationResponse{Object: o, CollectionVersion: collectionVersion, Replayed: &replayed}
 	if err := saveResult(ctx, tx, userID, mutationID, intent, 201, response, &objectID); err != nil {
@@ -667,6 +671,11 @@ func Update(ctx context.Context, db *appdb.DB, publisher events.Publisher, userI
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE blob_ledger SET state = 'claimed', collection_id = $2,
 		object_id = $3, object_version = $4, state_changed_at = $5 WHERE blob_key = $1`, blobKey, collectionID, objectID, version, now); err != nil {
+		return MutationOutcome{}, err
+	}
+	// Only the new claim moves Storage Usage. The superseded blob became a
+	// retained merge ancestor above, and retained bytes keep counting.
+	if err := usage.Add(ctx, tx, userID, size); err != nil {
 		return MutationOutcome{}, err
 	}
 	response := MutationResponse{Object: o, CollectionVersion: collectionVersion}

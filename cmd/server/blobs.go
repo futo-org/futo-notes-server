@@ -16,8 +16,9 @@ import (
 	"futo-notes-server/internal/objects"
 )
 
-// maxBlobBytes caps one blob upload body at 100 MiB. A protocol limit, not
-// deployment config.
+// maxBlobBytes is the largest blob the batch fetch framing will ship, 100
+// MiB. Uploads take their cap from the account's Plan instead; the one plan
+// carries this same value, so the two agree.
 const maxBlobBytes = 104857600
 
 const (
@@ -33,10 +34,20 @@ const (
 	frameOverhead = 7 // u16 key length + u8 status + u32 blob length
 )
 
-func handleUploadBlob(database *db.DB, store *blobs.Store) http.HandlerFunc {
+func handleUploadBlob(database *db.DB, store *blobs.Store, quotaEnforced bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		body, ok := readBlobBody(w, r)
+		limits, ok := loadStorageLimits(w, r, database, quotaEnforced)
 		if !ok {
+			return
+		}
+		body, ok := readBlobBody(w, r, limits.account.Plan.BlobMaxBytes)
+		if !ok {
+			return
+		}
+		// Staged bytes do not count against the quota until an object claims
+		// them, so this refuses the upload the claim would not fit.
+		if limits.exceeded(int64(len(body))) {
+			writeQuotaExceeded(w, limits)
 			return
 		}
 

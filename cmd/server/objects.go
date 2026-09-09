@@ -217,8 +217,8 @@ func handleDeleteObject(database *db.DB, publisher events.Publisher) http.Handle
 	}
 }
 
-func readBlobBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBlobBytes))
+func readBlobBody(w http.ResponseWriter, r *http.Request, maxBytes int64) ([]byte, bool) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBytes))
 	if err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
@@ -235,15 +235,23 @@ func readBlobBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
 	return body, true
 }
 
-func handleCreateBlobObject(database *db.DB, store *blobs.Store, publisher events.Publisher) http.HandlerFunc {
+func handleCreateBlobObject(database *db.DB, store *blobs.Store, publisher events.Publisher, quotaEnforced bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		mID, ok := mutationID(r)
 		if !ok {
 			writeError(w, http.StatusBadRequest, "invalid Mutation-Id")
 			return
 		}
-		body, ok := readBlobBody(w, r)
+		limits, ok := loadStorageLimits(w, r, database, quotaEnforced)
 		if !ok {
+			return
+		}
+		body, ok := readBlobBody(w, r, limits.account.Plan.BlobMaxBytes)
+		if !ok {
+			return
+		}
+		if limits.exceeded(int64(len(body))) {
+			writeQuotaExceeded(w, limits)
 			return
 		}
 		userID, collectionID := sessionFrom(r).User.ID, r.PathValue("id")
@@ -274,7 +282,7 @@ func handleCreateBlobObject(database *db.DB, store *blobs.Store, publisher event
 	}
 }
 
-func handleUpdateBlobObject(database *db.DB, store *blobs.Store, publisher events.Publisher) http.HandlerFunc {
+func handleUpdateBlobObject(database *db.DB, store *blobs.Store, publisher events.Publisher, quotaEnforced bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		mID, ok := mutationID(r)
 		if !ok {
@@ -286,8 +294,18 @@ func handleUpdateBlobObject(database *db.DB, store *blobs.Store, publisher event
 			writeError(w, http.StatusBadRequest, "invalid version")
 			return
 		}
-		body, ok := readBlobBody(w, r)
+		limits, ok := loadStorageLimits(w, r, database, quotaEnforced)
 		if !ok {
+			return
+		}
+		body, ok := readBlobBody(w, r, limits.account.Plan.BlobMaxBytes)
+		if !ok {
+			return
+		}
+		// An update keeps the superseded blob as a merge ancestor, so the new
+		// blob is added to the account's usage rather than swapped for it.
+		if limits.exceeded(int64(len(body))) {
+			writeQuotaExceeded(w, limits)
 			return
 		}
 		userID := sessionFrom(r).User.ID
@@ -422,7 +440,7 @@ func parseBatch(body []byte) ([]batchEntry, string) {
 	return entries, ""
 }
 
-func handleBatchBlobObjects(database *db.DB, store *blobs.Store, publisher events.Publisher) http.HandlerFunc {
+func handleBatchBlobObjects(database *db.DB, store *blobs.Store, publisher events.Publisher, quotaEnforced bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBatchBytes))
 		if err != nil {
@@ -449,10 +467,20 @@ func handleBatchBlobObjects(database *db.DB, store *blobs.Store, publisher event
 			writeError(w, http.StatusNotFound, "not found")
 			return
 		}
+		limits, ok := loadStorageLimits(w, r, database, quotaEnforced)
+		if !ok {
+			return
+		}
 		results := make([]any, 0, len(entries))
 		for _, entry := range entries {
-			if len(entry.Blob) > maxBlobBytes {
+			if int64(len(entry.Blob)) > limits.account.Plan.BlobMaxBytes {
 				results = append(results, map[string]any{"status": "too_large"})
+				continue
+			}
+			// Each entry is weighed against what the earlier ones claimed, so
+			// a batch cannot walk past the quota one entry at a time.
+			if limits.exceeded(int64(len(entry.Blob))) {
+				results = append(results, limits.batchQuotaExceeded())
 				continue
 			}
 			var reservation objects.Reservation
@@ -485,6 +513,14 @@ func handleBatchBlobObjects(database *db.DB, store *blobs.Store, publisher event
 				slog.Error("applying batch object mutation", "err", err, "method", r.Method, "path", r.URL.Path)
 				results = append(results, map[string]any{"status": "error", "error": "internal server error"})
 				continue
+			}
+			// Only a mutation that actually claimed its blob moves the running
+			// total. A refused one leaves the ciphertext staged, and a replay
+			// answers from the Mutation-Id's retained outcome without claiming
+			// the ciphertext this retry carried; neither counts.
+			replayed := outcome.Response.Replayed != nil && *outcome.Response.Replayed
+			if outcome.Code == objects.OK && !replayed {
+				limits.recordClaim(int64(len(entry.Blob)))
 			}
 			results = append(results, batchResult(entry.Operation, outcome))
 		}

@@ -76,3 +76,6 @@ _Avoid_: Tier, product, SKU
 **Storage Quota**:
 The plan's ceiling on an account's total claimed and retained blob bytes. Staged and purgeable blobs do not count.
 _Avoid_: Disk limit, usage cap
+
+**Storage Usage**:
+An account's current total of claimed and retained blob bytes, measured against its Storage Quota. It is a counter moved by the blob-ledger transitions, never a sum taken while a write is in flight; a recurring job recomputes it from the ledger and corrects drift.

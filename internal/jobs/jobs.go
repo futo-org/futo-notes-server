@@ -15,6 +15,7 @@ import (
 
 	"futo-notes-server/internal/blobs"
 	appdb "futo-notes-server/internal/db"
+	"futo-notes-server/internal/usage"
 )
 
 const reconciliationLimit = 500
@@ -272,16 +273,18 @@ func purgeBlobRow(ctx context.Context, database *appdb.DB, key string) (bool, er
 	}
 	defer tx.Rollback()
 
-	var lockedKey string
+	var lockedKey, owner, state string
+	var size int64
 	now := clock().UTC()
 	err = tx.QueryRowContext(ctx, `
-		SELECT blob_key FROM blob_ledger
+		SELECT blob_key, user_id, size_bytes, state FROM blob_ledger
 		WHERE blob_key = $1 AND (
 			(state = 'staged' AND state_changed_at < $2)
 			OR (state = 'retained' AND state_changed_at < $3)
 			OR state = 'purgeable'
 		)
-		`+database.Dialect().ForUpdateSkipLocked(), key, appdb.Timestamp(now.Add(-24*time.Hour)), appdb.Timestamp(now.Add(-365*24*time.Hour))).Scan(&lockedKey)
+		`+database.Dialect().ForUpdateSkipLocked(), key, appdb.Timestamp(now.Add(-24*time.Hour)), appdb.Timestamp(now.Add(-365*24*time.Hour))).
+		Scan(&lockedKey, &owner, &size, &state)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -290,6 +293,14 @@ func purgeBlobRow(ctx context.Context, database *appdb.DB, key string) (bool, er
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM blob_ledger WHERE blob_key = $1`, lockedKey); err != nil {
 		return false, err
+	}
+	// A retained blob still counted against the Storage Quota, so aging it
+	// out gives the bytes back. Staged bytes never counted, and purgeable
+	// bytes were already returned when the collection delete moved them.
+	if state == "retained" {
+		if err := usage.Add(ctx, tx, owner, -size); err != nil {
+			return false, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return false, err

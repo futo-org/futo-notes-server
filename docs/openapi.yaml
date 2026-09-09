@@ -90,6 +90,8 @@ tags:
     description: Versioned metadata rows pointing at blobs
   - name: blobs
     description: Opaque ciphertext storage
+  - name: billing
+    description: Plan limits, storage usage, and subscription state
   - name: sync
     description: Change notification stream
 
@@ -436,6 +438,68 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
               example: { error: not found }
+
+  /api/billing:
+    get:
+      operationId: getBillingStatus
+      tags: [billing]
+      summary: Plan limits and storage usage (OIDC mode only)
+      description: |
+        Mounted only when `AUTH_MODE=oidc`, which is how the hosted service
+        runs. A self-hosted server answers `404` and has no Plan ceiling: it
+        stores whatever fits on its disk.
+
+        `plan` is the named set of limits the account is entitled to. One plan
+        exists today, and it carries the two values the server previously
+        enforced as constants, so nothing changed for an existing deployment.
+
+        `usage.bytes_used` is the account's claimed and retained blob bytes.
+        Staged blobs do not count until an object claims them, and purgeable
+        ones stop counting as soon as a collection delete releases them. The
+        number is a counter moved by the blob-ledger transitions, not a sum
+        taken per request, and a recurring job recomputes it from the ledger
+        and corrects any drift.
+
+        Entitlement fields (`entitled`, `state`, `grace_until`) join this body
+        once the subscription record exists.
+      responses:
+        "200":
+          description: The account's plan limits and storage usage
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [plan, usage]
+                properties:
+                  plan:
+                    type: object
+                    required: [storage_quota_bytes, blob_max_bytes]
+                    properties:
+                      storage_quota_bytes:
+                        type: integer
+                        format: int64
+                        description: |
+                          Ceiling on the account's total claimed and retained
+                          blob bytes. A write that would cross it is refused
+                          with `quota_exceeded`.
+                      blob_max_bytes:
+                        type: integer
+                        format: int64
+                        description: |
+                          Largest single blob the account may upload. Applies
+                          in every deployment, hosted or not.
+                  usage:
+                    type: object
+                    required: [bytes_used]
+                    properties:
+                      bytes_used:
+                        type: integer
+                        format: int64
+              example:
+                plan: { storage_quota_bytes: 10000000000, blob_max_bytes: 104857600 }
+                usage: { bytes_used: 4210688 }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
 
   /api/auth:
     get:
@@ -952,7 +1016,9 @@ paths:
             schema:
               type: string
               format: binary
-              description: Raw ciphertext. Empty body → 400. Over `MAX_BLOB_BYTES` → 413.
+              description: |
+                Raw ciphertext. Empty body → 400. Over the Plan's per-blob cap
+                → 413. Past the account's Storage Quota → 507.
       responses:
         "201":
           description: Created, or the replayed outcome of this Mutation-Id
@@ -978,6 +1044,8 @@ paths:
                 $ref: "#/components/schemas/MutationMismatchError"
         "413":
           $ref: "#/components/responses/BlobTooLarge"
+        "507":
+          $ref: "#/components/responses/QuotaExceeded"
 
   /api/collections/{cid}/blob-objects/{oid}:
     parameters:
@@ -1035,6 +1103,8 @@ paths:
                   - $ref: "#/components/schemas/MutationMismatchError"
         "413":
           $ref: "#/components/responses/BlobTooLarge"
+        "507":
+          $ref: "#/components/responses/QuotaExceeded"
 
   /api/collections/{cid}/blob-objects/batch:
     parameters:
@@ -1214,6 +1284,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "413":
           $ref: "#/components/responses/BlobTooLarge"
+        "507":
+          $ref: "#/components/responses/QuotaExceeded"
 
   /api/blobs/batch:
     post:
@@ -1531,12 +1603,47 @@ components:
             $ref: "#/components/schemas/Error"
           example: { error: not found }
     BlobTooLarge:
-      description: Body exceeds `MAX_BLOB_BYTES` (default 100 MiB)
+      description: |
+        Body exceeds the Plan's per-blob cap, which the one plan sets to
+        100 MiB — the value the server previously enforced as a constant.
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
           example: { error: blob too large }
+    QuotaExceeded:
+      description: |
+        Storing these bytes would put the account past its Storage Quota.
+        Only the hosted deployment (`AUTH_MODE=oidc`) can answer this; a
+        self-hosted server has no plan ceiling.
+
+        The body names the quota and the usage behind the refusal, so a client
+        can say how much room is left rather than only that the write failed.
+        Distinct from `413`: a smaller blob may fit, but the account is full,
+        and deleting notes is what frees room — after the retention window,
+        which is when the server's cleanup reclaims the bytes.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error, code, quota_bytes, bytes_used]
+            properties:
+              error:
+                type: string
+              code:
+                type: string
+                enum: [quota_exceeded]
+              quota_bytes:
+                type: integer
+                format: int64
+              bytes_used:
+                type: integer
+                format: int64
+          example:
+            error: storage quota exceeded
+            code: quota_exceeded
+            quota_bytes: 10000000000
+            bytes_used: 9999999123
 
   schemas:
     Error:
@@ -1861,11 +1968,29 @@ components:
               enum: [not_found]
         - type: object
           required: [status]
-          description: This entry's blob exceeds `MAX_BLOB_BYTES`.
+          description: This entry's blob exceeds the Plan's per-blob cap.
           properties:
             status:
               type: string
               enum: [too_large]
+        - type: object
+          required: [status, quota_bytes, bytes_used]
+          description: |
+            This entry would put the account past its Storage Quota, so it was
+            skipped and later entries were still attempted. Entries are weighed
+            in order against what the earlier ones claimed, so a batch cannot
+            walk past the quota one entry at a time. Only the hosted deployment
+            (`AUTH_MODE=oidc`) produces this status.
+          properties:
+            status:
+              type: string
+              enum: [quota_exceeded]
+            quota_bytes:
+              type: integer
+              format: int64
+            bytes_used:
+              type: integer
+              format: int64
         - type: object
           required: [status, error]
           description: |

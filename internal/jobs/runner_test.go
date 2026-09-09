@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -24,21 +25,28 @@ func TestReconcileStorageMissingDirectoryIsEmpty(t *testing.T) {
 
 func TestBlobGCRegistrationCanBeDisabled(t *testing.T) {
 	for _, test := range []struct {
-		name         string
-		enabled      bool
-		wantJobCount int
-		wantLastJob  string
+		name      string
+		enabled   bool
+		wantNames []string
 	}{
-		{name: "enabled", enabled: true, wantJobCount: 3, wantLastJob: "blob GC"},
-		{name: "disabled", enabled: false, wantJobCount: 2, wantLastJob: "mutation results"},
+		{
+			name:      "enabled",
+			enabled:   true,
+			wantNames: []string{"storage reconciliation", "mutation results", "blob GC", "usage reconciliation"},
+		},
+		{
+			name:      "disabled",
+			enabled:   false,
+			wantNames: []string{"storage reconciliation", "mutation results", "usage reconciliation"},
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			jobs := maintenanceJobs(nil, nil, test.enabled)
-			if len(jobs) != test.wantJobCount {
-				t.Fatalf("job count = %d, want %d", len(jobs), test.wantJobCount)
+			var names []string
+			for _, job := range maintenanceJobs(nil, nil, test.enabled) {
+				names = append(names, job.name)
 			}
-			if got := jobs[len(jobs)-1].name; got != test.wantLastJob {
-				t.Fatalf("last job = %q, want %q", got, test.wantLastJob)
+			if !slices.Equal(names, test.wantNames) {
+				t.Fatalf("maintenance jobs = %v, want %v", names, test.wantNames)
 			}
 		})
 	}

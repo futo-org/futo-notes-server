@@ -9,8 +9,9 @@ want to run the server, see the [README](../README.md).
 `go test ./...` runs the unit tests and the SQLite application lifecycle test
 without external dependencies. Postgres-backed tests also run when
 `OBJECTS_TEST_DATABASE_URL`, `EVENTS_TEST_DATABASE_URL`,
-`JOBS_TEST_DATABASE_URL`, `BLOBS_TEST_DATABASE_URL`, and
-`SERVER_TEST_DATABASE_URL` are set to scratch databases. The Postgres-to-SQLite
+`JOBS_TEST_DATABASE_URL`, `BLOBS_TEST_DATABASE_URL`,
+`USAGE_TEST_DATABASE_URL`, and `SERVER_TEST_DATABASE_URL` are set to scratch
+databases. The Postgres-to-SQLite
 copy test also runs when `MIGRATION_TEST_DATABASE_URL` is set. Every URL must
 identify a scratch database that tests may freely write to; never use a
 development or production database.
@@ -23,6 +24,7 @@ docker exec futo-notes-postgres createdb -U futo_notes notes_test
 URL='postgres://futo_notes:futo_notes@localhost:5433/notes_test'
 OBJECTS_TEST_DATABASE_URL=$URL EVENTS_TEST_DATABASE_URL=$URL \
 JOBS_TEST_DATABASE_URL=$URL BLOBS_TEST_DATABASE_URL=$URL \
+USAGE_TEST_DATABASE_URL=$URL \
 SERVER_TEST_DATABASE_URL=$URL MIGRATION_TEST_DATABASE_URL=$URL \
 go test -race -count=1 -p 1 ./...
 ```

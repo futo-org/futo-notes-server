@@ -10,6 +10,7 @@ import (
 	"uuid"
 
 	"futo-notes-server/internal/db"
+	"futo-notes-server/internal/usage"
 )
 
 type Collection struct {
@@ -138,9 +139,25 @@ func Delete(ctx context.Context, database *db.DB, userID, id string) (bool, erro
 		return false, err
 	}
 
+	// Purgeable bytes stop counting against the Storage Quota, so the account
+	// gets them back here rather than when garbage collection removes the
+	// files. The sum is scoped to this owner: a row naming another account —
+	// which only a legacy_shared-era anomaly can produce — leaves that
+	// account's counter high for reconciliation to correct, instead of
+	// crediting these bytes to the wrong person.
+	var freed int64
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COALESCE(SUM(size_bytes), 0) FROM blob_ledger
+		 WHERE collection_id = $1 AND user_id = $2 AND state IN ('claimed', 'retained')`,
+		id, userID).Scan(&freed); err != nil {
+		return false, err
+	}
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE blob_ledger SET state = 'purgeable', state_changed_at = $2
 		 WHERE collection_id = $1 AND state IN ('claimed', 'retained')`, id, db.Timestamp(time.Now())); err != nil {
+		return false, err
+	}
+	if err := usage.Add(ctx, tx, userID, -freed); err != nil {
 		return false, err
 	}
 	if _, err := tx.ExecContext(ctx,

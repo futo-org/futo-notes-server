@@ -98,6 +98,12 @@ func handleHealth(database *db.DB) http.HandlerFunc {
 }
 
 func routes(cfg config.Config, database *db.DB, blobStore *blobs.Store, eventHub *events.Hub, publisher events.Publisher, provider *oidc.Provider) http.Handler {
+	// The Storage Quota is a hosted limit, so only the hosted deployment
+	// refuses a write for being over it. The per-blob cap comes from the Plan
+	// everywhere, where the one plan carries the value the server used as a
+	// constant.
+	quotaEnforced := cfg.AuthMode == "oidc"
+
 	api := http.NewServeMux()
 	if cfg.AuthMode == "dev" {
 		api.HandleFunc("POST /api/auth/dev/login", handleDevLogin(cfg, database))
@@ -113,6 +119,7 @@ func routes(cfg config.Config, database *db.DB, blobStore *blobs.Store, eventHub
 		api.HandleFunc("POST /api/auth/handoff",
 			rateLimited(auth.NewRateLimiter(), handleMintHandoff(cfg, database)))
 		api.HandleFunc("GET /api/auth/handoff/{ticket}", handleRedeemHandoff(database))
+		api.HandleFunc("GET /api/billing", handleBillingStatus(database))
 	}
 	api.HandleFunc("GET /api/auth", handleCurrentUser)
 	api.HandleFunc("POST /api/auth/logout", handleLogout(database))
@@ -127,11 +134,11 @@ func routes(cfg config.Config, database *db.DB, blobStore *blobs.Store, eventHub
 	api.HandleFunc("GET /api/collections/{id}/objects/{objectId}", handleGetObject(database))
 	api.HandleFunc("PUT /api/collections/{id}/objects/{objectId}", handleUpdateObject(database, publisher))
 	api.HandleFunc("DELETE /api/collections/{id}/objects/{objectId}", handleDeleteObject(database, publisher))
-	api.HandleFunc("POST /api/collections/{id}/blob-objects", handleCreateBlobObject(database, blobStore, publisher))
-	api.HandleFunc("PUT /api/collections/{id}/blob-objects/{objectId}", handleUpdateBlobObject(database, blobStore, publisher))
-	api.HandleFunc("POST /api/collections/{id}/blob-objects/batch", handleBatchBlobObjects(database, blobStore, publisher))
+	api.HandleFunc("POST /api/collections/{id}/blob-objects", handleCreateBlobObject(database, blobStore, publisher, quotaEnforced))
+	api.HandleFunc("PUT /api/collections/{id}/blob-objects/{objectId}", handleUpdateBlobObject(database, blobStore, publisher, quotaEnforced))
+	api.HandleFunc("POST /api/collections/{id}/blob-objects/batch", handleBatchBlobObjects(database, blobStore, publisher, quotaEnforced))
 	api.HandleFunc("GET /api/collections/{id}/create-mutations/{mutationId}", handleRecoverCreate(database))
-	api.HandleFunc("POST /api/blobs", handleUploadBlob(database, blobStore))
+	api.HandleFunc("POST /api/blobs", handleUploadBlob(database, blobStore, quotaEnforced))
 	api.HandleFunc("POST /api/blobs/batch", handleBatchFetchBlobs(blobStore))
 	api.HandleFunc("GET /api/blobs/{userId}/{blobId}", handleDownloadBlob(blobStore))
 	api.HandleFunc("DELETE /api/blobs/{userId}/{blobId}", handleDeleteBlob(database, blobStore))
@@ -150,6 +157,7 @@ func routes(cfg config.Config, database *db.DB, blobStore *blobs.Store, eventHub
 		mux.HandleFunc("GET /dev", handleDevUI(database))
 		mux.HandleFunc("POST /dev/panic", handleDevPanic)
 		registerDevJobHandlers(mux, database, blobStore)
+		mux.HandleFunc("POST /dev/plan", handleDevPlan(database))
 		slog.Info("dev UI enabled", "path", "/dev")
 	}
 

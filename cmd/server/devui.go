@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	_ "embed"
+	"encoding/json"
 	"html"
 	"net/http"
 
 	"futo-notes-server/internal/blobs"
 	"futo-notes-server/internal/db"
 	"futo-notes-server/internal/jobs"
+	"futo-notes-server/internal/usage"
 )
 
 //go:embed devui.html
@@ -47,6 +49,33 @@ func registerDevJobHandlers(mux *http.ServeMux, database *db.DB, store *blobs.St
 	mux.HandleFunc("POST /dev/jobs/login-handoffs", handleDevJob(func(ctx context.Context) (jobs.HandoffReapResult, error) {
 		return jobs.ReapLoginHandoffs(ctx, database)
 	}))
+	mux.HandleFunc("POST /dev/jobs/usage", handleDevJob(func(ctx context.Context) (usage.ReconcileResult, error) {
+		return usage.Reconcile(ctx, database)
+	}))
+}
+
+// handleDevPlan rewrites the one plan's Storage Quota so the /dev quota card
+// can reach a ceiling without uploading ten gigabytes. Dev UI only.
+func handleDevPlan(database *db.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			StorageQuotaBytes *int64 `json:"storage_quota_bytes"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid json")
+			return
+		}
+		if body.StorageQuotaBytes == nil || *body.StorageQuotaBytes < 0 {
+			writeError(w, http.StatusBadRequest, "invalid storage_quota_bytes")
+			return
+		}
+		if _, err := database.ExecContext(r.Context(),
+			`UPDATE plans SET storage_quota_bytes = $1 WHERE id = 'default'`, *body.StorageQuotaBytes); err != nil {
+			serverError(w, r, "setting the dev plan quota", err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]int64{"storage_quota_bytes": *body.StorageQuotaBytes})
+	}
 }
 
 func handleDevJob[T any](run func(context.Context) (T, error)) http.HandlerFunc {

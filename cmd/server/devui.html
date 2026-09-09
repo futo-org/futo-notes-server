@@ -267,6 +267,7 @@ const jobEndpoints = [
   { method: 'POST', path: '/dev/jobs/mutation-results', name: 'mutation-results expiry', desc: 'expire old pending, failed, update, and delete outcomes' },
   { method: 'POST', path: '/dev/jobs/blob-gc', name: 'blob garbage collection', desc: 'purge eligible staged, retained, and purgeable blobs' },
   { method: 'POST', path: '/dev/jobs/login-handoffs', name: 'login hand-off reaper', desc: 'delete Login Hand-off tickets past their window' },
+  { method: 'POST', path: '/dev/jobs/usage', name: 'usage reconciliation', desc: 'recompute every account\'s Storage Usage from the blob ledger and correct drift' },
 ];
 
 const jobsCard = document.createElement('div');
@@ -369,6 +370,101 @@ handoffButton.addEventListener('click', async () => {
   } finally {
     handoffButton.disabled = false;
   }
+});
+
+const quotaCard = document.createElement('div');
+quotaCard.className = 'card oidc-only';
+quotaCard.innerHTML = `
+  <div class="row">
+    <span class="method">GET</span>
+    <span class="path">/api/billing</span>
+    <button id="quota-refresh">Refresh</button>
+  </div>
+  <p class="desc">the plan's Storage Quota and per-blob cap, and the account's Storage Usage; only oidc mode has the route and only oidc mode refuses a write for being over quota</p>
+  <div class="result shown">
+    <span class="status"></span>
+    <pre id="quota-plan">(not loaded)</pre>
+  </div>
+  <div class="job">
+    <div class="row">
+      <span class="path">storage quota</span>
+      <input id="quota-bytes" type="text" value="2097152" data-1p-ignore autocomplete="off">
+      <button id="quota-set">Set quota</button>
+    </div>
+    <p class="desc">POST /dev/plan — narrow the one plan so an upload can reach the ceiling without ten gigabytes</p>
+  </div>
+  <div class="job">
+    <div class="row">
+      <span class="path">upload near the limit</span>
+      <input id="quota-size" type="text" value="1048576" data-1p-ignore autocomplete="off">
+      <button id="quota-upload">Upload</button>
+    </div>
+    <p class="desc">claims the vault, then creates an object from that many bytes of ciphertext; past the quota it answers 507 quota_exceeded</p>
+    <div class="result"><span class="status"></span><pre></pre></div>
+  </div>`;
+cards.appendChild(quotaCard);
+
+const quotaStatus = quotaCard.querySelector('.status');
+const quotaPlan = quotaCard.querySelector('#quota-plan');
+const quotaUploadResult = quotaCard.querySelectorAll('.job')[1].querySelector('.result');
+const quotaUploadStatus = quotaUploadResult.querySelector('.status');
+const quotaUploadLog = quotaUploadResult.querySelector('pre');
+
+function showStatus(element, response) {
+  element.textContent = `${response.status} ${response.statusText}`.trim();
+  element.className = `status s${Math.floor(response.status / 100)}`;
+}
+
+async function refreshQuota() {
+  try {
+    const response = await fetch('/api/billing');
+    showStatus(quotaStatus, response);
+    quotaPlan.textContent = renderJSON(await response.text());
+  } catch (err) {
+    quotaStatus.textContent = 'network error';
+    quotaStatus.className = 'status s5';
+    quotaPlan.textContent = String(err);
+  }
+}
+
+quotaCard.querySelector('#quota-refresh').addEventListener('click', refreshQuota);
+
+quotaCard.querySelector('#quota-set').addEventListener('click', async () => {
+  const bytes = Number(quotaCard.querySelector('#quota-bytes').value);
+  const response = await fetch('/dev/plan', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ storage_quota_bytes: bytes }),
+  });
+  showStatus(quotaStatus, response);
+  quotaPlan.textContent = renderJSON(await response.text());
+  if (response.ok) refreshQuota();
+});
+
+quotaCard.querySelector('#quota-upload').addEventListener('click', async () => {
+  quotaUploadResult.classList.add('shown');
+  try {
+    const claimed = await fetch('/api/collections', { method: 'POST' });
+    if (!claimed.ok) {
+      showStatus(quotaUploadStatus, claimed);
+      quotaUploadLog.textContent = renderJSON(await claimed.text());
+      return;
+    }
+    const { collection } = await claimed.json();
+    const size = Number(quotaCard.querySelector('#quota-size').value);
+    const response = await fetch(`/api/collections/${encodeURIComponent(collection.id)}/blob-objects`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: new Uint8Array(size).fill(97),
+    });
+    showStatus(quotaUploadStatus, response);
+    quotaUploadLog.textContent = renderJSON(await response.text());
+  } catch (err) {
+    quotaUploadStatus.textContent = 'network error';
+    quotaUploadStatus.className = 'status s5';
+    quotaUploadLog.textContent = String(err);
+  }
+  refreshQuota();
 });
 
 const sseCard = document.createElement('div');
