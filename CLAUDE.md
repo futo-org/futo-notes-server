@@ -12,3 +12,17 @@ To the client, this rewrite should be invisible. It is ok for this rewrite to re
 When developing a feature, make sure a corresponding demo can be found at /dev. see `cmd/server/devui.go`
 
 Always use port 3005 for local dev. Kill other processes if needed to reclaim 3005.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live on GitLab at `futo-notes/futo-notes-server`, driven with `glab`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five default triage labels, unchanged. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.

@@ -7,6 +7,10 @@ This context coordinates versioned, opaque encrypted data across a user's device
 **Collection**:
 A user-owned container whose ordered changes are tracked by a collection-wide cursor.
 
+**Vault**:
+The product name for an account's root collection. Not a separate concept: "share the vault" and "share a folder" are the same operation once folder subtrees exist.
+_Avoid_: Workspace, notebook
+
 **Collection Contents**:
 The objects, object versions, blobs, retained merge ancestors, and ordered changes inside a collection. Collection identity and encrypted vault-key material are not collection contents.
 _Avoid_: Collection data
@@ -48,3 +52,27 @@ The retained object state produced by soft deletion at a specific object version
 **Blob Lifetime**:
 The progression of a blob from current object content, through optional merge-ancestor retention, to eventual deletion.
 _Avoid_: Blob cleanup
+
+## Sign-in
+
+**Login Hand-off**:
+A short-lived, single-use claim ticket the app opens a browser login with, and later redeems for the resulting session. The server finishes the identity-provider exchange; the app never touches provider tokens.
+_Avoid_: Device flow, deep-link login, token relay
+
+## Subscription
+
+**Entitlement**:
+Whether an account may currently write to the service. An account is entitled while its subscription is active or within the grace period after a failed payment; reads never depend on entitlement.
+_Avoid_: Paid status, plan check, billing gate
+
+**Grace Period**:
+The fixed window after a payment failure during which an account stays entitled.
+_Avoid_: Dunning window
+
+**Plan**:
+The named set of limits an account is entitled to: storage quota and per-blob cap. One plan exists today.
+_Avoid_: Tier, product, SKU
+
+**Storage Quota**:
+The plan's ceiling on an account's total claimed and retained blob bytes. Staged and purgeable blobs do not count.
+_Avoid_: Disk limit, usage cap
