@@ -346,9 +346,11 @@ Server consequence, and it is the only one: the vault key is wrapped twice,
 under the vault password and under the recovery key, so the stored key material
 gains a second envelope in new nullable columns and
 `GET`/`PUT /api/collections/{id}/key` grow the recovery fields. Everything else
-is a client epic — a keychain owner per shell, a second KDF discriminator, the
-recovery-key save screen, QR pairing on three shells, and a vault-password
-change flow — and it needs its own ADR in the client repo. Nothing on the
+is client work — splitting the one `connect(password)` that today both
+authenticates and unwraps, a second KDF discriminator, the recovery-key save
+screen, QR pairing on three shells, and a vault-password change flow — and it
+needs its own ADR in the client repo. Per-device remembering is already built:
+all three shells keep the vault password in the OS secret store today. Nothing on the
 client can exercise the recovery envelope until a server release carrying these
 columns is cut and `scripts/sync-server-pin.json` is bumped.
 
