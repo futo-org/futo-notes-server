@@ -134,18 +134,26 @@ makes "one login" actually line up across services. No schema change needed.
   identity (the same user would get a different `sub` in Notes vs Immich). Worth a
   one-line confirm given Zack's intent that accounts line up across services.
 
-## E2EE vault key under SSO (unresolved design decision)
+## E2EE vault key under SSO (decided 2026-09-10 — see ADR 0005)
 
-The hard, still-open item. Today the client wraps the vault key with a
+Was the hard open item. Today the client wraps the vault key with a
 **PBKDF2-derived key from the user's vault password**; the server stores `key_salt`,
 `key_kdf`, `encrypted_vault_key`. With "Log in with FUTO", **no password ever reaches
 the client** — OIDC authenticates *who you are* but hands the client no key material.
 
-So SSO forces a client-side decision about how the vault key is unlocked: a separate
-vault passphrase (decoupled from login), a passkey-derived key, key escrow, or
-similar. This is entirely client-side and does not block the server work, but it is
-expensive to retrofit. Immich is not E2EE, so the Yucca dev may not have prior art —
-raise with the Notes client team.
+**Resolved: keep them separate.** The vault password is its own secret, chosen when
+sync is first enabled and never leaving the client; the key is remembered per device
+in the platform keychain, so it is asked for at setup and not at login. A new device
+authenticates with FUTO and then either takes the vault password typed in or takes the
+key from an already-unlocked device over QR pairing, which ships at launch. A generated
+recovery key is the third door, and resetting the FUTO password does not touch vault
+encryption. Rejected: deriving the vault key from the account password, which would put
+the raw password through our infrastructure and let a compromised server decrypt from
+that login onward. Reasoning and the rejected alternatives are in
+`docs/adr/0005-vault-encryption-is-separate-from-account-authentication.md`.
+
+Still almost entirely client-side. The one server consequence is a second envelope on
+the stored key material, in new nullable columns.
 
 ## Deployment reality
 

@@ -11,6 +11,14 @@ A user-owned container whose ordered changes are tracked by a collection-wide cu
 The product name for an account's root collection. Not a separate concept: "share the vault" and "share a folder" are the same operation once folder subtrees exist.
 _Avoid_: Workspace, notebook
 
+**Vault Password**:
+The secret that unlocks a vault's encryption, chosen when sync is first enabled and never sent to any server. Deliberately not the account's sign-in password: it is asked for when a device is set up, not when someone logs in, and rotating the sign-in password leaves it alone.
+_Avoid_: Passphrase, encryption password, master password
+
+**Recovery Key**:
+A generated high-entropy secret that unlocks the same vault as the Vault Password, shown once for the person to keep. The way back in after a sign-in password reset, when no device is still unlocked.
+_Avoid_: Recovery code, backup key, escrow key
+
 **Collection Contents**:
 The objects, object versions, blobs, retained merge ancestors, and ordered changes inside a collection. Collection identity and encrypted vault-key material are not collection contents.
 _Avoid_: Collection data

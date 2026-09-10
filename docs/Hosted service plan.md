@@ -327,12 +327,30 @@ them.
 - Recover a lost Polar customer id rather than 500ing forever — see the last
   bullet under decision 4.
 
-## Flagged, owned by the client team
+## Vault unlock under OIDC: decided, and mostly client work
 
-How the vault key is unlocked when login is OIDC: no password reaches the
-client, so PBKDF2-from-vault-password no longer has an input. Open since June
-(`docs/MANAGED-LAUNCH.md`). It becomes visible the first time an internal
-person signs up, so the client team needs an answer before the MVP is usable.
+How the vault key is unlocked when login is OIDC — no password reaches the
+client, so PBKDF2-from-vault-password has no input — was open since June
+(`docs/MANAGED-LAUNCH.md`). **Answered 2026-09-10 in ADR 0005.**
+
+Vault encryption is a separate secret from account authentication. The person
+chooses a vault password when first enabling sync; it never leaves the client.
+The key is remembered per device in the platform keychain, so it is a
+setup-time secret rather than a login-time one. A new device authenticates
+with FUTO and then either takes the vault password typed in or takes the key
+from an already-unlocked device over QR pairing, which ships at launch. A
+generated recovery key is the third door. Resetting the FUTO password does not
+touch vault encryption.
+
+Server consequence, and it is the only one: the vault key is wrapped twice,
+under the vault password and under the recovery key, so the stored key material
+gains a second envelope in new nullable columns and
+`GET`/`PUT /api/collections/{id}/key` grow the recovery fields. Everything else
+is a client epic — a keychain owner per shell, a second KDF discriminator, the
+recovery-key save screen, QR pairing on three shells, and a vault-password
+change flow — and it needs its own ADR in the client repo. Nothing on the
+client can exercise the recovery envelope until a server release carrying these
+columns is cut and `scripts/sync-server-pin.json` is bumped.
 
 ## Build order
 
