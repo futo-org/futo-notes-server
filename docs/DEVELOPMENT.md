@@ -114,13 +114,9 @@ GOTOOLCHAIN=auto go run ./cmd/compare -engine-parity -mode dev
 ./scripts/sqlite-switch-rehearsal.sh
 ```
 
-The hosted path has its own rehearsal, which needs a scratch Postgres rather
-than the checkouts the others want:
-
-```bash
-HOSTED_REHEARSAL_DATABASE_URL='postgres://futo_notes:futo_notes@localhost:5433/hosted_rehearsal' \
-  GOTOOLCHAIN=auto go run ./cmd/hostedrehearsal
-```
+The hosted path has its own rehearsal, `go run ./cmd/hostedrehearsal`, which
+wants a scratch Postgres rather than the checkouts these want. It is described
+under hosted mode above.
 
 The adoption rehearsal requires local TypeScript-server and FUTO Notes client
 checkouts; override their locations with `FUTO_TS_SERVER_REPO` and

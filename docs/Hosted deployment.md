@@ -5,10 +5,12 @@ The decisions behind it are in `docs/Hosted service plan.md` and ADR 0004; this
 is the operational half: every setting the hosted server reads, the one-time
 setup that has to happen outside this repo, and how to tell it worked.
 
-Status: written 2026-09-09. The Manifest entry, the environment contract, and
-the localhost rehearsal are done. **Nothing has been deployed and no Zitadel
-application or Polar webhook has been created yet** — those four steps are
-below, each needing a console this repo cannot reach.
+Status: written 2026-09-09. The environment contract and the localhost
+rehearsal are done. The Manifest entry exists as an **unpushed local commit**
+on branch `futo-notes-hosted` in the `manifest-inventory` checkout, not on its
+`master`. **Nothing has been deployed and no Zitadel application or Polar
+webhook has been created yet** — the four steps below each need a console this
+repo cannot reach.
 
 ## What runs where
 
@@ -44,12 +46,20 @@ Hosted mode is `AUTH_MODE=oidc` plus four OIDC settings and four Polar ones.
 Any of the eight missing fails the boot with a single error naming all of
 them, so an operator fixes them in one pass rather than eight restarts.
 
+**`DATABASE_URL` is not one of the eight.** It defaults to
+`sqlite:./data/notes.db` and `AUTH_MODE=oidc` does not require it, so a hosted
+deployment that leaves it out boots healthy on a SQLite file inside the
+container and loses everything on the next restart. Nothing in the server
+catches that today. Until something does, the Manifest entry setting it is the
+only thing standing between this instance and that failure, and it is worth
+reading first in any review of `hosted.yml`.
+
 ### Required in hosted mode
 
 | Variable | What it is |
 |---|---|
 | `AUTH_MODE` | `oidc`. This is what makes the server hosted: it mounts the Login Hand-off, billing, and webhook routes, reports `billing: true` and `signup: open` in the capability document, enforces the Storage Quota, and gates writes on Entitlement. |
-| `DATABASE_URL` | `postgres://futo_notes:<password>@<host>:15510/futo_notes_hosted`. Port 15510 is HAProxy in front of the Patroni cluster, which routes to the current primary; direct 5510 is read-only whenever the local node is a replica. |
+| `DATABASE_URL` | `postgres://futo_notes:<password>@<host>:15510/futo_notes_hosted`. Required in practice, though not by the boot check — see above. Port 15510 is HAProxy in front of the Patroni cluster, which routes to the current primary; direct 5510 is read-only whenever the local node is a replica. |
 | `OIDC_ISSUER` | The Zitadel instance. Read at boot: the server fetches `<issuer>/.well-known/openid-configuration` and exits if it is unreachable or missing the authorization, token, or userinfo endpoint. A trailing slash is trimmed. |
 | `OIDC_CLIENT_ID` | The Zitadel application's client id. |
 | `OIDC_CLIENT_SECRET` | Its secret. The server is a confidential client and authenticates the code exchange with `client_secret_basic`. |
@@ -154,7 +164,6 @@ Create item `Manifest/futo-notes-hosted` with these fields, which are what
 `hosted.yml` references:
 
 ```
-postgres_password        # same value as Manifest/futo-notes-internal/postgres_password
 oidc_client_id
 oidc_client_secret
 polar_access_token
@@ -162,6 +171,11 @@ polar_product_id
 polar_webhook_secret
 polar_discount_id
 ```
+
+There is deliberately no `postgres_password` field. `hosted.yml` reads the
+existing `Manifest/futo-notes-internal/postgres_password` directly, because it
+is the same Patroni cluster and the same `futo_notes` role — a copy would
+silently stop matching the day the password is rotated.
 
 `OIDC_REDIRECT_URI` and `POLAR_BASE_URL` sit in the `secrets:` block too but
 are plain values, not `op://` references — Manifest passes non-reference
@@ -281,16 +295,15 @@ becomes visible the first time an internal person signs up.
 
 ## Still not done before anyone outside FUTO signs up
 
-Unchanged from `docs/Hosted service plan.md`, and still accurate:
+The list lives in one place, "Not in the MVP" in
+`docs/Hosted service plan.md`, and is deliberately not copied here — two
+copies drift and then neither can be trusted. Read against this deployment,
+nothing on it has moved: account deletion, the S3 blob store, a dedicated host
+(this deployment *is* the second instance on the shared staging box the list
+wants replaced), dropping `HOSTED_ALLOWED_EMAIL_DOMAINS` and
+`POLAR_DISCOUNT_ID`, answering the Login Hand-off phishing risk, and
+recovering a lost Polar customer id.
 
-- Account deletion (`DELETE /api/account`), cascading and cancelling the Polar
-  subscription.
-- An S3 blob store against Yucca's Ceph RGW. This is what unlocks the move to
-  Kubernetes, and it is the first task after the MVP.
-- A dedicated host rather than a second instance on the shared staging box.
-  This deployment is that second instance.
-- Removing `HOSTED_ALLOWED_EMAIL_DOMAINS` and `POLAR_DISCOUNT_ID`.
-- Answering the Login Hand-off phishing risk. The allowlist is what makes it
-  tolerable, so removing the allowlist and answering the risk are one piece of
-  work.
-- Recovering a lost Polar customer id rather than 500ing forever.
+Re-read it once the instance is actually up: whether deploying changed
+anything on it is a question this document cannot answer before there is a
+deployment.

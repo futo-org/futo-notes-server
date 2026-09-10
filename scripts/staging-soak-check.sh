@@ -57,17 +57,25 @@ min_days=${FUTO_SOAK_MIN_DAYS:-0}
 container=${FUTO_SOAK_CONTAINER:-inventory_futo-notes_sync-server}
 auth_mode=${FUTO_SOAK_AUTH_MODE:-}
 
-# Both of these are expanded into a remote shell command and a jq filter, so
-# they are held to the characters a container name and an auth mode actually
-# use rather than passed through.
+if [[ ! $min_days =~ ^[0-9]+$ ]]; then
+  echo "FUTO_SOAK_MIN_DAYS must be a non-negative integer" >&2
+  exit 2
+fi
+
+# The container name is expanded into a remote shell command, so it is held
+# to the characters a podman container name actually uses rather than passed
+# through to a shell on another machine.
 if [[ ! $container =~ ^[A-Za-z0-9_.-]+$ ]]; then
   echo "FUTO_SOAK_CONTAINER must be a container name, got $container" >&2
   exit 2
 fi
-if [[ -n $auth_mode && ! $auth_mode =~ ^[a-z]+$ ]]; then
-  echo "FUTO_SOAK_AUTH_MODE must be dev, password, or oidc, got $auth_mode" >&2
-  exit 2
-fi
+case ${auth_mode:-unset} in
+  unset | dev | password | oidc) ;;
+  *)
+    echo "FUTO_SOAK_AUTH_MODE must be dev, password, or oidc, got $auth_mode" >&2
+    exit 2
+    ;;
+esac
 
 # setting_value prints one NAME=value entry out of a container's environment
 # listing. Reading the listing once and picking values out of it keeps a
@@ -81,11 +89,6 @@ setting_value() {
     fi
   done <<<"$listing"
 }
-
-if [[ ! $min_days =~ ^[0-9]+$ ]]; then
-  echo "FUTO_SOAK_MIN_DAYS must be a non-negative integer" >&2
-  exit 2
-fi
 
 if [[ ${#urls[@]} -eq 0 ]]; then
   echo "FUTO_SOAK_URLS must contain at least one origin" >&2

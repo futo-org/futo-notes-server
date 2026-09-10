@@ -28,7 +28,6 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -39,6 +38,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -55,6 +55,10 @@ const (
 	// A Standard Webhooks secret: the "whsec_" prefix followed by base64.
 	webhookSecret = "whsec_aG9zdGVkLXJlaGVhcnNhbC1zaWduaW5nLWtleQ=="
 
+	// healthTimeout is how long the server gets to answer /health. It
+	// migrates a schema on the way up, so this is generous.
+	healthTimeout = 30 * time.Second
+
 	// allowedDomain is what HOSTED_ALLOWED_EMAIL_DOMAINS is set to, matching
 	// the internal MVP's futo.org gate.
 	allowedDomain = "futo.org"
@@ -62,7 +66,6 @@ const (
 
 func main() {
 	port := flag.Int("port", 3005, "port to run the server under test on")
-	keepLogs := flag.Bool("keep-logs", false, "print the server log even when the rehearsal passes")
 	flag.Parse()
 
 	databaseURL := os.Getenv("HOSTED_REHEARSAL_DATABASE_URL")
@@ -70,7 +73,7 @@ func main() {
 		fail("HOSTED_REHEARSAL_DATABASE_URL is required, and must name a scratch Postgres database this run may erase")
 	}
 
-	if err := run(databaseURL, *port, *keepLogs); err != nil {
+	if err := run(databaseURL, *port); err != nil {
 		fail(err.Error())
 	}
 	fmt.Println("\nhosted rehearsal passed")
@@ -81,7 +84,7 @@ func fail(message string) {
 	os.Exit(1)
 }
 
-func run(databaseURL string, port int, keepLogs bool) error {
+func run(databaseURL string, port int) error {
 	if err := freePort(port); err != nil {
 		return err
 	}
@@ -122,8 +125,8 @@ func run(databaseURL string, port int, keepLogs bool) error {
 		databaseURL: databaseURL,
 	})
 
-	if rehearsalErr != nil || keepLogs {
-		fmt.Fprintf(os.Stderr, "\n--- server log ---\n%s------------------\n", server.log())
+	if rehearsalErr != nil {
+		server.printLog()
 	}
 	return rehearsalErr
 }
@@ -161,6 +164,16 @@ type serverProcess struct {
 	command *exec.Cmd
 	logFile string
 	workDir string
+	// exited is closed once the child has been reaped, with exitErr holding
+	// what it exited with. cmd.Wait may only be called once, so one
+	// goroutine owns it and everything else waits on the close — which,
+	// unlike a value on a channel, every reader sees. It is what lets the
+	// health wait notice a server that died on its configuration instead of
+	// waiting out the full timeout, and it still lets stop reap a server
+	// that is already gone.
+	exited  chan struct{}
+	exitErr error
+	once    sync.Once
 }
 
 // startServer builds the server from source and runs it with the hosted
@@ -217,48 +230,74 @@ func startServer(databaseURL string, port int, issuerOrigin, polarOrigin string)
 		return nil, fmt.Errorf("starting the server: %w", err)
 	}
 
-	server := &serverProcess{origin: origin, command: command, logFile: logPath, workDir: workDir}
+	server := &serverProcess{
+		origin:  origin,
+		command: command,
+		logFile: logPath,
+		workDir: workDir,
+		exited:  make(chan struct{}),
+	}
+	go func() {
+		server.exitErr = command.Wait()
+		close(server.exited)
+	}()
+
 	if err := server.waitForHealth(); err != nil {
-		fmt.Fprintf(os.Stderr, "\n--- server log ---\n%s------------------\n", server.log())
+		server.printLog()
 		server.stop()
 		return nil, err
 	}
 	return server, nil
 }
 
+// waitForHealth blocks until the server answers /health, it dies, or the
+// timeout runs out. A server given a setting it refuses exits in
+// milliseconds, and saying so beats waiting thirty seconds to report a
+// timeout that was never the real problem.
 func (s *serverProcess) waitForHealth() error {
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		if s.command.ProcessState != nil {
-			return errors.New("the server exited before becoming healthy")
-		}
-		response, err := http.Get(s.origin + "/health")
-		if err == nil {
+	deadline := time.NewTimer(healthTimeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.exited:
+			return fmt.Errorf("the server exited before becoming healthy: %w", s.exitErr)
+		case <-deadline.C:
+			return fmt.Errorf("the server did not answer /health within %s", healthTimeout)
+		case <-ticker.C:
+			response, err := http.Get(s.origin + "/health")
+			if err != nil {
+				continue
+			}
 			_, _ = io.Copy(io.Discard, response.Body)
 			response.Body.Close()
 			if response.StatusCode == http.StatusOK {
 				return nil
 			}
 		}
-		time.Sleep(200 * time.Millisecond)
 	}
-	return errors.New("the server did not answer /health within 30s")
 }
 
-func (s *serverProcess) log() string {
+// printLog puts the server's whole log on stderr. It is only ever reached on
+// a failure, where the reason is usually the last line the server wrote.
+func (s *serverProcess) printLog() {
 	contents, err := os.ReadFile(s.logFile)
 	if err != nil {
-		return "(log unavailable: " + err.Error() + ")\n"
+		contents = []byte("(log unavailable: " + err.Error() + ")\n")
 	}
-	return string(contents)
+	fmt.Fprintf(os.Stderr, "\n--- server log ---\n%s------------------\n", contents)
 }
 
 func (s *serverProcess) stop() {
-	if s.command.Process != nil {
-		_ = s.command.Process.Kill()
-		_ = s.command.Wait()
-	}
-	_ = os.RemoveAll(s.workDir)
+	s.once.Do(func() {
+		if s.command.Process != nil {
+			_ = s.command.Process.Kill()
+			<-s.exited
+		}
+		_ = os.RemoveAll(s.workDir)
+	})
 }
 
 // newClient is the app and the browser at once: it keeps cookies, so the
@@ -279,6 +318,8 @@ func randomToken() string {
 	return base64.RawURLEncoding.EncodeToString(raw)
 }
 
+// step reports one thing that held. Both the setup in this file and the walk
+// in steps.go print through it, so the run reads as one list.
 func step(format string, args ...any) {
 	fmt.Printf("  ok  %s\n", fmt.Sprintf(format, args...))
 }

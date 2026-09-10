@@ -30,6 +30,15 @@ const outsiderEmail = "outsider@example.test"
 // as Storage Usage.
 const ciphertext = "hosted-rehearsal-ciphertext"
 
+// The one Plan's limits, as migration 013 seeds them: 10 GB decimal of
+// Storage Quota and the 100 MiB per-blob cap the server enforced as a
+// constant before Plans existed. A hosted account has to read back exactly
+// these, so the rehearsal names them rather than repeating the digits.
+const (
+	storageQuotaBytes int64 = 10000000000
+	blobMaxBytes      int64 = 104857600
+)
+
 // session carries everything the walk needs: the app's HTTP client, the
 // server under test, and the two fakes it can inspect and steer.
 type session struct {
@@ -76,16 +85,14 @@ func walk(s *session) error {
 		{"a write past the Storage Quota is refused", s.checkQuota},
 		{"a revoked subscription stops writes again", s.revokeSubscription},
 	}
-	for _, step := range steps {
-		if err := step.run(); err != nil {
-			return fmt.Errorf("%s: %w", step.name, err)
+	for _, check := range steps {
+		if err := check.run(); err != nil {
+			return fmt.Errorf("%s: %w", check.name, err)
 		}
-		stepOK(step.name)
+		step("%s", check.name)
 	}
 	return nil
 }
-
-func stepOK(name string) { fmt.Printf("  ok  %s\n", name) }
 
 // --- steps ---
 
@@ -95,7 +102,20 @@ func (s *session) checkCapability() error {
 		Signup   string `json:"signup"`
 		Billing  bool   `json:"billing"`
 	}
-	if err := s.getJSON("/", "", &capability); err != nil {
+	// Fetched without credentials: the capability document is what an app
+	// reads before it has any, to decide whether to offer the sign-up path.
+	response, err := http.Get(s.server.origin + "/")
+	if err != nil {
+		return err
+	}
+	body, err := readAll(response)
+	if err != nil {
+		return err
+	}
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("the capability document = %d %q, want 200", response.StatusCode, truncate(body))
+	}
+	if err := json.Unmarshal(body, &capability); err != nil {
 		return err
 	}
 	if capability.AuthMode != "oidc" {
@@ -223,11 +243,11 @@ func (s *session) checkBillingBeforePaying() error {
 	if status.State != "none" {
 		return fmt.Errorf("state = %q, want none", status.State)
 	}
-	if status.Plan.StorageQuotaBytes != 10000000000 {
-		return fmt.Errorf("storage_quota_bytes = %d, want 10000000000", status.Plan.StorageQuotaBytes)
+	if status.Plan.StorageQuotaBytes != storageQuotaBytes {
+		return fmt.Errorf("storage_quota_bytes = %d, want %d", status.Plan.StorageQuotaBytes, storageQuotaBytes)
 	}
-	if status.Plan.BlobMaxBytes != 104857600 {
-		return fmt.Errorf("blob_max_bytes = %d, want 104857600", status.Plan.BlobMaxBytes)
+	if status.Plan.BlobMaxBytes != blobMaxBytes {
+		return fmt.Errorf("blob_max_bytes = %d, want %d", status.Plan.BlobMaxBytes, blobMaxBytes)
 	}
 	if status.Usage.BytesUsed != 0 {
 		return fmt.Errorf("bytes_used = %d, want 0", status.Usage.BytesUsed)
@@ -364,7 +384,7 @@ func (s *session) openPortal() error {
 	var portal struct {
 		URL string `json:"url"`
 	}
-	if err := s.getJSON("/api/billing/portal", s.token, &portal); err != nil {
+	if err := s.getJSON("/api/billing/portal", &portal); err != nil {
 		return err
 	}
 	if portal.URL == "" {
@@ -404,7 +424,7 @@ func (s *session) checkQuota() error {
 	if err := s.setStorageQuota(int64(len(ciphertext))); err != nil {
 		return err
 	}
-	defer func() { _ = s.setStorageQuota(10000000000) }()
+	defer func() { _ = s.setStorageQuota(storageQuotaBytes) }()
 
 	response, body, err := s.do(http.MethodPost, "/api/blobs", []byte("one byte too many"))
 	if err != nil {
@@ -509,7 +529,7 @@ type billingStatus struct {
 
 func (s *session) billing() (billingStatus, error) {
 	var status billingStatus
-	err := s.getJSON("/api/billing", s.token, &status)
+	err := s.getJSON("/api/billing", &status)
 	return status, err
 }
 
@@ -603,11 +623,7 @@ func (s *session) do(method, path string, body []byte) (*http.Response, []byte, 
 	return response, responseBody, err
 }
 
-func (s *session) getJSON(path, token string, into any) error {
-	saved := s.token
-	s.token = token
-	defer func() { s.token = saved }()
-
+func (s *session) getJSON(path string, into any) error {
 	response, body, err := s.do(http.MethodGet, path, nil)
 	if err != nil {
 		return err

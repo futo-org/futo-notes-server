@@ -150,8 +150,14 @@ publish:candidate-image:
     - docker buildx create --use --name futo-notes-candidate --driver docker-container
   script:
     - CANDIDATE_TAG="candidate-$CI_COMMIT_SHORT_SHA"
-    - docker buildx build --platform linux/amd64,linux/arm64 --provenance=false --build-arg VERSION="$CANDIDATE_TAG" --tag "$DOCKERHUB_IMAGE:$CANDIDATE_TAG" --tag "$DOCKERHUB_IMAGE:go-candidate" --tag "$GITLAB_IMAGE:$CANDIDATE_TAG" --tag "$GITLAB_IMAGE:candidate" --push .
-    - docker buildx imagetools inspect "$DOCKERHUB_IMAGE:go-candidate"
+    # Only go-rewrite moves the two moving tags. Every branch that builds a
+    # candidate gets its own immutable candidate-<sha>, but go-candidate is
+    # the channel people follow, so a second branch pushing it would swap
+    # their image for code they never asked for.
+    - MOVING_TAGS=""
+    - if [ "$CI_COMMIT_BRANCH" = "go-rewrite" ]; then MOVING_TAGS="--tag $DOCKERHUB_IMAGE:go-candidate --tag $GITLAB_IMAGE:candidate"; fi
+    - docker buildx build --platform linux/amd64,linux/arm64 --provenance=false --build-arg VERSION="$CANDIDATE_TAG" --tag "$DOCKERHUB_IMAGE:$CANDIDATE_TAG" --tag "$GITLAB_IMAGE:$CANDIDATE_TAG" $MOVING_TAGS --push .
+    - docker buildx imagetools inspect "$GITLAB_IMAGE:$CANDIDATE_TAG"
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule" && $FUTO_SOAK_CHECK == "true"'
       when: never
