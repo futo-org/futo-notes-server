@@ -52,6 +52,8 @@ func TestDevUIIncludesRecurringJobPanel(t *testing.T) {
 		"last webhook received",
 		"Run now",
 		"sqlite: /var/lib/futo/notes.db",
+		"/dev/session",
+		"app (hand-off)",
 		"recovery_encrypted_vault_key",
 		"clears the recovery envelope",
 	} {

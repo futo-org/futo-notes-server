@@ -147,7 +147,7 @@ func Redeem(ctx context.Context, database *db.DB, ticket string) (Redeemed, erro
 	}
 
 	// The ticket is spent, so this session is opened for one caller only.
-	token, err := auth.CreateSession(ctx, database, user.ID)
+	token, err := auth.CreateSession(ctx, database, user.ID, auth.SlidingSession)
 	if err != nil {
 		return Redeemed{}, err
 	}

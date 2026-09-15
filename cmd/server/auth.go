@@ -154,7 +154,7 @@ func handleDevLogin(cfg config.Config, database *db.DB) http.HandlerFunc {
 			serverError(w, r, "dev login: upserting user", err)
 			return
 		}
-		token, err := auth.CreateSession(r.Context(), database, u.ID)
+		token, err := auth.CreateSession(r.Context(), database, u.ID, auth.FixedSession)
 		if err != nil {
 			serverError(w, r, "dev login: creating session", err)
 			return
@@ -289,7 +289,7 @@ func handleOIDCCallback(cfg config.Config, provider *oidc.Provider, database *db
 			serverError(w, r, "oidc callback: upserting user", err)
 			return
 		}
-		token, err := auth.CreateSession(r.Context(), database, u.ID)
+		token, err := auth.CreateSession(r.Context(), database, u.ID, auth.FixedSession)
 		if err != nil {
 			serverError(w, r, "oidc callback: creating session", err)
 			return
@@ -385,7 +385,7 @@ func handlePasswordLogin(cfg config.Config, database *db.DB) http.HandlerFunc {
 			return
 		}
 
-		token, err := auth.CreateSession(r.Context(), database, u.ID)
+		token, err := auth.CreateSession(r.Context(), database, u.ID, auth.FixedSession)
 		if err != nil {
 			serverError(w, r, "password login: creating session", err)
 			return

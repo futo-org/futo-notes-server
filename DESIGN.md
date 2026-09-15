@@ -100,7 +100,10 @@ Yucca now ships a concrete reference for this flow (see §Yucca migration path b
 
 Server generates an opaque session token (32 random bytes, hex-encoded), stores its **SHA-256 hash** in the `sessions` table, and returns the raw token as an `httpOnly` cookie. Subsequent requests hash the cookie and look up the row. A `sessions` table leak therefore does not yield usable bearer credentials.
 
-Session expiry: 7 days from issuance, with no sliding extension. An
+Session expiry: 7 days from issuance for a browser cookie and for password-
+and dev-mode logins, with no extension. A session redeemed from a Login
+Hand-off ticket instead expires 90 days after its last authenticated request
+(see `docs/adr/0007-sliding-sessions-for-app-logins.md`). An
 expired/invalid supplied session returns the standard Bearer `invalid_token`
 challenge plus the stable JSON code `invalid_session`, so clients can
 reauthenticate with securely retained login material, receive a new token, and

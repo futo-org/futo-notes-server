@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"futo-notes-server/internal/auth"
 	"futo-notes-server/internal/blobs"
 	"futo-notes-server/internal/config"
 	"futo-notes-server/internal/db"
@@ -313,5 +314,101 @@ func TestUnsetHostedAllowlistAdmitsEveryone(t *testing.T) {
 	}
 	if count := h.userCount(t); count != 1 {
 		t.Fatalf("users = %d, want the identity admitted", count)
+	}
+}
+
+// expiryOf reads the stored expiry of the session a raw token opens.
+func (h handoffHarness) expiryOf(t *testing.T, token string) time.Time {
+	t.Helper()
+	var expiry db.Time
+	if err := h.database.QueryRowContext(context.Background(),
+		`SELECT expires_at FROM sessions WHERE access_token_hash = $1`,
+		auth.HashToken(token)).Scan(&expiry); err != nil {
+		t.Fatal(err)
+	}
+	return expiry.Time
+}
+
+// lastUsed rewinds a session's clock without sleeping: it rewrites the expiry
+// as the one a session whose last authenticated request was ago in the past
+// would carry, given the lifetime it was opened with.
+func (h handoffHarness) lastUsed(t *testing.T, token string, ttl, ago time.Duration) {
+	t.Helper()
+	if _, err := h.database.ExecContext(context.Background(),
+		`UPDATE sessions SET expires_at = $1 WHERE access_token_hash = $2`,
+		db.Timestamp(time.Now().Add(-ago).Add(ttl)), auth.HashToken(token)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// One login produces two sessions with different lifetimes: the app's, which
+// slides so a device that syncs never has to log in again, and the browser's
+// cookie, which keeps the fixed week.
+func TestLoginHandoffSessionSlidesAndTheBrowserCookieDoesNot(t *testing.T) {
+	h := newHandoffHarness(t)
+	minted := h.mint(t)
+
+	callback := h.login(t, minted.Ticket, "handoff-code")
+	var browserCookie *http.Cookie
+	for _, cookie := range callback.Cookies {
+		if cookie.Name == "session" {
+			browserCookie = cookie
+		}
+	}
+	if browserCookie == nil {
+		t.Fatal("ticketed callback did not set the session cookie for the browser")
+	}
+	var login loginBody
+	if err := json.Unmarshal([]byte(h.poll(t, minted.Ticket).Body), &login); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now()
+	if got, want := h.expiryOf(t, login.Token), now.Add(auth.SlidingSessionTTL); got.Sub(want).Abs() > time.Minute {
+		t.Fatalf("app session expires at %v, want about %v (90 days)", got, want)
+	}
+	if got, want := h.expiryOf(t, browserCookie.Value), now.Add(auth.SessionTTL); got.Sub(want).Abs() > time.Minute {
+		t.Fatalf("browser session expires at %v, want about %v (7 days)", got, want)
+	}
+
+	// Two hours on: one more authenticated request from each.
+	h.lastUsed(t, login.Token, auth.SlidingSessionTTL, 2*time.Hour)
+	h.lastUsed(t, browserCookie.Value, auth.SessionTTL, 2*time.Hour)
+	browserBefore := h.expiryOf(t, browserCookie.Value)
+
+	if app := doRequest(t, h.client, http.MethodGet, h.url+"/api/auth", "", login.Token, nil); app.StatusCode != http.StatusOK {
+		t.Fatalf("app request = %d %q, want 200", app.StatusCode, app.Body)
+	}
+	if browser := doRequest(t, h.client, http.MethodGet, h.url+"/api/auth", "", "", browserCookie); browser.StatusCode != http.StatusOK {
+		t.Fatalf("browser request = %d %q, want 200", browser.StatusCode, browser.Body)
+	}
+
+	if got, want := h.expiryOf(t, login.Token), time.Now().Add(auth.SlidingSessionTTL); got.Sub(want).Abs() > time.Minute {
+		t.Fatalf("app session expires at %v after a request, want about %v — it did not slide", got, want)
+	}
+	if got := h.expiryOf(t, browserCookie.Value); !got.Equal(browserBefore) {
+		t.Fatalf("browser session expiry moved from %v to %v; a cookie session stays fixed", browserBefore, got)
+	}
+}
+
+// A hand-off session that goes 90 days without a request is dead, and the
+// client is told to log in again rather than that its vault is gone.
+func TestLoginHandoffSessionDiesAfterNinetyDaysOfSilence(t *testing.T) {
+	h := newHandoffHarness(t)
+	minted := h.mint(t)
+	h.login(t, minted.Ticket, "handoff-code")
+	var login loginBody
+	if err := json.Unmarshal([]byte(h.poll(t, minted.Ticket).Body), &login); err != nil {
+		t.Fatal(err)
+	}
+
+	h.lastUsed(t, login.Token, auth.SlidingSessionTTL, auth.SlidingSessionTTL+time.Minute)
+
+	response := doRequest(t, h.client, http.MethodGet, h.url+"/api/auth", "", login.Token, nil)
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("request on a 90-day-old session = %d %q, want 401", response.StatusCode, response.Body)
+	}
+	if !strings.Contains(response.Body, `"code":"invalid_session"`) {
+		t.Fatalf("401 body = %q, want the invalid_session code", response.Body)
 	}
 }

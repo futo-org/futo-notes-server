@@ -61,7 +61,7 @@ func TestMigratePostgresToSQLitePreservesApplicationState(t *testing.T) {
 	}, nil); err != nil || outcome != collections.PutKeyOK {
 		t.Fatalf("PutKey() = %v, %v", outcome, err)
 	}
-	token, err := auth.CreateSession(ctx, source, user.ID)
+	token, err := auth.CreateSession(ctx, source, user.ID, auth.FixedSession)
 	if err != nil {
 		t.Fatal(err)
 	}

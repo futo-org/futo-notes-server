@@ -187,6 +187,10 @@ func routes(cfg config.Config, database *db.DB, blobStore *blobs.Store, eventHub
 		mux.HandleFunc("POST /dev/panic", handleDevPanic)
 		registerDevJobHandlers(mux, database, blobStore)
 		mux.HandleFunc("POST /dev/plan", handleDevPlan(database))
+		// Reports the lifetime of whichever session made the request, so the
+		// page can show a browser cookie and an app's hand-off session side
+		// by side. Behind requireAuth like the cards below it.
+		mux.Handle("GET /dev/session", requireAuth(cfg, database, http.HandlerFunc(handleDevSession)))
 		if polarWebhook != nil {
 			// These two act for the signed-in account, so they go behind the
 			// same middleware /api/ uses rather than reading the session

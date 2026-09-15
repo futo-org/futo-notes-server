@@ -81,6 +81,13 @@ _Avoid_: Blob cleanup
 A short-lived, single-use claim ticket the app opens a browser login with, and later redeems for the resulting session. The server finishes the identity-provider exchange; the app never touches provider tokens.
 _Avoid_: Device flow, deep-link login, token relay
 
+**Sliding Session**:
+A session whose expiry moves with use: it ends 90 days after its last authenticated request rather than a fixed span after it was opened. Only redeeming a Login Hand-off ticket opens one, because that is the only login an app cannot repeat for itself. Every other session is fixed at seven days.
+_Avoid_: Rolling session, refresh token, keep-alive
+
+**Fixed Session**:
+A session that ends seven days after it was opened, extended by nothing. Every session that is not a Sliding Session: the browser cookie a hosted login sets, and every password- and dev-mode login.
+
 ## Subscription
 
 **Billing Customer**:

@@ -28,7 +28,7 @@ var sqliteCopyTables = []copyTable{
 	{name: "objects", columns: []string{"id", "collection_id", "user_id", "version", "deleted", "blob_key", "size_bytes", "created_at", "updated_at", "change_seq"}},
 	{name: "blob_ledger", columns: []string{"blob_key", "user_id", "size_bytes", "state", "collection_id", "object_id", "object_version", "created_at", "state_changed_at"}},
 	{name: "mutation_results", columns: []string{"user_id", "mutation_id", "kind", "collection_id", "object_id", "requested_version", "result", "created_at"}, jsonColumns: map[string]bool{"result": true}},
-	{name: "sessions", columns: []string{"id", "user_id", "access_token_hash", "expires_at"}},
+	{name: "sessions", columns: []string{"id", "user_id", "access_token_hash", "expires_at", "sliding"}},
 	{name: "server_config", columns: []string{"key", "value"}},
 	{name: "user_usage", columns: []string{"user_id", "bytes_used"}},
 }

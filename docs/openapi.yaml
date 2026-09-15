@@ -60,7 +60,9 @@ info:
     | pull page size | clamped to 1000 | `?limit` on the objects list |
     | `Mutation-Id` length | 1–128 chars | every object mutation |
     | login rate limit | 10 per 60s per client | `POST /api/auth/password/login` |
-    | session TTL | 7 days, no sliding renewal | all sessions |
+    | session TTL | 7 days from issuance, no renewal | browser cookie, password mode, dev mode |
+    | session TTL | 90 days from the last authenticated request | sessions redeemed from a Login Hand-off ticket |
+    | session renewal write | at most once per hour | sliding sessions only |
 
     Any operation may also return `500 {"error": "internal server error"}`; that
     is omitted from individual operations below.
@@ -406,7 +408,10 @@ paths:
             The same `{user, token}` body `LoginSuccess` carries, but no
             `Set-Cookie`: the browser already holds its own session cookie
             from the callback, and this session belongs to the app. The
-            session is opened at redemption, so its 7 days start here.
+            session is opened at redemption, and it slides: it expires 90
+            days after its last authenticated request, not 90 days after
+            this poll. The expiry is written forward at most once an hour,
+            so a session can die up to an hour short of the full 90 days.
           content:
             application/json:
               schema:
@@ -1814,8 +1819,9 @@ components:
       name: session
       description: |
         `httpOnly` cookie set by login; `Secure` unless `COOKIE_SECURE=false`,
-        `SameSite=Lax`, `Max-Age` 7 days. The cookie is checked before the
-        `Authorization` header.
+        `SameSite=Lax`, `Max-Age` 7 days. A cookie session is always fixed at
+        7 days; only a token redeemed from a Login Hand-off ticket slides. The
+        cookie is checked before the `Authorization` header.
 
   parameters:
     CollectionId:

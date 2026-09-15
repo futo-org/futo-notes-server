@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"time"
 
+	"futo-notes-server/internal/auth"
 	"futo-notes-server/internal/blobs"
 	"futo-notes-server/internal/config"
 	"futo-notes-server/internal/db"
@@ -180,4 +181,26 @@ func handleDevLastWebhook(database *db.DB) http.HandlerFunc {
 			"event":       json.RawMessage(record.LastEvent),
 		})
 	}
+}
+
+// handleDevSession reports how the requesting session's expiry is decided:
+// a Sliding Session renewed by use, or a fixed one that dies on schedule.
+// The /dev page shows it for the browser's cookie and for a hand-off token
+// side by side, which is the only place the difference is visible. Dev UI
+// only.
+//
+// Mounted behind requireAuth, so sessionFrom holds the session it describes —
+// including the expiry this request just wrote, if it renewed one.
+func handleDevSession(w http.ResponseWriter, r *http.Request) {
+	session := sessionFrom(r)
+	sliding := session.Kind == auth.SlidingSession
+	body := map[string]any{
+		"sliding":    sliding,
+		"lifetime":   session.Kind.TTL().String(),
+		"expires_at": db.Timestamp(session.ExpiresAt),
+	}
+	if sliding {
+		body["renews_after"] = auth.SlidingRenewInterval.String()
+	}
+	writeJSON(w, http.StatusOK, body)
 }

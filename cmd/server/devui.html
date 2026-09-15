@@ -359,8 +359,15 @@ handoffButton.addEventListener('click', async () => {
       }
       handoffStatus.textContent = `${polled.status} ${polled.statusText}`.trim();
       handoffStatus.className = `status s${Math.floor(polled.status / 100)}`;
-      handoffLog.textContent += renderJSON(await polled.text());
-      if (polled.ok) refreshSession();
+      const polledText = await polled.text();
+      handoffLog.textContent += renderJSON(polledText);
+      if (polled.ok) {
+        // Keep the app's token so the lifetime card below can show it beside
+        // the browser's cookie session.
+        try { appToken = JSON.parse(polledText).token ?? ''; } catch {}
+        refreshSession();
+        refreshLifetimes();
+      }
       return;
     }
   } catch (err) {
@@ -371,6 +378,51 @@ handoffButton.addEventListener('click', async () => {
     handoffButton.disabled = false;
   }
 });
+
+// The app's session token from the last redeemed hand-off, so the card below
+// can describe it. Never persisted; a reload starts over.
+let appToken = '';
+
+const lifetimeCard = document.createElement('div');
+lifetimeCard.className = 'card';
+lifetimeCard.innerHTML = `
+  <div class="row">
+    <span class="method">GET</span>
+    <span class="path">/dev/session</span>
+    <button>Refresh</button>
+  </div>
+  <p class="desc">how each session's expiry is decided. An app's Login Hand-off session slides: it expires 90 days after its last authenticated request, rewritten at most once an hour. This page's own cookie keeps the fixed 7 days from login. Start a hand-off above to fill in the app row.</p>
+  <div class="result shown">
+    <pre id="lifetimes">(not loaded)</pre>
+  </div>`;
+cards.appendChild(lifetimeCard);
+
+// The cookie is deliberately omitted for the app row: requireAuth reads the
+// session cookie before the Authorization header, so with it attached this
+// page would describe its own session twice.
+async function describeSession(label, bearer) {
+  try {
+    const res = bearer
+      ? await fetch('/dev/session', { credentials: 'omit', headers: { Authorization: `Bearer ${bearer}` } })
+      : await fetch('/dev/session');
+    if (!res.ok) return `${label}: ${res.status} ${res.statusText}`.trim();
+    const { sliding, lifetime, expires_at, renews_after } = await res.json();
+    const renewal = sliding ? `slides, rewritten at most every ${renews_after}` : 'fixed at login';
+    return `${label}: ${lifetime} · ${renewal} · expires ${expires_at}`;
+  } catch (err) {
+    return `${label}: ${err}`;
+  }
+}
+
+async function refreshLifetimes() {
+  const lines = [await describeSession('browser cookie', '')];
+  lines.push(appToken
+    ? await describeSession('app (hand-off)', appToken)
+    : 'app (hand-off): no token yet — run the hand-off card above');
+  document.getElementById('lifetimes').textContent = lines.join('\n');
+}
+
+lifetimeCard.querySelector('button').addEventListener('click', refreshLifetimes);
 
 const quotaCard = document.createElement('div');
 quotaCard.className = 'card oidc-only';
@@ -821,6 +873,7 @@ async function checkOIDCMode() {
 }
 
 refreshSession();
+refreshLifetimes();
 checkOIDCMode();
 </script>
 </body>
