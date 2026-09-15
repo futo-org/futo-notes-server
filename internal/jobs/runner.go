@@ -44,6 +44,13 @@ func Run(ctx context.Context, database *db.DB, store *blobs.Store, schedule Sche
 					return fmt.Sprintf("reaped %d", result.Reaped), err
 				},
 			},
+			{
+				name: "device pairings",
+				run: func(ctx context.Context) (string, error) {
+					result, err := ReapDevicePairings(ctx, database)
+					return fmt.Sprintf("reaped %d", result.Reaped), err
+				},
+			},
 		},
 		maintenance: maintenance,
 	})

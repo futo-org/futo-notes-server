@@ -110,11 +110,13 @@ func routes(cfg config.Config, database *db.DB, blobStore *blobs.Store, eventHub
 	// Entitlement gates the routes that mutate collection contents or stage
 	// blobs, plus the vault key write and the vault delete. Reads, pulls,
 	// downloads, batch fetch, the SSE stream, capability, auth, hand-off,
-	// and billing itself are never gated: a lapsed card must not strand a
-	// device or hide the data someone already stored. Claiming the vault
-	// stays open, because it writes collection identity rather than
+	// pairing, and billing itself are never gated: a lapsed card must not
+	// strand a device or hide the data someone already stored. Claiming the
+	// vault stays open, because it writes collection identity rather than
 	// contents and a lapsed account still has to find its collection to
-	// pull from it.
+	// pull from it. Device Pairing stays open for the same reason one step
+	// further out: someone who stopped paying has to be able to set up a
+	// device before they can read anything on it at all.
 	entitled := requireEntitlement(cfg, database)
 
 	api := http.NewServeMux()
@@ -147,6 +149,12 @@ func routes(cfg config.Config, database *db.DB, blobStore *blobs.Store, eventHub
 	api.HandleFunc("DELETE /api/collections/{id}", entitled(handleDeleteCollection(database)))
 	api.HandleFunc("GET /api/collections/{id}/key", handleGetCollectionKey(database))
 	api.HandleFunc("PUT /api/collections/{id}/key", entitled(handlePutCollectionKey(database)))
+	// Device Pairing is about vault keys rather than about how anyone logged
+	// in, so it is mounted in every auth mode, exactly as the vault key
+	// routes above are.
+	api.HandleFunc("POST /api/pairings", handleCreatePairing(database))
+	api.HandleFunc("GET /api/pairings/{id}", handleCollectPairing(database))
+	api.HandleFunc("POST /api/pairings/{id}/key", handleDeliverPairingKey(database))
 	api.HandleFunc("GET /api/collections/{id}/objects", handleListObjects(database))
 	api.HandleFunc("POST /api/collections/{id}/objects", entitled(handleCreateObject(database, publisher, quotaEnforced)))
 	api.HandleFunc("GET /api/collections/{id}/objects/{objectId}", handleGetObject(database))

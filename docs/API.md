@@ -11,6 +11,7 @@ The server is a **generic E2EE sync backend**: it stores opaque encrypted blobs 
 - [Auth](#auth)
 - [Collections](#collections)
 - [Vault key material](#vault-key-material)
+- [Device Pairing](#device-pairing) — handing the vault key to a new device
 - [The sync model](#the-sync-model) — versions, cursors, conflicts
 - [Objects](#objects)
 - [Blobs](#blobs)
@@ -267,6 +268,67 @@ key material, which may differ from what you sent. Adopt what you get back, reco
 envelope included — one vault has exactly one key. The winner's key is never overwritten.
 
 > Heads-up: a successful re-wrap does **not** currently emit a real-time `change` event, so peers learn about it on their next poll, not instantly. Note it if you depend on instant key propagation.
+
+---
+
+## Device Pairing
+
+A new device can be handed the vault key by a device on the same account that is already
+unlocked, instead of being told the vault password. The new device publishes a one-time
+public key, the unlocked device posts the vault key sealed to it, and the new device
+collects that ciphertext once. **The server relays ciphertext it cannot open**: the
+private half of the one-time key never leaves the new device, and nothing here is
+logged or kept after collection.
+
+```
+POST $BASE/api/pairings           → 201 { "id": "...", "expires_at": "..." }
+     { "public_key", "device_name", "platform" }
+
+POST $BASE/api/pairings/:id/key   → 204                                       // the key is waiting
+     { "ciphertext" }             → 409 { "error": "pairing already has a key" }
+                                  → 404 unknown, expired, collected, or not yours
+
+GET  $BASE/api/pairings/:id       → 202 (empty)  while nothing has been posted
+                                  → 200 { "ciphertext": "..." }   // exactly once
+                                  → 404 afterwards, and for unknown, expired, or
+                                        someone else's pairings
+```
+
+All three are authenticated and act only on your own account's pairings. They are
+mounted in every `AUTH_MODE`, and **none of them is gated on Entitlement** — a lapsed
+subscription pauses writes, but someone who stopped paying still has to be able to set
+up a device to read what they already stored.
+
+**The flow.** The new device calls `POST /api/pairings` and draws a QR code carrying the
+`id` it got back plus the same `public_key`, `device_name`, and `platform` it sent. The
+unlocked device scans that code, shows a confirmation naming the device, seals the vault
+key to the public key, and posts it. The new device has been polling `GET` since it drew
+the code, so it picks the key up, decrypts it, and stores it. The server never hands back
+the public key, the device name, or the platform — the scanning device has them from the
+QR payload, which is the only place they are needed.
+
+**Five minutes, from creation.** The clock starts at `POST /api/pairings` and is not
+restarted by the key being posted. It is shorter than the 10-minute Login Hand-off
+because no step involves reading a login page, and because it is how long a sealed vault
+key can sit on the server. A pairing nobody collects is swept away hourly.
+
+**Collected once means gone.** The poll that returns the ciphertext deletes the pairing
+in the same transaction, so two devices polling at the same moment cannot both get the
+key, and a second poll is a `404` rather than a replay.
+
+**`404` means four things** — unknown, expired, already collected, or belonging to
+another account — with the same body for all of them, on both the poll and the post.
+That is what stops a pairing id being probed for existence from another account. A
+second post to *your own* pairing is a `409` instead; only the owning account can reach
+it, so it tells you what happened without telling anyone else anything. A `409` is not
+something to retry: a sealed box is nondeterministic, so a repeated post carries
+different bytes and the server has nothing to match it against. If you cannot tell
+whether your post landed, start a new pairing.
+
+Bodies are capped at 8 KiB (`413` over that) and each string at 1024 characters (`400`).
+
+The contract of record for all of this is
+[`docs/adr/0008-pairing-relay-wire-contract.md`](adr/0008-pairing-relay-wire-contract.md).
 
 ---
 

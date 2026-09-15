@@ -56,6 +56,9 @@ func registerDevJobHandlers(mux *http.ServeMux, database *db.DB, store *blobs.St
 	mux.HandleFunc("POST /dev/jobs/login-handoffs", handleDevJob(func(ctx context.Context) (jobs.HandoffReapResult, error) {
 		return jobs.ReapLoginHandoffs(ctx, database)
 	}))
+	mux.HandleFunc("POST /dev/jobs/device-pairings", handleDevJob(func(ctx context.Context) (jobs.PairingReapResult, error) {
+		return jobs.ReapDevicePairings(ctx, database)
+	}))
 	mux.HandleFunc("POST /dev/jobs/usage", handleDevJob(func(ctx context.Context) (usage.ReconcileResult, error) {
 		return usage.Reconcile(ctx, database)
 	}))

@@ -51,6 +51,24 @@ func ReapLoginHandoffs(ctx context.Context, database *appdb.DB) (HandoffReapResu
 	return HandoffReapResult{Reaped: reaped}, err
 }
 
+type PairingReapResult struct {
+	Reaped int64 `json:"reaped"`
+}
+
+// ReapDevicePairings deletes Device Pairings past their window, whether the
+// vault key was ever posted to them or not. An uncollected ciphertext is the
+// reason this runs beside the session reaper rather than with the six-hourly
+// maintenance: the relay's whole promise is that a key it could not open is
+// not sitting there afterwards.
+func ReapDevicePairings(ctx context.Context, database *appdb.DB) (PairingReapResult, error) {
+	result, err := database.ExecContext(ctx, `DELETE FROM device_pairings WHERE expires_at < $1`, appdb.Timestamp(clock()))
+	if err != nil {
+		return PairingReapResult{}, err
+	}
+	reaped, err := result.RowsAffected()
+	return PairingReapResult{Reaped: reaped}, err
+}
+
 type ReconciliationResult struct {
 	Adopted int  `json:"adopted"`
 	Skipped int  `json:"skipped"`

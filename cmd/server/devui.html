@@ -267,6 +267,7 @@ const jobEndpoints = [
   { method: 'POST', path: '/dev/jobs/mutation-results', name: 'mutation-results expiry', desc: 'expire old pending, failed, update, and delete outcomes' },
   { method: 'POST', path: '/dev/jobs/blob-gc', name: 'blob garbage collection', desc: 'purge eligible staged, retained, and purgeable blobs' },
   { method: 'POST', path: '/dev/jobs/login-handoffs', name: 'login hand-off reaper', desc: 'delete Login Hand-off tickets past their window' },
+  { method: 'POST', path: '/dev/jobs/device-pairings', name: 'device pairing reaper', desc: 'delete Device Pairings past their window, including any vault key never collected' },
   { method: 'POST', path: '/dev/jobs/usage', name: 'usage reconciliation', desc: 'recompute every account\'s Storage Usage from the blob ledger and correct drift' },
 ];
 
@@ -423,6 +424,119 @@ async function refreshLifetimes() {
 }
 
 lifetimeCard.querySelector('button').addEventListener('click', refreshLifetimes);
+
+const pairingCard = document.createElement('div');
+pairingCard.className = 'card';
+pairingCard.innerHTML = `
+  <div class="row">
+    <span class="method">POST</span>
+    <span class="path">/api/pairings</span>
+    <button id="pairing-create">New device: show a code</button>
+    <button id="pairing-send" disabled>Unlocked device: send the key</button>
+  </div>
+  <p class="desc">Device Pairing, both halves on one page. The new device publishes a one-time public key and polls; the unlocked device posts the vault key sealed to that key. The server relays ciphertext it cannot open, hands it over once, and answers 404 from then on. Nothing here is real crypto — the "sealed key" is a placeholder string.</p>
+  <div class="result shown">
+    <span class="status"></span>
+    <pre id="pairing-log">(not started)</pre>
+  </div>`;
+cards.appendChild(pairingCard);
+
+const pairingCreate = pairingCard.querySelector('#pairing-create');
+const pairingSend = pairingCard.querySelector('#pairing-send');
+const pairingStatus = pairingCard.querySelector('.status');
+const pairingLog = pairingCard.querySelector('#pairing-log');
+
+// What the new device would draw as a QR code, and what the unlocked device
+// would read out of it. The public key stays on this page: the server stores
+// it but never hands it back.
+let pairingPayload = null;
+
+function pairingSay(line) {
+  pairingLog.textContent += line + '\n';
+}
+
+function pairingStatusLine(text, status) {
+  pairingStatus.textContent = text;
+  pairingStatus.className = status ? `status s${Math.floor(status / 100)}` : 'status s4';
+}
+
+pairingCreate.addEventListener('click', async () => {
+  pairingCreate.disabled = true;
+  pairingSend.disabled = true;
+  pairingLog.textContent = '';
+  pairingPayload = null;
+  try {
+    const publicKey = 'devui-one-time-public-key-' + Math.random().toString(36).slice(2);
+    const created = await fetch('/api/pairings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ public_key: publicKey, device_name: 'Dev UI new device', platform: 'browser' }),
+    });
+    const createdText = await created.text();
+    pairingStatusLine(`${created.status} ${created.statusText}`.trim(), created.status);
+    if (!created.ok) {
+      pairingSay(renderJSON(createdText));
+      return;
+    }
+    const { id, expires_at } = JSON.parse(createdText);
+    pairingPayload = { pairing_id: id, public_key: publicKey, device_name: 'Dev UI new device', platform: 'browser' };
+    pairingSay('QR payload the new device would draw:');
+    pairingSay(JSON.stringify(pairingPayload, null, 2));
+    pairingSay(`expires ${expires_at}\n`);
+    pairingSend.disabled = false;
+
+    // Poll the way the new device would, until the key arrives or the
+    // pairing's window closes.
+    for (let attempt = 1; ; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      const polled = await fetch(`/api/pairings/${encodeURIComponent(id)}`);
+      if (polled.status === 202) {
+        pairingStatusLine(`202 waiting for the key · poll ${attempt}`);
+        continue;
+      }
+      const polledText = await polled.text();
+      pairingStatusLine(`${polled.status} ${polled.statusText}`.trim(), polled.status);
+      pairingSay(`poll ${attempt}: ${polled.status} ${renderJSON(polledText)}`);
+      if (!polled.ok) return;
+
+      // One more poll, to show that collecting spends the pairing.
+      const spent = await fetch(`/api/pairings/${encodeURIComponent(id)}`);
+      pairingSay(`poll ${attempt + 1}: ${spent.status} ${renderJSON(await spent.text())} — collected once, gone after`);
+      return;
+    }
+  } catch (err) {
+    pairingStatusLine('network error', 500);
+    pairingSay(String(err));
+  } finally {
+    pairingCreate.disabled = false;
+    pairingSend.disabled = true;
+  }
+});
+
+pairingSend.addEventListener('click', async () => {
+  if (!pairingPayload) return;
+  pairingSend.disabled = true;
+  try {
+    const sent = await fetch(`/api/pairings/${encodeURIComponent(pairingPayload.pairing_id)}/key`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ciphertext: 'sealed-to-' + pairingPayload.public_key }),
+    });
+    const body = await sent.text();
+    pairingSay(`sent the key: ${sent.status} ${body ? renderJSON(body) : '(empty body)'}`);
+
+    // A second send is refused, which is what stops a scanned code being
+    // replayed against the same pairing.
+    const again = await fetch(`/api/pairings/${encodeURIComponent(pairingPayload.pairing_id)}/key`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ciphertext: 'a second key' }),
+    });
+    pairingSay(`sent again: ${again.status} ${renderJSON(await again.text())} — one key per pairing`);
+  } catch (err) {
+    pairingSay(String(err));
+  }
+});
 
 const quotaCard = document.createElement('div');
 quotaCard.className = 'card oidc-only';

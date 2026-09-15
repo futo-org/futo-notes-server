@@ -29,6 +29,10 @@ The vault key wrapped under the Vault Password. Every vault has exactly one, and
 **Recovery Envelope**:
 The same vault key wrapped under the Recovery Key instead. Optional: its absence means that vault has no Recovery Key, so the Vault Password or an already-unlocked device is the only way in.
 
+**Device Pairing**:
+A short-lived, single-use relay that carries a vault key from a device that is already unlocked to a new one on the same account, so the new device never has to be told the Vault Password. The new device publishes a one-time public key and polls; the unlocked device posts the key sealed to it; the ciphertext is handed over once and then deleted. The server holds only ciphertext it cannot open.
+_Avoid_: QR session, device link, key escrow, key hand-off
+
 **Re-wrap**:
 Replacing a vault's stored envelopes from a client that is already unlocked — a Vault Password change, or a new Recovery Key. It names the revision it read, so it conflicts only against a newer one; it is not the first claim of a key.
 _Avoid_: Key rotation, re-key

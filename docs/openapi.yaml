@@ -92,6 +92,8 @@ tags:
     description: Versioned metadata rows pointing at blobs
   - name: blobs
     description: Opaque ciphertext storage
+  - name: pairing
+    description: Device-to-device vault-key transfer
   - name: billing
     description: Plan limits, storage usage, and subscription state
   - name: sync
@@ -1056,6 +1058,227 @@ paths:
                     enum: [key conflict]
                   currentKey:
                     $ref: "#/components/schemas/KeyMaterial"
+
+  /api/pairings:
+    post:
+      operationId: createPairing
+      tags: [pairing]
+      summary: Open a Device Pairing
+      description: |
+        A new device that is already signed in publishes the one-time public
+        key an already-unlocked device on the same account will seal the vault
+        key to, and says what to call it on the confirmation that device
+        shows. Mounted in every `AUTH_MODE`.
+
+        The three fields are opaque: the server stores them, cannot read them,
+        and never hands them back. The device that needs them reads them out
+        of the QR payload it just scanned, which carries the pairing id
+        alongside them.
+
+        **Not gated on Entitlement.** A lapsed subscription pauses writes, but
+        not this one — someone who stopped paying must still be able to set up
+        a device and read what they already stored.
+
+        Contract of record: `docs/adr/0008-pairing-relay-wire-contract.md`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [public_key, device_name, platform]
+              properties:
+                public_key:
+                  type: string
+                  maxLength: 1024
+                  description: |
+                    The new device's one-time public key, in whatever encoding
+                    the client and its peer agree on. Its private half never
+                    leaves the new device, which is why the server cannot open
+                    what gets posted to this pairing.
+                device_name:
+                  type: string
+                  maxLength: 1024
+                  description: What the new device calls itself, self-reported.
+                platform:
+                  type: string
+                  maxLength: 1024
+                  description: The new device's platform, self-reported.
+            example:
+              public_key: MCowBQYDK2VuAyEA3f1aK9pQ2cJ7xw4mR8vZ0tN6yB5sE1hX
+              device_name: Kitchen laptop
+              platform: desktop
+      responses:
+        "201":
+          description: The pairing, as the QR payload needs it
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, expires_at]
+                properties:
+                  id:
+                    type: string
+                    description: |
+                      Unguessable — 32 random bytes, base64url. The account
+                      check is what keeps a pairing private; the id being
+                      unguessable means a stranger cannot even ask about one.
+                  expires_at:
+                    type: string
+                    format: date-time
+                    description: |
+                      Five minutes out. The clock starts here and is not
+                      restarted by the key being posted.
+              example:
+                id: koiKEC2jss5UMppDtKLHp5Zal8NhdQG2_plXmsHL0BI
+                expires_at: "2026-09-15T17:29:53.217936883Z"
+        "400":
+          description: A missing, empty, or over-long field, or a malformed body
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          description: Body exceeds 8 KiB
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: request too large }
+
+  /api/pairings/{id}/key:
+    post:
+      operationId: deliverPairingKey
+      tags: [pairing]
+      summary: Post the vault key to a Device Pairing
+      description: |
+        The already-unlocked device scans the new device's QR code, seals the
+        vault key to the public key it carries, and posts the result here. The
+        server relays ciphertext it cannot open: it never sees a vault key,
+        Vault Password, or Recovery Key, and it does not log the body.
+
+        The pairing has to belong to the calling account. One key per pairing.
+
+        **Not gated on Entitlement**, like `createPairing`.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ciphertext]
+              properties:
+                ciphertext:
+                  type: string
+                  maxLength: 1024
+                  description: |
+                    The vault key sealed to the pairing's `public_key`, in
+                    whatever encoding the two devices agree on. Opaque here.
+      responses:
+        "204":
+          description: Stored, waiting for the new device to collect it
+        "400":
+          description: A missing, empty, or over-long `ciphertext`, or a malformed body
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: |
+            Unknown pairing, expired, already collected, or belonging to
+            another account. Deliberately the same answer for all four, so a
+            pairing id cannot be probed for existence from another account.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: not found }
+        "409":
+          description: |
+            This pairing already carries a key. Only the owning account can
+            reach this — a stranger's post is a `404` before the pairing's
+            state is consulted — so it tells the owner what happened without
+            telling anyone else that the pairing exists.
+
+            Not retry-safe-by-idempotence: a sealed box is nondeterministic,
+            so a repeated post carries different bytes and there is nothing to
+            match it against. If you cannot tell whether your post landed,
+            create a new pairing.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: pairing already has a key }
+        "413":
+          description: Body exceeds 8 KiB
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: request too large }
+
+  /api/pairings/{id}:
+    get:
+      operationId: collectPairingKey
+      tags: [pairing]
+      summary: Poll a Device Pairing
+      description: |
+        The new device polls this until it stops answering `202`. One call
+        returns the sealed vault key and spends the pairing; every call after
+        that is a `404`. Of two devices polling at once exactly one gets the
+        key — reading it and deleting the row happen in one transaction — so a
+        second poll is never a replay.
+
+        The pairing has to belong to the calling account. Poll on whatever
+        interval suits you; this route is not rate limited.
+
+        **Not gated on Entitlement**, like the other two.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: |
+            The sealed vault key, exactly once. Decrypt it with the private
+            half of the one-time key this device published, and the pairing is
+            done.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ciphertext]
+                properties:
+                  ciphertext:
+                    type: string
+                    description: Exactly the bytes the unlocked device posted.
+        "202":
+          description: |
+            The unlocked device has not posted the key yet. Empty body.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: |
+            Unknown pairing, expired, already collected, or belonging to
+            another account — the same single answer `deliverPairingKey`
+            gives, for the same reason. Start a new pairing.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: not found }
 
   /api/collections/{cid}/objects:
     parameters:
