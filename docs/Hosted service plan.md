@@ -173,6 +173,23 @@ Not settled by the ticket, decided while building it:
   makes its blobs purgeable, so it is a contents mutation like any other.
   Someone who wants their data gone after lapsing asks for it to be deleted;
   what is left sitting there is ciphertext the server cannot read.
+- **`DELETE /api/blobs/{userId}/{blobId}` is deliberately not gated.** It is a
+  mutation, so the reasoning that put the vault delete behind the gate looks
+  like it should apply here too. It does not: the route removes only a
+  *staged* blob, one nothing has claimed, and a claimed blob answers `409`
+  whatever the account's Entitlement. Staged bytes do not count toward Storage
+  Usage, so the route costs the account nothing and destroys nothing it can
+  still read. Gating it would leave a lapsed account unable to clear an
+  abandoned upload. Nine routes are gated, and this is the one mutation that
+  is deliberately outside them.
+- **The clock is injected at the `subscriptions` package boundary, not at the
+  routes.** Issue #10 asks for an injected clock in the end-to-end tests.
+  `Apply` and `Record.Entitled` each take a `time.Time`, and the package tests
+  drive the whole Grace Period through it — open the window, write inside it,
+  write past it. The HTTP layer calls `time.Now()` directly, so the route-level
+  test reaches the deadline by moving `grace_until` in the database instead.
+  Nothing sleeps either way. Threading a clock through `routes` would touch
+  every harness that builds one, for coverage the package tests already give.
 
 Settled while building checkout and the portal:
 
@@ -225,6 +242,29 @@ Settled while building checkout and the portal:
   issue #11 asked for three calls and got three, so this is written down
   rather than built. Worth doing before anyone outside FUTO signs up, or the
   first time it happens.
+- **Known gap: deliveries are applied in the order they arrive, not the order
+  they happened.** Every verified delivery overwrites the record, and two
+  things follow. A delivery retried after a later one has landed rolls the
+  account back to the older state: Standard Webhooks re-signs every attempt,
+  so `webhook-timestamp` is when the attempt was *sent*, and the payload this
+  server reads carries no event time to order by. And an account that lapsed
+  and then subscribed again holds only the new subscription's id, so when
+  Polar eventually revokes the old one that delivery still matches — `Apply`
+  finds the account by its `sub`, never by the subscription id — and flips a
+  paying account to `402`. Closing either needs an orderable field off Polar's
+  subscription payload. That field is named in neither this plan nor
+  `docs/openapi.yaml`, and nobody has looked at a real delivery.
+  **Decided 2026-09-15: written down rather than fixed**, and revisited once
+  the instance has seen real Polar traffic. The MVP is FUTO people on a 100%
+  discount, where a wrongly-revoked account is a support message rather than a
+  lost payment. Whether Polar even lets one customer hold two subscriptions to
+  the same product is also unchecked.
+- **The Grace Period starts when the past-due delivery is applied**, not when
+  the payment failed. Issue #10 says "failure time plus 7 days"; the payload
+  this server reads carries no failure time, so it uses receipt time. A
+  delivery retried hours after a restart therefore opens the window late,
+  which errs toward the account rather than against it. Same missing field as
+  the bullet above.
 
 ### 5. Limits
 

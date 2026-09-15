@@ -2,9 +2,12 @@
 // the Entitlement question: may this account write right now.
 //
 // It is the one seam between Polar and everything that gates a write. The
-// record is written only by the webhook handler and read by the gate, so a
-// sync request never makes an outbound call — a Polar outage cannot stop
-// people syncing, and Polar's latency is never on the write path.
+// subscription itself is written only by the webhook handler and read by the
+// gate, so a sync request never makes an outbound call — a Polar outage cannot
+// stop people syncing, and Polar's latency is never on the write path. The
+// checkout and portal routes write one more thing to the same row, the Polar
+// customer id, without touching any of the subscription fields (see
+// SaveCustomerID).
 package subscriptions
 
 import (
@@ -33,15 +36,18 @@ const (
 	StateNone = "none"
 )
 
-// Record is one account's subscription as the last webhook left it.
+// Record is one account's subscription as the last webhook left it, narrowed
+// to what the Entitlement gate, the billing status, and the /dev card read.
+// The row carries more than this — the Polar customer and subscription ids and
+// the current period end — which is stored for an operator reading the table
+// and has no reader in the server.
 type Record struct {
 	// State is Polar's subscription status as delivered, or StateNone for
 	// an account that has never subscribed.
-	State            string
-	CurrentPeriodEnd *time.Time
-	GraceUntil       *time.Time
-	LastEvent        string
-	UpdatedAt        time.Time
+	State      string
+	GraceUntil *time.Time
+	LastEvent  string
+	UpdatedAt  time.Time
 }
 
 // Entitled reports whether the account may write. Active and trialing pay
@@ -67,23 +73,22 @@ func (r Record) Entitled(now time.Time) bool {
 // primary-key lookup.
 func Of(ctx context.Context, database *db.DB, userID string) (Record, error) {
 	var record Record
-	var currentPeriodEnd, graceUntil db.NullTime
+	var graceUntil db.NullTime
 	var updatedAt db.Time
 	// last_event is null on a row a checkout created before any delivery
 	// arrived, and empty is how the rest of the server already spells "no
 	// webhook received yet".
 	var lastEvent sql.NullString
 	err := database.QueryRowContext(ctx,
-		`SELECT state, current_period_end, grace_until, last_event, updated_at
+		`SELECT state, grace_until, last_event, updated_at
 		 FROM subscriptions WHERE user_id = $1`, userID).
-		Scan(&record.State, &currentPeriodEnd, &graceUntil, &lastEvent, &updatedAt)
+		Scan(&record.State, &graceUntil, &lastEvent, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Record{State: StateNone}, nil
 	}
 	if err != nil {
 		return Record{}, err
 	}
-	record.CurrentPeriodEnd = nullableTime(currentPeriodEnd)
 	record.GraceUntil = nullableTime(graceUntil)
 	record.LastEvent = lastEvent.String
 	record.UpdatedAt = updatedAt.Time

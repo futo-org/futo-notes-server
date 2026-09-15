@@ -144,14 +144,15 @@ func (h quotaHarness) sendWebhook(t *testing.T, deliveryID string, at time.Time,
 
 // subscriptionEvent is a Polar-shaped delivery body for externalID.
 func subscriptionEvent(eventType, status, externalID string) string {
-	body, err := json.Marshal(map[string]any{
-		"type": eventType,
-		"data": map[string]any{
-			"id":                 "sub_1",
-			"status":             status,
-			"customer_id":        "cus_1",
-			"current_period_end": "2026-10-09T12:00:00Z",
-			"customer":           map[string]any{"external_id": externalID},
+	periodEnd := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
+	body, err := polar.Delivery(polar.Event{
+		Type: eventType,
+		Subscription: polar.Subscription{
+			ID:                 "sub_1",
+			Status:             status,
+			CustomerID:         "cus_1",
+			ExternalCustomerID: externalID,
+			CurrentPeriodEnd:   &periodEnd,
 		},
 	})
 	if err != nil {

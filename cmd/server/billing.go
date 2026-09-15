@@ -23,7 +23,7 @@ import (
 // Off the hosted service it is the identity function. A self-hosted server
 // sells nothing, so it gates nothing and takes no extra read per request.
 func requireEntitlement(cfg config.Config, database *db.DB) func(http.HandlerFunc) http.HandlerFunc {
-	if cfg.AuthMode != "oidc" {
+	if !cfg.Hosted() {
 		return func(next http.HandlerFunc) http.HandlerFunc { return next }
 	}
 	return func(next http.HandlerFunc) http.HandlerFunc {

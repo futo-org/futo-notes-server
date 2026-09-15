@@ -46,24 +46,24 @@ func newAccount(t *testing.T, database *db.DB) string {
 
 var noon = time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC)
 
-// delivery builds a Polar-shaped body for the account's sub and applies it,
+// periodEnd is the current period end every delivery in these tests carries.
+var periodEnd = time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
+
+// apply builds a Polar-shaped delivery for the account's sub and applies it,
 // returning whether an account matched.
 func apply(t *testing.T, database *db.DB, eventType, status, externalID string, at time.Time) bool {
 	t.Helper()
-	body, err := json.Marshal(map[string]any{
-		"type": eventType,
-		"data": map[string]any{
-			"id":                 "sub_1",
-			"status":             status,
-			"customer_id":        "cus_1",
-			"current_period_end": "2026-10-09T12:00:00Z",
-			"customer":           map[string]any{"external_id": externalID},
+	event := polar.Event{
+		Type: eventType,
+		Subscription: polar.Subscription{
+			ID:                 "sub_1",
+			Status:             status,
+			CustomerID:         "cus_1",
+			ExternalCustomerID: externalID,
+			CurrentPeriodEnd:   &periodEnd,
 		},
-	})
-	if err != nil {
-		t.Fatal(err)
 	}
-	event, err := polar.ParseEvent(body)
+	body, err := polar.Delivery(event)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,6 +72,20 @@ func apply(t *testing.T, database *db.DB, eventType, status, externalID string, 
 		t.Fatal(err)
 	}
 	return matched
+}
+
+// storedPeriodEnd reads current_period_end straight off the row. Issue #10
+// asks for the column and Apply writes it, but nothing in the server reads it
+// back, so this is what keeps the write honest.
+func storedPeriodEnd(t *testing.T, database *db.DB, userID string) db.NullTime {
+	t.Helper()
+	var stored db.NullTime
+	if err := database.QueryRowContext(context.Background(),
+		`SELECT current_period_end FROM subscriptions WHERE user_id = $1`, userID).
+		Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	return stored
 }
 
 func recordOf(t *testing.T, database *db.DB, userID string) subscriptions.Record {
@@ -113,9 +127,8 @@ func TestAnActiveOrTrialingSubscriptionIsEntitled(t *testing.T) {
 			if !record.Entitled(noon) {
 				t.Errorf("Entitled() = false for %s", status)
 			}
-			want := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
-			if record.CurrentPeriodEnd == nil || !record.CurrentPeriodEnd.Equal(want) {
-				t.Errorf("CurrentPeriodEnd = %v, want %v", record.CurrentPeriodEnd, want)
+			if stored := storedPeriodEnd(t, database, userID); !stored.Valid || !stored.Time.Equal(periodEnd) {
+				t.Errorf("current_period_end = %v, want %v", stored, periodEnd)
 			}
 			if record.GraceUntil != nil {
 				t.Errorf("GraceUntil = %v, want unset while paid up", record.GraceUntil)

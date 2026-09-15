@@ -50,18 +50,17 @@ func TestSubscriptionsOnPostgres(t *testing.T) {
 
 	applyOnPostgres := func(t *testing.T, eventType, status string, at time.Time) {
 		t.Helper()
-		body, err := json.Marshal(map[string]any{
-			"type": eventType,
-			"data": map[string]any{
-				"id": "sub_pg_1", "status": status, "customer_id": "cus_pg_1",
-				"current_period_end": "2026-10-09T12:00:00Z",
-				"customer":           map[string]any{"external_id": sub},
+		event := polar.Event{
+			Type: eventType,
+			Subscription: polar.Subscription{
+				ID:                 "sub_pg_1",
+				Status:             status,
+				CustomerID:         "cus_pg_1",
+				ExternalCustomerID: sub,
+				CurrentPeriodEnd:   &periodEnd,
 			},
-		})
-		if err != nil {
-			t.Fatal(err)
 		}
-		event, err := polar.ParseEvent(body)
+		body, err := polar.Delivery(event)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -82,9 +81,8 @@ func TestSubscriptionsOnPostgres(t *testing.T) {
 	if !record.Entitled(noon) {
 		t.Fatalf("Entitled() = false after an active event; record = %+v", record)
 	}
-	if record.CurrentPeriodEnd == nil ||
-		!record.CurrentPeriodEnd.Equal(time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)) {
-		t.Fatalf("CurrentPeriodEnd = %v", record.CurrentPeriodEnd)
+	if stored := storedPeriodEnd(t, database, userID); !stored.Valid || !stored.Time.Equal(periodEnd) {
+		t.Fatalf("current_period_end = %v, want %v", stored, periodEnd)
 	}
 
 	applyOnPostgres(t, "subscription.past_due", "past_due", noon)

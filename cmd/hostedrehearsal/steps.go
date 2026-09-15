@@ -316,6 +316,9 @@ func (s *session) startCheckout() error {
 	if request["discount_id"] != discountID {
 		return fmt.Errorf("checkout discount_id = %v, want %s", request["discount_id"], discountID)
 	}
+	// Spelled out rather than shared with the server, on purpose: the point of
+	// the check is that the URL the server publishes to Polar matches one
+	// written down independently. The server's own constant is unexported.
 	wantSuccess := s.server.origin + "/billing/done"
 	if request["success_url"] != wantSuccess {
 		return fmt.Errorf("checkout success_url = %v, want %s", request["success_url"], wantSuccess)
@@ -545,15 +548,15 @@ func (s *session) writeObject() (*http.Response, []byte, error) {
 // only way the subscription record ever changes.
 func (s *session) deliverSubscription(eventType, status string) error {
 	now := time.Now()
-	periodEnd := now.Add(30 * 24 * time.Hour).UTC().Format(time.RFC3339)
-	delivery, err := json.Marshal(map[string]any{
-		"type": eventType,
-		"data": map[string]any{
-			"id":                 "polar_sub_rehearsal",
-			"status":             status,
-			"customer_id":        "polar_cus_1",
-			"current_period_end": periodEnd,
-			"customer":           map[string]any{"external_id": personSub},
+	periodEnd := now.Add(30 * 24 * time.Hour).UTC()
+	delivery, err := polar.Delivery(polar.Event{
+		Type: eventType,
+		Subscription: polar.Subscription{
+			ID:                 "polar_sub_rehearsal",
+			Status:             status,
+			CustomerID:         "polar_cus_1",
+			ExternalCustomerID: personSub,
+			CurrentPeriodEnd:   &periodEnd,
 		},
 	})
 	if err != nil {
@@ -624,23 +627,22 @@ func (s *session) do(method, path string, body []byte) (*http.Response, []byte, 
 }
 
 func (s *session) getJSON(path string, into any) error {
-	response, body, err := s.do(http.MethodGet, path, nil)
-	if err != nil {
-		return err
-	}
-	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("GET %s = %d %q, want 200", path, response.StatusCode, truncate(body))
-	}
-	return json.Unmarshal(body, into)
+	return s.requestJSON(http.MethodGet, path, into)
 }
 
 func (s *session) postJSON(path string, into any) error {
-	response, body, err := s.do(http.MethodPost, path, nil)
+	return s.requestJSON(http.MethodPost, path, into)
+}
+
+// requestJSON calls a route that has to answer 200 with a JSON body, which is
+// every route the walk reads rather than asserts a refusal from.
+func (s *session) requestJSON(method, path string, into any) error {
+	response, body, err := s.do(method, path, nil)
 	if err != nil {
 		return err
 	}
 	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("POST %s = %d %q, want 200", path, response.StatusCode, truncate(body))
+		return fmt.Errorf("%s %s = %d %q, want 200", method, path, response.StatusCode, truncate(body))
 	}
 	return json.Unmarshal(body, into)
 }

@@ -98,31 +98,27 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("FUTO_NOTES_PASSWORD or FUTO_NOTES_PASSWORD_HASH is required when AUTH_MODE=password")
 		}
 	}
-	if cfg.AuthMode == "oidc" {
+	if cfg.Hosted() {
+		// Named in one table so the boot failure lists every missing value
+		// at once rather than one per restart.
+		required := []struct {
+			name  string
+			value string
+		}{
+			{"OIDC_ISSUER", cfg.OIDCIssuer},
+			{"OIDC_CLIENT_ID", cfg.OIDCClientID},
+			{"OIDC_CLIENT_SECRET", cfg.OIDCClientSecret},
+			{"OIDC_REDIRECT_URI", cfg.OIDCRedirectURI},
+			{"POLAR_BASE_URL", cfg.PolarBaseURL},
+			{"POLAR_ACCESS_TOKEN", cfg.PolarAccessToken},
+			{"POLAR_PRODUCT_ID", cfg.PolarProductID},
+			{"POLAR_WEBHOOK_SECRET", cfg.PolarWebhookSecret},
+		}
 		var missing []string
-		if cfg.OIDCIssuer == "" {
-			missing = append(missing, "OIDC_ISSUER")
-		}
-		if cfg.OIDCClientID == "" {
-			missing = append(missing, "OIDC_CLIENT_ID")
-		}
-		if cfg.OIDCClientSecret == "" {
-			missing = append(missing, "OIDC_CLIENT_SECRET")
-		}
-		if cfg.OIDCRedirectURI == "" {
-			missing = append(missing, "OIDC_REDIRECT_URI")
-		}
-		if cfg.PolarBaseURL == "" {
-			missing = append(missing, "POLAR_BASE_URL")
-		}
-		if cfg.PolarAccessToken == "" {
-			missing = append(missing, "POLAR_ACCESS_TOKEN")
-		}
-		if cfg.PolarProductID == "" {
-			missing = append(missing, "POLAR_PRODUCT_ID")
-		}
-		if cfg.PolarWebhookSecret == "" {
-			missing = append(missing, "POLAR_WEBHOOK_SECRET")
+		for _, setting := range required {
+			if setting.value == "" {
+				missing = append(missing, setting.name)
+			}
 		}
 		if len(missing) > 0 {
 			return Config{}, fmt.Errorf("%s required when AUTH_MODE=oidc", strings.Join(missing, ", "))
@@ -204,6 +200,13 @@ func getDefault(key, fallback string) string {
 	}
 	return fallback
 }
+
+// Hosted reports whether this is the hosted service rather than a self-hosted
+// server. Hosted mode is AUTH_MODE=oidc plus Polar, and oidc mode will not
+// boot without Polar, so the auth mode is the whole test — named here so the
+// concept has one spelling rather than a string comparison at every site that
+// asks.
+func (c Config) Hosted() bool { return c.AuthMode == "oidc" }
 
 // AllowsEmailDomain reports whether an identity with this email address may
 // sign in. An unset HOSTED_ALLOWED_EMAIL_DOMAINS admits everyone the

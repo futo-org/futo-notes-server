@@ -541,10 +541,11 @@ paths:
 
         Answers with a Polar checkout URL for the app to open in a browser —
         system browser, auth sheet, or webview, whichever the client picks.
-        The person pays there, and Polar returns the browser to a page on this
-        server that says to go back to the app. Nothing on this route tells
-        the app whether payment succeeded: Entitlement moves only when Polar's
-        webhook lands, so the app re-reads `GET /api/billing` afterwards.
+        The person pays there, and Polar returns the browser to `billingDone`
+        (`GET /billing/done`) on this server, which says to go back to the
+        app. Nothing on this route tells the app whether payment succeeded:
+        Entitlement moves only when Polar's webhook lands, so the app re-reads
+        `GET /api/billing` afterwards.
 
         The account is registered with Polar the first time it reaches this
         route or the portal, under its OIDC `sub` as Polar's external customer
@@ -640,6 +641,37 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /billing/done:
+    get:
+      operationId: billingDone
+      tags: [billing]
+      security: []
+      summary: The page Polar returns the browser to (OIDC mode only)
+      description: |
+        Mounted only when `AUTH_MODE=oidc`. A self-hosted server answers `404`.
+
+        This is the `success_url` every checkout carries, derived from
+        `OIDC_REDIRECT_URI` — the only public origin the server is ever told.
+        Polar sends the browser here once payment goes through, and the
+        browser holds no app session, so the route sits outside authentication
+        like the OIDC callback does.
+
+        It is an HTML "go back to the app" page and says nothing about the
+        account on purpose: Entitlement moves when Polar's webhook lands, not
+        when the browser arrives here, so the page cannot honestly report
+        success. **The app finds out by re-reading `GET /api/billing`.**
+
+        Not a route a client calls directly. It is documented because it is
+        part of the checkout contract: an app that intercepts the browser
+        needs to know which URL ends the flow.
+      responses:
+        "200":
+          description: The "go back to the app" page
+          content:
+            text/html:
+              schema:
+                type: string
+
   /api/billing/polar/webhook:
     post:
       operationId: polarWebhook
@@ -649,9 +681,11 @@ paths:
       description: |
         Mounted only when `AUTH_MODE=oidc`. **Polar calls this, not a client.**
 
-        It is the only writer of the subscription record, and therefore the
-        only way Entitlement changes. Truth lives locally: no sync request
-        ever calls Polar, so a Polar outage cannot stop anyone syncing.
+        It is the only writer of the subscription fields, and therefore the
+        only way Entitlement changes — the checkout and portal routes write
+        the Polar customer id to the same record and touch nothing else.
+        Truth lives locally: no sync request ever calls Polar, so a Polar
+        outage cannot stop anyone syncing.
 
         Unauthenticated by necessity — Polar holds no session — and
         authenticated in substance by a

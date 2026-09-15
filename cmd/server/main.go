@@ -58,21 +58,19 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	}
 }
 
-func handleCapability(authMode string) http.HandlerFunc {
+func handleCapability(cfg config.Config) http.HandlerFunc {
 	signup := "closed"
-	if authMode == "oidc" {
+	if cfg.Hosted() {
 		signup = "open"
 	}
 	cap := capability{
 		Name:     serverName,
 		Version:  serverVersion,
-		AuthMode: authMode,
+		AuthMode: cfg.AuthMode,
 		Signup:   signup,
-		// Hosted mode is oidc plus Polar, and oidc mode will not boot
-		// without Polar, so the auth mode is what says whether this server
-		// sells subscriptions. The app shows the sign-up path when it sees
-		// both.
-		Billing: authMode == "oidc",
+		// Only the hosted service sells subscriptions. The app shows the
+		// sign-up path when it sees both this and an open signup.
+		Billing: cfg.Hosted(),
 		MutationIDs: mutationIDs{
 			Supported:                true,
 			Required:                 false,
@@ -107,7 +105,7 @@ func routes(cfg config.Config, database *db.DB, blobStore *blobs.Store, eventHub
 	// refuses a write for being over it. The per-blob cap comes from the Plan
 	// everywhere, where the one plan carries the value the server used as a
 	// constant.
-	quotaEnforced := cfg.AuthMode == "oidc"
+	quotaEnforced := cfg.Hosted()
 
 	// Entitlement gates the routes that mutate collection contents or stage
 	// blobs, plus the vault key write and the vault delete. Reads, pulls,
@@ -127,7 +125,7 @@ func routes(cfg config.Config, database *db.DB, blobStore *blobs.Store, eventHub
 		api.HandleFunc("POST /api/auth/password/login",
 			rateLimited(auth.NewRateLimiter(), handlePasswordLogin(cfg, database)))
 	}
-	if cfg.AuthMode == "oidc" {
+	if cfg.Hosted() {
 		// One Polar client per server, used by the checkout and portal
 		// routes only; nothing on the sync path ever calls Polar.
 		polarClient := &polar.Client{BaseURL: cfg.PolarBaseURL, AccessToken: cfg.PolarAccessToken}
@@ -170,11 +168,11 @@ func routes(cfg config.Config, database *db.DB, blobStore *blobs.Store, eventHub
 	})
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /{$}", handleCapability(cfg.AuthMode))
+	mux.HandleFunc("GET /{$}", handleCapability(cfg))
 	mux.HandleFunc("GET /health", handleHealth(database))
 	mux.Handle("/api/", requireAuth(cfg, database, api))
 	var polarWebhook http.HandlerFunc
-	if cfg.AuthMode == "oidc" {
+	if cfg.Hosted() {
 		// Polar authenticates with a signature over the body rather than a
 		// session, so the webhook is mounted outside requireAuth. The
 		// literal pattern takes precedence over "/api/".
@@ -190,8 +188,16 @@ func routes(cfg config.Config, database *db.DB, blobStore *blobs.Store, eventHub
 		registerDevJobHandlers(mux, database, blobStore)
 		mux.HandleFunc("POST /dev/plan", handleDevPlan(database))
 		if polarWebhook != nil {
-			mux.HandleFunc("POST /dev/subscription", handleDevSubscription(cfg, database, polarWebhook))
-			mux.HandleFunc("GET /dev/subscription/last", handleDevLastWebhook(database))
+			// These two act for the signed-in account, so they go behind the
+			// same middleware /api/ uses rather than reading the session
+			// cookie themselves. Two patterns because one is the exact path
+			// and the other is everything under it.
+			devAPI := http.NewServeMux()
+			devAPI.HandleFunc("POST /dev/subscription", handleDevSubscription(cfg, database, polarWebhook))
+			devAPI.HandleFunc("GET /dev/subscription/last", handleDevLastWebhook(database))
+			authenticated := requireAuth(cfg, database, devAPI)
+			mux.Handle("/dev/subscription", authenticated)
+			mux.Handle("/dev/subscription/", authenticated)
 		}
 		slog.Info("dev UI enabled", "path", "/dev")
 	}
@@ -240,7 +246,7 @@ func main() {
 	go jobs.Run(context.Background(), database, blobStore, jobs.DefaultSchedule, cfg.BlobGCEnabled)
 
 	var provider *oidc.Provider
-	if cfg.AuthMode == "oidc" {
+	if cfg.Hosted() {
 		discoverCtx, discoverCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		provider, err = oidc.Discover(discoverCtx, cfg.OIDCIssuer)
 		discoverCancel()

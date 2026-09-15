@@ -15,6 +15,7 @@ import (
 
 	"futo-notes-server/internal/auth"
 	"futo-notes-server/internal/collections"
+	"futo-notes-server/internal/config"
 )
 
 var (
@@ -46,9 +47,11 @@ func TestResponseWireFormat(t *testing.T) {
 		write func(w http.ResponseWriter)
 		want  string
 	}{{
-		name:  "capability",
-		write: func(w http.ResponseWriter) { handleCapability("password")(w, httptest.NewRequest("GET", "/", nil)) },
-		want:  `{"name":"futo-notes","version":"0.1.0","auth_mode":"password","signup":"closed","billing":false,"mutation_ids":{"supported":true,"required":false,"retention_days":30,"successful_create_outcomes":"durable"}}`,
+		name: "capability",
+		write: func(w http.ResponseWriter) {
+			handleCapability(config.Config{AuthMode: "password"})(w, httptest.NewRequest("GET", "/", nil))
+		},
+		want: `{"name":"futo-notes","version":"0.1.0","auth_mode":"password","signup":"closed","billing":false,"mutation_ids":{"supported":true,"required":false,"retention_days":30,"successful_create_outcomes":"durable"}}`,
 	}, {
 		name:  "health ok",
 		write: func(w http.ResponseWriter) { writeJSON(w, 200, healthStatus{Status: "ok", DB: "connected"}) },

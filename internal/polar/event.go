@@ -80,3 +80,21 @@ func ParseEvent(body []byte) (Event, error) {
 		},
 	}, nil
 }
+
+// Delivery builds the bytes Polar would send for one subscription event. It
+// encodes through the same wire shape ParseEvent decodes, so a field that
+// moves on one side cannot quietly stop being produced on the other.
+//
+// Like Sign, it exists so the tests, the /dev card, and the hosted rehearsal
+// put a real delivery through the real route rather than each keeping its own
+// copy of Polar's JSON.
+func Delivery(event Event) ([]byte, error) {
+	var wire wireEvent
+	wire.Type = event.Type
+	wire.Data.ID = event.Subscription.ID
+	wire.Data.Status = event.Subscription.Status
+	wire.Data.CustomerID = event.Subscription.CustomerID
+	wire.Data.CurrentPeriodEnd = event.Subscription.CurrentPeriodEnd
+	wire.Data.Customer.ExternalID = event.Subscription.ExternalCustomerID
+	return json.Marshal(wire)
+}

@@ -6,6 +6,10 @@ want to run the server, see the [README](../README.md).
 
 ## Testing
 
+`go.mod` requires Go 1.27. On an older local toolchain every `go` command in
+this file needs `GOTOOLCHAIN=auto` in front of it, or it stops with
+`go.mod requires go >= 1.27.0` and does nothing. CI sets it globally.
+
 `go test ./...` runs the unit tests and the SQLite application lifecycle test
 without external dependencies. Postgres-backed tests also run when
 `OBJECTS_TEST_DATABASE_URL`, `EVENTS_TEST_DATABASE_URL`,
@@ -26,7 +30,7 @@ OBJECTS_TEST_DATABASE_URL=$URL EVENTS_TEST_DATABASE_URL=$URL \
 JOBS_TEST_DATABASE_URL=$URL BLOBS_TEST_DATABASE_URL=$URL \
 USAGE_TEST_DATABASE_URL=$URL SUBSCRIPTIONS_TEST_DATABASE_URL=$URL \
 SERVER_TEST_DATABASE_URL=$URL MIGRATION_TEST_DATABASE_URL=$URL \
-go test -race -count=1 -p 1 ./...
+GOTOOLCHAIN=auto go test -race -count=1 -p 1 ./...
 ```
 
 CI runs the Go suite with `-race`. Fuzz targets are also available, for example
@@ -77,11 +81,12 @@ its checkout card calls the real `POLAR_BASE_URL`, so point that at the sandbox
 before pressing anything there.
 
 To walk the whole hosted path without any credentials at all, run the hosted
-rehearsal. It boots the shipped binary from the deployed environment contract
-against a scratch Postgres, with local stand-ins for Zitadel and Polar, and
-checks the sequence a person actually goes through — hand-off login, the
-email-domain allowlist, a 402 write, a checkout carrying the discount, a
-signed webhook delivery, an accepted write, usage, the quota, and the lapse:
+rehearsal. It builds the server from the working tree and boots it from the
+deployed environment contract against a scratch Postgres, with local stand-ins
+for Zitadel and Polar, and checks the sequence a person actually goes through
+— hand-off login, the email-domain allowlist, a 402 write, a checkout carrying
+the discount, a signed webhook delivery, an accepted write, usage, the quota,
+and the lapse:
 
 ```bash
 docker compose up -d postgres

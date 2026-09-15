@@ -222,8 +222,9 @@ HOSTED_REHEARSAL_DATABASE_URL='postgres://futo_notes:futo_notes@localhost:5433/h
   GOTOOLCHAIN=auto go run ./cmd/hostedrehearsal
 ```
 
-It empties the scratch database, boots the shipped binary from exactly the
-contract above, and checks sixteen things in the order a person meets them:
+It empties the scratch database, builds the server from the working tree and
+boots it from exactly the contract above, and checks sixteen things in the
+order a person meets them:
 the capability document, a Login Hand-off login, a spent ticket answering 404,
 a refused off-domain login, billing before paying, an ungated Vault claim, a
 402 on a write, a checkout carrying the product and the discount and the

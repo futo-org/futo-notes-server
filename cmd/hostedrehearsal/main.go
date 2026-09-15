@@ -2,10 +2,11 @@
 // server process on localhost, before that path is pointed at a real Zitadel
 // application and a real Polar organization.
 //
-// What it proves that the unit tests do not: the shipped binary boots from
-// the documented hosted environment contract, applies its migrations to a
-// Postgres database, discovers its identity provider at startup, mounts the
-// hosted routes, and then answers the exact sequence a person goes through —
+// What it proves that the unit tests do not: a server built from the working
+// tree boots from the documented hosted environment contract, applies its
+// migrations to a Postgres database, discovers its identity provider at
+// startup, mounts the hosted routes, and then answers the exact sequence a
+// person goes through —
 // Login Hand-off, the email-domain allowlist, a refused write, a checkout, a
 // signed Polar delivery, an accepted write, and billing status with usage.
 //
@@ -28,7 +29,6 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
-	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -40,6 +40,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"futo-notes-server/internal/config"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
@@ -62,18 +64,20 @@ const (
 	// allowedDomain is what HOSTED_ALLOWED_EMAIL_DOMAINS is set to, matching
 	// the internal MVP's futo.org gate.
 	allowedDomain = "futo.org"
+
+	// port is this project's local development port. The rehearsal stops
+	// rather than move to another one, the same way the rest of local
+	// development does.
+	port = 3005
 )
 
 func main() {
-	port := flag.Int("port", 3005, "port to run the server under test on")
-	flag.Parse()
-
 	databaseURL := os.Getenv("HOSTED_REHEARSAL_DATABASE_URL")
 	if databaseURL == "" {
 		fail("HOSTED_REHEARSAL_DATABASE_URL is required, and must name a scratch Postgres database this run may erase")
 	}
 
-	if err := run(databaseURL, *port); err != nil {
+	if err := run(databaseURL); err != nil {
 		fail(err.Error())
 	}
 	fmt.Println("\nhosted rehearsal passed")
@@ -84,8 +88,8 @@ func fail(message string) {
 	os.Exit(1)
 }
 
-func run(databaseURL string, port int) error {
-	if err := freePort(port); err != nil {
+func run(databaseURL string) error {
+	if err := freePort(); err != nil {
 		return err
 	}
 	if err := resetDatabase(databaseURL); err != nil {
@@ -106,7 +110,7 @@ func run(databaseURL string, port int) error {
 	defer stopPolar()
 	step("fake Zitadel at %s, fake Polar at %s", issuer.origin, polar.origin)
 
-	server, err := startServer(databaseURL, port, issuer.origin, polar.origin)
+	server, err := startServer(databaseURL, issuer.origin, polar.origin)
 	if err != nil {
 		return err
 	}
@@ -132,9 +136,9 @@ func run(databaseURL string, port int) error {
 }
 
 // freePort refuses to start when something already holds the port, rather
-// than talking to whatever that something is. Port 3005 is this project's
-// local development port, so a stale server is the likely occupant.
-func freePort(port int) error {
+// than talking to whatever that something is. A stale development server is
+// the likely occupant.
+func freePort() error {
 	address := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
@@ -184,7 +188,7 @@ type serverProcess struct {
 // It runs in an empty working directory on purpose. config.Load reads a .env
 // file from the process's directory, and a rehearsal that silently inherited
 // a developer's .env would not be testing the contract this documents.
-func startServer(databaseURL string, port int, issuerOrigin, polarOrigin string) (*serverProcess, error) {
+func startServer(databaseURL, issuerOrigin, polarOrigin string) (*serverProcess, error) {
 	workDir, err := os.MkdirTemp("", "hosted-rehearsal-*")
 	if err != nil {
 		return nil, err
@@ -218,7 +222,7 @@ func startServer(databaseURL string, port int, issuerOrigin, polarOrigin string)
 		"OIDC_ISSUER="+issuerOrigin,
 		"OIDC_CLIENT_ID="+clientID,
 		"OIDC_CLIENT_SECRET="+clientSecret,
-		"OIDC_REDIRECT_URI="+origin+"/api/auth/oidc/callback",
+		"OIDC_REDIRECT_URI="+origin+config.OIDCCallbackPath,
 		"POLAR_BASE_URL="+polarOrigin,
 		"POLAR_ACCESS_TOKEN="+accessToken,
 		"POLAR_PRODUCT_ID="+productID,

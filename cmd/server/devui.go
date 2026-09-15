@@ -11,7 +11,6 @@ import (
 	"net/url"
 	"time"
 
-	"futo-notes-server/internal/auth"
 	"futo-notes-server/internal/blobs"
 	"futo-notes-server/internal/config"
 	"futo-notes-server/internal/db"
@@ -104,6 +103,8 @@ func handleDevJob[T any](run func(context.Context) (T, error)) http.HandlerFunc 
 // webhook secret, and puts it through the real webhook route. Signature
 // verification runs for real, so the card demonstrates the whole path rather
 // than a shortcut around it. Dev UI only, and only in hosted mode.
+//
+// Mounted behind requireAuth, so sessionFrom holds the account it acts for.
 func handleDevSubscription(cfg config.Config, database *db.DB, webhook http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
@@ -119,25 +120,22 @@ func handleDevSubscription(cfg config.Config, database *db.DB, webhook http.Hand
 			return
 		}
 
-		session, ok := devSession(w, r, database)
-		if !ok {
-			return
-		}
 		var sub string
 		if err := database.QueryRowContext(r.Context(),
-			`SELECT sub FROM users WHERE id = $1`, session.User.ID).Scan(&sub); err != nil {
+			`SELECT sub FROM users WHERE id = $1`, sessionFrom(r).User.ID).Scan(&sub); err != nil {
 			serverError(w, r, "reading the signed-in account's sub", err)
 			return
 		}
 		now := time.Now()
-		delivery, err := json.Marshal(map[string]any{
-			"type": body.Type,
-			"data": map[string]any{
-				"id":                 "dev_subscription",
-				"status":             body.Status,
-				"customer_id":        "dev_customer",
-				"current_period_end": now.AddDate(0, 1, 0).UTC().Format(time.RFC3339),
-				"customer":           map[string]any{"external_id": sub},
+		periodEnd := now.AddDate(0, 1, 0).UTC()
+		delivery, err := polar.Delivery(polar.Event{
+			Type: body.Type,
+			Subscription: polar.Subscription{
+				ID:                 "dev_subscription",
+				Status:             body.Status,
+				CustomerID:         "dev_customer",
+				ExternalCustomerID: sub,
+				CurrentPeriodEnd:   &periodEnd,
 			},
 		})
 		if err != nil {
@@ -165,14 +163,10 @@ func handleDevSubscription(cfg config.Config, database *db.DB, webhook http.Hand
 
 // handleDevLastWebhook shows the delivery the subscription record was last
 // written from, so the /dev card can display what Polar actually said rather
-// than only what the server concluded. Dev UI only.
+// than only what the server concluded. Dev UI only, behind requireAuth.
 func handleDevLastWebhook(database *db.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		session, ok := devSession(w, r, database)
-		if !ok {
-			return
-		}
-		record, err := subscriptions.Of(r.Context(), database, session.User.ID)
+		record, err := subscriptions.Of(r.Context(), database, sessionFrom(r).User.ID)
 		if err != nil {
 			serverError(w, r, "reading the last Polar delivery", err)
 			return
@@ -186,24 +180,4 @@ func handleDevLastWebhook(database *db.DB) http.HandlerFunc {
 			"event":       json.RawMessage(record.LastEvent),
 		})
 	}
-}
-
-// devSession resolves the account whose session cookie is on the request.
-// The /dev routes sit outside requireAuth, so these handlers look it up.
-func devSession(w http.ResponseWriter, r *http.Request, database *db.DB) (*auth.Session, bool) {
-	cookie, err := r.Cookie("session")
-	if err != nil || cookie.Value == "" {
-		writeError(w, http.StatusUnauthorized, "sign in on /dev first")
-		return nil, false
-	}
-	session, err := auth.ValidateSession(r.Context(), database, cookie.Value)
-	if err != nil {
-		serverError(w, r, "validating the dev session", err)
-		return nil, false
-	}
-	if session == nil {
-		writeError(w, http.StatusUnauthorized, "sign in on /dev first")
-		return nil, false
-	}
-	return session, true
 }
