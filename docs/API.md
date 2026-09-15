@@ -183,14 +183,23 @@ lists them; `POST` returns the oldest, which is the one to sync against.
 
 ## Vault key material
 
-The server stores — but cannot read — the material your client needs to unlock a vault on a new device: a KDF salt, the KDF parameters, and the vault key encrypted under a password-derived key. All three are opaque to the server.
+The server stores — but cannot read — the material your client needs to unlock a vault on a new device. The vault key can be wrapped twice, and each wrapping is an **envelope** of a salt, KDF parameters, and the wrapped key:
+
+- The **password envelope** (`key_salt`, `key_kdf`, `encrypted_vault_key`) wraps the vault key under the vault password. Always present.
+- The **recovery envelope** (`recovery_key_salt`, `recovery_key_kdf`, `recovery_encrypted_vault_key`) wraps the same vault key under a generated recovery key instead. **Optional**, and the three fields are `null` together. Their absence means that vault has no recovery key: the vault password, or a device that is already unlocked, is the only way in.
+
+Every field is opaque to the server, which never sees a vault password, a recovery key, either derived key, or the vault key itself.
 
 ```
 GET $BASE/api/collections/:id/key
-    → 200 { "key": { key_salt, key_kdf, encrypted_vault_key, key_updated_at } }
+    → 200 { "key": { key_salt, key_kdf, encrypted_vault_key, key_updated_at,
+                      recovery_key_salt, recovery_key_kdf, recovery_encrypted_vault_key } }
     → 200 { "key": null }     // collection exists but no key set yet
     → 404                     // collection not found / not yours
 ```
+
+The three `recovery_*` fields are always in the response, `null` and all, so you can tell "no recovery envelope" from "old server".
+
 ```
 PUT $BASE/api/collections/:id/key
 Content-Type: application/json
@@ -199,27 +208,56 @@ Content-Type: application/json
   "key_salt": "<non-empty string>",
   "key_kdf": { "...": "..." },          // any JSON object — your KDF parameters
   "encrypted_vault_key": "<non-empty string>",
-  "previous_key_updated_at": "<opaque revision from GET/PUT>" // rotation only
+  "previous_key_updated_at": "<opaque revision from GET/PUT>", // re-wrap only
+
+  // The recovery envelope: all three, or none at all.
+  "recovery_key_salt": "<non-empty string>",
+  "recovery_key_kdf": { "...": "..." },
+  "recovery_encrypted_vault_key": "<non-empty string>"
 }
     → 200 { "key": { ... } }
-    → 409 { "error": "key conflict", "currentKey": { ... } }   // stale rotation token only
+    → 409 { "error": "key conflict", "currentKey": { ... } }   // stale revision token only
     → 400 invalid body | 404 not found
 ```
 
 The first client may claim an unset key without `previous_key_updated_at`. Retrying
 the exact same material is idempotent and returns `200` with the original
-`key_updated_at`. A **rotation** — replacing key material that already exists — must
+`key_updated_at`. A **re-wrap** — replacing key material that already exists — must
 include the current `key_updated_at` from a prior `GET` or `PUT`; the server treats it
-as an opaque revision token and rotates the material only if it still matches. A stale
+as an opaque revision token and replaces the material only if it still matches. A stale
 token returns `409` with the authoritative material in `currentKey`, allowing the
 client to resolve the conflict safely. Do not parse or synthesize the token.
 
+**Holding the current token, you may re-wrap as often as you like.** A second write is
+not a conflict; only a stale token is. That is what lets an already-unlocked device
+change the vault password or issue a new recovery key without racing a first claim. On
+a `409`, re-read, re-wrap from the token that came back, and retry.
+
+**A PUT replaces the whole of the key material, both envelopes together.** Omitting the
+`recovery_*` fields therefore **clears** the stored recovery envelope.
+
+Take that seriously if you are changing only one envelope. Changing the vault password
+re-wraps the *same* vault key, so the recovery envelope you did not send would still
+have opened the vault — dropping it destroys a working recovery door. **Send the other
+envelope back unchanged in the same request.** Same the other way round: issuing a new
+recovery key means sending the untouched password envelope alongside it.
+
+The one case where clearing is the right outcome is a client that knows nothing about
+recovery keys. A v1 client re-wrapping generates a fresh vault key, so the recovery
+envelope it omits wrapped a key that no longer exists; keeping it would leave a recovery
+door that opens nothing.
+
+A client that knows only the vault password — a v1 client, or a self-hosted server in
+password mode — simply omits the three `recovery_*` fields and is otherwise unaffected.
+Sending some but not all three is a `400`: half an envelope is a recovery door that
+cannot be opened, so the server refuses to store one.
+
 A claim that omits the token has not asked to replace anything, so losing a race to
 mint the first key is not an error: the server returns `200` with the **authoritative**
-key material, which may differ from what you sent. Adopt what you get back — one vault
-has exactly one key. The winner's key is never overwritten.
+key material, which may differ from what you sent. Adopt what you get back, recovery
+envelope included — one vault has exactly one key. The winner's key is never overwritten.
 
-> Heads-up: a successful rotation does **not** currently emit a real-time `change` event, so peers learn about it on their next poll, not instantly. Note it if you depend on instant key propagation.
+> Heads-up: a successful re-wrap does **not** currently emit a real-time `change` event, so peers learn about it on their next poll, not instantly. Note it if you depend on instant key propagation.
 
 ---
 
@@ -552,7 +590,7 @@ A minimal sync client, start to finish:
 1. `GET /` → read `auth_mode`.
 2. Log in via the matching endpoint → store the token (and/or rely on the cookie).
 3. `GET /api/collections`. If empty, `POST /api/collections` to create one. Remember its `id`.
-4. `PUT /api/collections/:id/key` once, with your salt + KDF params + password-wrapped vault key. On other devices, `GET .../key` to unlock.
+4. `PUT /api/collections/:id/key` once, with your salt + KDF params + password-wrapped vault key, plus the three `recovery_*` fields if you also wrap it under a recovery key. On other devices, `GET .../key` to unlock.
 5. Full pull: `GET /api/collections/:id/objects?sinceVersion=0`. For each row, download its blob (`GET /api/blobs/:userId/:blobId`), decrypt, apply. Set `cursor` to the highest `change_seq`.
 
 **Saving a change**

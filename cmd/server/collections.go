@@ -87,6 +87,12 @@ func isJSONObject(raw json.RawMessage) bool {
 	return len(trimmed) > 0 && trimmed[0] == '{'
 }
 
+// omittedJSON reports whether a raw field was left out or sent as null, which
+// mean the same thing on the way in: the client is not supplying that value.
+func omittedJSON(raw json.RawMessage) bool {
+	return raw == nil || string(bytes.TrimSpace(raw)) == "null"
+}
+
 func handlePutCollectionKey(database *db.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
@@ -94,6 +100,10 @@ func handlePutCollectionKey(database *db.DB) http.HandlerFunc {
 			KeyKDF               json.RawMessage `json:"key_kdf"`
 			EncryptedVaultKey    *string         `json:"encrypted_vault_key"`
 			PreviousKeyUpdatedAt *string         `json:"previous_key_updated_at"`
+
+			RecoveryKeySalt           *string         `json:"recovery_key_salt"`
+			RecoveryKeyKDF            json.RawMessage `json:"recovery_key_kdf"`
+			RecoveryEncryptedVaultKey *string         `json:"recovery_encrypted_vault_key"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid json")
@@ -116,10 +126,44 @@ func handlePutCollectionKey(database *db.DB) http.HandlerFunc {
 			return
 		}
 
+		// The recovery envelope is optional, but it is one envelope: a stored
+		// half would be a recovery door that cannot be opened. Either all three
+		// fields arrive or none do, and omitting them clears any stored
+		// envelope, because the material a client sends replaces the material
+		// that was there.
+		haveSalt := body.RecoveryKeySalt != nil
+		haveKDF := !omittedJSON(body.RecoveryKeyKDF)
+		haveVaultKey := body.RecoveryEncryptedVaultKey != nil
+		hasRecovery := haveSalt && haveKDF && haveVaultKey
+		if !hasRecovery && (haveSalt || haveKDF || haveVaultKey) {
+			writeError(w, http.StatusBadRequest,
+				"recovery_key_salt, recovery_key_kdf, and recovery_encrypted_vault_key must be sent together")
+			return
+		}
+		if hasRecovery {
+			if *body.RecoveryKeySalt == "" {
+				writeError(w, http.StatusBadRequest, "recovery_key_salt must be non-empty when present")
+				return
+			}
+			if *body.RecoveryEncryptedVaultKey == "" {
+				writeError(w, http.StatusBadRequest, "recovery_encrypted_vault_key must be non-empty when present")
+				return
+			}
+			if !isJSONObject(body.RecoveryKeyKDF) {
+				writeError(w, http.StatusBadRequest, "recovery_key_kdf must be an object")
+				return
+			}
+		}
+
 		in := collections.KeyInput{
 			KeySalt:           *body.KeySalt,
 			KeyKDF:            body.KeyKDF,
 			EncryptedVaultKey: *body.EncryptedVaultKey,
+		}
+		if hasRecovery {
+			in.RecoveryKeySalt = body.RecoveryKeySalt
+			in.RecoveryKeyKDF = body.RecoveryKeyKDF
+			in.RecoveryEncryptedVaultKey = body.RecoveryEncryptedVaultKey
 		}
 		outcome, key, err := collections.PutKey(r.Context(), database,
 			sessionFrom(r).User.ID, r.PathValue("id"), in, body.PreviousKeyUpdatedAt)

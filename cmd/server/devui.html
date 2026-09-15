@@ -158,15 +158,15 @@ const endpoints = [
     pathFor: v => `/api/collections/${encodeURIComponent(v)}`,
   },
   {
-    method: 'GET', path: '/api/collections/:id/key', desc: 'vault key material; {"key": null} before first claim',
+    method: 'GET', path: '/api/collections/:id/key', desc: 'vault key material; {"key": null} before first claim, recovery_* null when there is no recovery envelope',
     input: { type: 'text', placeholder: 'collection id' },
     pathFor: v => `/api/collections/${encodeURIComponent(v)}/key`,
   },
   {
-    method: 'PUT', path: '/api/collections/:id/key', desc: 'claim or rotate key material; add previous_key_updated_at to rotate',
+    method: 'PUT', path: '/api/collections/:id/key', desc: 'claim or re-wrap key material; add previous_key_updated_at from the GET above to re-wrap. The recovery_* fields are the optional recovery envelope: delete all three to send a v1 password-only body, which also clears the recovery envelope',
     input: { type: 'text', placeholder: 'collection id' },
     pathFor: v => `/api/collections/${encodeURIComponent(v)}/key`,
-    rawBody: '{"key_salt": "c2FsdA", "key_kdf": {"name": "scrypt"}, "encrypted_vault_key": "d3JhcHBlZA"}',
+    rawBody: '{"key_salt": "c2FsdA", "key_kdf": {"kdf": "argon2id"}, "encrypted_vault_key": "d3JhcHBlZA", "recovery_key_salt": "cnNhbHQ", "recovery_key_kdf": {"kdf": "hkdf-sha256"}, "recovery_encrypted_vault_key": "cndyYXBwZWQ"}',
   },
   {
     method: 'POST', path: '/api/blobs', desc: 'stage a blob: pick a file, get back its storage key; no file sends an empty body (400)',

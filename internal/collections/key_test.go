@@ -225,3 +225,179 @@ func TestPutKeyConcurrentRotationsFromSameToken(t *testing.T) {
 		}
 	}
 }
+
+// ptr is the terse way to build the optional recovery fields in a table.
+func ptr(s string) *string { return &s }
+
+// recoveryInput is keyInput plus the second envelope, the shape a client that
+// knows the Recovery Key sends.
+func recoveryInput(suffix string) collections.KeyInput {
+	in := keyInput(suffix)
+	in.RecoveryKeySalt = ptr("recovery-salt-" + suffix)
+	in.RecoveryKeyKDF = []byte(`{"name":"hkdf-sha256"}`)
+	in.RecoveryEncryptedVaultKey = ptr("recovery-wrapped-" + suffix)
+	return in
+}
+
+func assertRecovery(t *testing.T, what string, got *collections.KeyMaterial, wantSuffix string) {
+	t.Helper()
+	if got == nil {
+		t.Fatalf("%s: no key material", what)
+	}
+	if got.RecoveryKeySalt == nil || got.RecoveryEncryptedVaultKey == nil {
+		t.Fatalf("%s: recovery envelope is absent, want the %q one", what, wantSuffix)
+	}
+	if *got.RecoveryKeySalt != "recovery-salt-"+wantSuffix {
+		t.Fatalf("%s: recovery_key_salt = %q, want %q", what, *got.RecoveryKeySalt, "recovery-salt-"+wantSuffix)
+	}
+	if *got.RecoveryEncryptedVaultKey != "recovery-wrapped-"+wantSuffix {
+		t.Fatalf("%s: recovery_encrypted_vault_key = %q, want %q",
+			what, *got.RecoveryEncryptedVaultKey, "recovery-wrapped-"+wantSuffix)
+	}
+	if string(got.RecoveryKeyKDF) != `{"name":"hkdf-sha256"}` {
+		t.Fatalf("%s: recovery_key_kdf = %s", what, got.RecoveryKeyKDF)
+	}
+}
+
+func assertNoRecovery(t *testing.T, what string, got *collections.KeyMaterial) {
+	t.Helper()
+	if got == nil {
+		t.Fatalf("%s: no key material", what)
+	}
+	if got.RecoveryKeySalt != nil || got.RecoveryEncryptedVaultKey != nil || got.RecoveryKeyKDF != nil {
+		t.Fatalf("%s: recovery envelope = %v/%s/%v, want all absent",
+			what, got.RecoveryKeySalt, got.RecoveryKeyKDF, got.RecoveryEncryptedVaultKey)
+	}
+}
+
+// A client that knows the Recovery Key stores both envelopes at once, and both
+// come back from a later read.
+func TestPutKeyStoresBothEnvelopes(t *testing.T) {
+	ctx, database, userID, id := keyTestCollection(t)
+
+	outcome, claimed, err := collections.PutKey(ctx, database, userID, id, recoveryInput("one"), nil)
+	if err != nil || outcome != collections.PutKeyOK {
+		t.Fatalf("claim = %v, %v", outcome, err)
+	}
+	assertRecovery(t, "claim", claimed, "one")
+
+	_, stored, err := collections.GetKey(ctx, database, userID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRecovery(t, "read back", stored, "one")
+	if stored.EncryptedVaultKey != "wrapped-one" {
+		t.Fatalf("password envelope = %q, want %q", stored.EncryptedVaultKey, "wrapped-one")
+	}
+}
+
+// A v1 client sends only the password envelope. That is not an error and not a
+// half-written row: the recovery columns stay NULL and read back absent.
+func TestPutKeyWithoutARecoveryEnvelopeLeavesItAbsent(t *testing.T) {
+	ctx, database, userID, id := keyTestCollection(t)
+
+	outcome, claimed, err := collections.PutKey(ctx, database, userID, id, keyInput("one"), nil)
+	if err != nil || outcome != collections.PutKeyOK {
+		t.Fatalf("claim = %v, %v", outcome, err)
+	}
+	assertNoRecovery(t, "claim", claimed)
+
+	_, stored, err := collections.GetKey(ctx, database, userID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertNoRecovery(t, "read back", stored)
+}
+
+// The re-wrap: an unlocked client holding the current revision replaces both
+// envelopes in one write, whether it changed the Vault Password, the Recovery
+// Key, or both.
+func TestPutKeyRewrapReplacesBothEnvelopes(t *testing.T) {
+	ctx, database, userID, id := keyTestCollection(t)
+
+	_, claimed, err := collections.PutKey(ctx, database, userID, id, recoveryInput("one"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := token(t, claimed)
+
+	outcome, rewrapped, err := collections.PutKey(ctx, database, userID, id, recoveryInput("two"), &current)
+	if err != nil || outcome != collections.PutKeyOK {
+		t.Fatalf("re-wrap = %v, %v", outcome, err)
+	}
+	assertRecovery(t, "re-wrap", rewrapped, "two")
+	if rewrapped.EncryptedVaultKey != "wrapped-two" {
+		t.Fatalf("password envelope = %q, want %q", rewrapped.EncryptedVaultKey, "wrapped-two")
+	}
+
+	_, stored, err := collections.GetKey(ctx, database, userID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRecovery(t, "read back", stored, "two")
+}
+
+// A v1 client re-wrapping mints a brand-new vault key, so the recovery
+// envelope it does not send would wrap a key that no longer exists. Omitting
+// the envelope clears it rather than stranding it.
+func TestPutKeyRewrapWithoutRecoveryClearsIt(t *testing.T) {
+	ctx, database, userID, id := keyTestCollection(t)
+
+	_, claimed, err := collections.PutKey(ctx, database, userID, id, recoveryInput("one"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := token(t, claimed)
+
+	outcome, rewrapped, err := collections.PutKey(ctx, database, userID, id, keyInput("two"), &current)
+	if err != nil || outcome != collections.PutKeyOK {
+		t.Fatalf("re-wrap = %v, %v", outcome, err)
+	}
+	assertNoRecovery(t, "re-wrap", rewrapped)
+
+	_, stored, err := collections.GetKey(ctx, database, userID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertNoRecovery(t, "read back", stored)
+}
+
+// A stale revision token still loses, and the authoritative material it comes
+// back with carries the winner's recovery envelope — otherwise the loser
+// adopts a vault key it cannot open with its recovery key.
+func TestPutKeyConflictCarriesTheRecoveryEnvelope(t *testing.T) {
+	ctx, database, userID, id := keyTestCollection(t)
+
+	_, claimed, err := collections.PutKey(ctx, database, userID, id, recoveryInput("one"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := token(t, claimed)
+
+	if _, _, err := collections.PutKey(ctx, database, userID, id, recoveryInput("two"), &stale); err != nil {
+		t.Fatal(err)
+	}
+	outcome, current, err := collections.PutKey(ctx, database, userID, id, recoveryInput("three"), &stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome != collections.PutKeyConflict {
+		t.Fatalf("re-wrap from a stale token = %v, want PutKeyConflict", outcome)
+	}
+	assertRecovery(t, "conflict", current, "two")
+}
+
+// First claim is unchanged: losing the race is not an error, and the winner's
+// material — recovery envelope included — is what the loser adopts.
+func TestPutKeyLosingFirstClaimAdoptsTheWinnersRecoveryEnvelope(t *testing.T) {
+	ctx, database, userID, id := keyTestCollection(t)
+
+	if _, _, err := collections.PutKey(ctx, database, userID, id, recoveryInput("winner"), nil); err != nil {
+		t.Fatal(err)
+	}
+	outcome, adopted, err := collections.PutKey(ctx, database, userID, id, recoveryInput("loser"), nil)
+	if err != nil || outcome != collections.PutKeyOK {
+		t.Fatalf("second claim = %v, %v", outcome, err)
+	}
+	assertRecovery(t, "second claim", adopted, "winner")
+}

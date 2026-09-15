@@ -898,7 +898,8 @@ paths:
         "200":
           description: |
             The stored material, or `{"key": null}` when the collection exists
-            but no key has been claimed yet.
+            but no key has been claimed yet. The three `recovery_*` fields are
+            `null` when the vault has no recovery envelope.
           content:
             application/json:
               schema:
@@ -917,9 +918,9 @@ paths:
     put:
       operationId: putCollectionKey
       tags: [collections]
-      summary: Claim or rotate encrypted vault key material
+      summary: Claim or re-wrap encrypted vault key material
       description: |
-        All three material fields are opaque to the server.
+        Every material field is opaque to the server.
 
         **Claim** (no `previous_key_updated_at`): sets the material if none
         exists. Resubmitting identical material is idempotent and returns the
@@ -928,13 +929,32 @@ paths:
         which may differ from what was sent. Adopt what comes back; one vault
         has exactly one key, and the winner's key is never overwritten.
 
-        **Rotation** (replacing material that already exists): requires
+        **Re-wrap** (replacing material that already exists): requires
         `previous_key_updated_at` equal to the current `key_updated_at` from a
         prior GET or PUT. The server treats it as an opaque revision token — do
-        not parse or synthesize it. A stale token returns `409` with the
-        authoritative material in `currentKey`.
+        not parse or synthesize it. A caller holding the current token may
+        re-wrap as often as it likes; a second write is not a conflict, only a
+        stale one is. A stale token returns `409` with the authoritative
+        material in `currentKey`; re-read, re-wrap from the new token, and
+        retry. This is what lets an already-unlocked client change the vault
+        password or issue a new recovery key without a first-claim conflict.
 
-        A successful rotation does not emit an SSE `change` event; peers learn
+        **The recovery envelope is optional.** Send all three `recovery_*`
+        fields or none; a partial set is a `400`. A client that knows only the
+        vault password — a v1 client, or self-hosted password mode — omits them
+        and is otherwise unaffected.
+
+        **A PUT replaces the whole of the key material, both envelopes
+        together**, so omitting the `recovery_*` fields **clears** any stored
+        recovery envelope. Changing the vault password re-wraps the *same*
+        vault key, so a recovery envelope left out of that request would still
+        have opened the vault — dropping it destroys a working recovery door.
+        A client changing one envelope sends the other back unchanged. The one
+        case where clearing is right is a v1 client, which mints a fresh vault
+        key when it re-wraps, leaving the old recovery envelope wrapping a key
+        that no longer exists.
+
+        A successful re-wrap does not emit an SSE `change` event; peers learn
         about it on their next poll.
       requestBody:
         required: true
@@ -958,8 +978,22 @@ paths:
                   type: string
                   minLength: 1
                   description: |
-                    Opaque revision token from a prior GET/PUT. Required for
-                    rotation, omitted for a first claim.
+                    Opaque revision token from a prior GET/PUT. Required for a
+                    re-wrap, omitted for a first claim.
+                recovery_key_salt:
+                  type: string
+                  minLength: 1
+                  description: |
+                    Part of the optional recovery envelope. Send all three
+                    `recovery_*` fields or none.
+                recovery_key_kdf:
+                  type: object
+                  additionalProperties: true
+                  description: Any JSON object — the client's recovery-key KDF parameters.
+                recovery_encrypted_vault_key:
+                  type: string
+                  minLength: 1
+                  description: The vault key wrapped under the recovery key.
       responses:
         "200":
           description: Material stored, or the authoritative material adopted
@@ -972,7 +1006,10 @@ paths:
                   key:
                     $ref: "#/components/schemas/KeyMaterial"
         "400":
-          description: Invalid JSON, or a missing/empty required field
+          description: |
+            Invalid JSON, a missing/empty required field, a
+            `previous_key_updated_at` sent when no key is stored, or a partial
+            recovery envelope.
           content:
             application/json:
               schema:
@@ -984,7 +1021,7 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          description: Stale rotation token
+          description: Stale revision token
           content:
             application/json:
               schema:
@@ -2078,11 +2115,22 @@ components:
 
     KeyMaterial:
       type: object
-      required: [key_salt, key_kdf, encrypted_vault_key, key_updated_at]
+      required:
+        [key_salt, key_kdf, encrypted_vault_key, key_updated_at,
+         recovery_key_salt, recovery_key_kdf, recovery_encrypted_vault_key]
       description: |
         Client-side vault key material. Every field is opaque to the server,
-        which never sees the vault password, the password-derived key, or the
-        vault key itself.
+        which never sees the vault password, the recovery key, either derived
+        key, or the vault key itself.
+
+        `key_salt`, `key_kdf` and `encrypted_vault_key` are the **password
+        envelope**: the vault key wrapped under the vault password. The three
+        `recovery_*` fields are the **recovery envelope**: the same vault key
+        wrapped under the recovery key instead. The recovery envelope is
+        optional and the three fields are `null` together — that vault has no
+        recovery key, so the vault password (or an already-unlocked device) is
+        the only way in. They are always present in the response, `null` and
+        all, so absence is explicit rather than a missing field.
       properties:
         key_salt:
           type: string
@@ -2095,8 +2143,18 @@ components:
           type: string
           format: date-time
           description: |
-            Doubles as the opaque revision token for guarded rotation. Treat as
-            opaque: do not parse or synthesize it.
+            Doubles as the opaque revision token for a guarded re-wrap. Treat
+            as opaque: do not parse or synthesize it.
+        recovery_key_salt:
+          type: string
+          nullable: true
+        recovery_key_kdf:
+          type: object
+          nullable: true
+          additionalProperties: true
+        recovery_encrypted_vault_key:
+          type: string
+          nullable: true
 
     Object:
       type: object

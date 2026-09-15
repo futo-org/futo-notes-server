@@ -52,8 +52,12 @@ func TestMigratePostgresToSQLitePreservesApplicationState(t *testing.T) {
 		t.Fatalf("Claim() = %#v, %t, %v", collection, created, err)
 	}
 	wantKDF := json.RawMessage(`{"z":1,"a":2,"z":3}`)
+	recoverySalt, recoveryKey := "migration-recovery-salt", "migration-recovery-wrapped-key"
 	if outcome, _, err := collections.PutKey(ctx, source, user.ID, collection.ID, collections.KeyInput{
 		KeySalt: "migration-salt", KeyKDF: wantKDF, EncryptedVaultKey: "migration-wrapped-key",
+		RecoveryKeySalt:           &recoverySalt,
+		RecoveryKeyKDF:            json.RawMessage(`{"kdf":"hkdf-sha256"}`),
+		RecoveryEncryptedVaultKey: &recoveryKey,
 	}, nil); err != nil || outcome != collections.PutKeyOK {
 		t.Fatalf("PutKey() = %v, %v", outcome, err)
 	}
@@ -107,6 +111,13 @@ func TestMigratePostgresToSQLitePreservesApplicationState(t *testing.T) {
 	}
 	if !reflect.DeepEqual(gotKDFValue, wantKDFValue) {
 		t.Fatalf("key KDF = %s, want semantic JSON %s", key.KeyKDF, wantKDF)
+	}
+	// The recovery envelope has to survive the copy too, or moving a hosted
+	// database to SQLite silently removes the way back into every vault.
+	if key.RecoveryKeySalt == nil || *key.RecoveryKeySalt != recoverySalt ||
+		key.RecoveryEncryptedVaultKey == nil || *key.RecoveryEncryptedVaultKey != recoveryKey ||
+		string(key.RecoveryKeyKDF) != `{"kdf":"hkdf-sha256"}` {
+		t.Fatalf("recovery envelope = %v/%s/%v", key.RecoveryKeySalt, key.RecoveryKeyKDF, key.RecoveryEncryptedVaultKey)
 	}
 	gotObject, err := objects.Get(ctx, target, user.ID, collection.ID, createdObject.Response.Object.ID)
 	if err != nil || gotObject == nil || gotObject.BlobKey == nil || *gotObject.BlobKey != blobKey {

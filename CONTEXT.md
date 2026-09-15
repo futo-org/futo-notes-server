@@ -19,6 +19,20 @@ _Avoid_: Passphrase, encryption password, master password
 A generated high-entropy secret that unlocks the same vault as the Vault Password, shown once for the person to keep. The way back in after a sign-in password reset, when no device is still unlocked.
 _Avoid_: Recovery code, backup key, escrow key
 
+**Envelope**:
+One wrapping of a vault key: a salt, the key-derivation parameters, and the wrapped key itself. The server stores envelopes and can open none of them.
+_Avoid_: Wrap, key blob, key record
+
+**Password Envelope**:
+The vault key wrapped under the Vault Password. Every vault has exactly one, and it is the only envelope a vault is guaranteed to have.
+
+**Recovery Envelope**:
+The same vault key wrapped under the Recovery Key instead. Optional: its absence means that vault has no Recovery Key, so the Vault Password or an already-unlocked device is the only way in.
+
+**Re-wrap**:
+Replacing a vault's stored envelopes from a client that is already unlocked — a Vault Password change, or a new Recovery Key. It names the revision it read, so it conflicts only against a newer one; it is not the first claim of a key.
+_Avoid_: Key rotation, re-key
+
 **Collection Contents**:
 The objects, object versions, blobs, retained merge ancestors, and ordered changes inside a collection. Collection identity and encrypted vault-key material are not collection contents.
 _Avoid_: Collection data

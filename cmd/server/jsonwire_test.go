@@ -39,6 +39,17 @@ var (
 		EncryptedVaultKey: "ZW5jcnlwdGVk",
 		KeyUpdatedAt:      withNanos,
 	}
+	testRecoverySalt     = "cnNhbHQ="
+	testRecoveryVaultKey = "cmVjb3Zlcnk="
+	testKeyWithRecovery  = &collections.KeyMaterial{
+		KeySalt:                   testKey.KeySalt,
+		KeyKDF:                    testKey.KeyKDF,
+		EncryptedVaultKey:         testKey.EncryptedVaultKey,
+		KeyUpdatedAt:              testKey.KeyUpdatedAt,
+		RecoveryKeySalt:           &testRecoverySalt,
+		RecoveryKeyKDF:            json.RawMessage(`{ "kdf": "hkdf-sha256" }`),
+		RecoveryEncryptedVaultKey: &testRecoveryVaultKey,
+	}
 )
 
 func TestResponseWireFormat(t *testing.T) {
@@ -107,10 +118,18 @@ func TestResponseWireFormat(t *testing.T) {
 	}, {
 		// key_kdf goes out compacted, not byte-for-byte as stored, and
 		// key_updated_at must render with nanoseconds because it is the
-		// rotation token the client echoes back.
+		// revision token the client echoes back. A vault with no recovery
+		// envelope still carries the three recovery fields, explicitly null,
+		// so a client can tell "no recovery key" from "server too old".
 		name:  "key",
 		write: func(w http.ResponseWriter) { writeJSON(w, 200, map[string]any{"key": testKey}) },
-		want:  `{"key":{"key_salt":"c2FsdA==","key_kdf":{"name":"scrypt","N":16384},"encrypted_vault_key":"ZW5jcnlwdGVk","key_updated_at":"2026-02-03T04:05:06.123456789Z"}}`,
+		want:  `{"key":{"key_salt":"c2FsdA==","key_kdf":{"name":"scrypt","N":16384},"encrypted_vault_key":"ZW5jcnlwdGVk","key_updated_at":"2026-02-03T04:05:06.123456789Z","recovery_key_salt":null,"recovery_key_kdf":null,"recovery_encrypted_vault_key":null}}`,
+	}, {
+		// Both envelopes, the shape a client that knows the recovery key
+		// writes. recovery_key_kdf compacts the same way key_kdf does.
+		name:  "key with a recovery envelope",
+		write: func(w http.ResponseWriter) { writeJSON(w, 200, map[string]any{"key": testKeyWithRecovery}) },
+		want:  `{"key":{"key_salt":"c2FsdA==","key_kdf":{"name":"scrypt","N":16384},"encrypted_vault_key":"ZW5jcnlwdGVk","key_updated_at":"2026-02-03T04:05:06.123456789Z","recovery_key_salt":"cnNhbHQ=","recovery_key_kdf":{"kdf":"hkdf-sha256"},"recovery_encrypted_vault_key":"cmVjb3Zlcnk="}}`,
 	}, {
 		name:  "key unclaimed",
 		write: func(w http.ResponseWriter) { writeJSON(w, 200, map[string]any{"key": (*collections.KeyMaterial)(nil)}) },
@@ -120,7 +139,7 @@ func TestResponseWireFormat(t *testing.T) {
 		write: func(w http.ResponseWriter) {
 			writeJSON(w, 409, map[string]any{"error": "key conflict", "currentKey": testKey})
 		},
-		want: `{"currentKey":{"key_salt":"c2FsdA==","key_kdf":{"name":"scrypt","N":16384},"encrypted_vault_key":"ZW5jcnlwdGVk","key_updated_at":"2026-02-03T04:05:06.123456789Z"},"error":"key conflict"}`,
+		want: `{"currentKey":{"key_salt":"c2FsdA==","key_kdf":{"name":"scrypt","N":16384},"encrypted_vault_key":"ZW5jcnlwdGVk","key_updated_at":"2026-02-03T04:05:06.123456789Z","recovery_key_salt":null,"recovery_key_kdf":null,"recovery_encrypted_vault_key":null},"error":"key conflict"}`,
 	}, {
 		// v1 escapes <, > and & in strings and inside RawMessage.
 		name: "html escaping",
@@ -132,7 +151,7 @@ func TestResponseWireFormat(t *testing.T) {
 				KeyUpdatedAt:      wholeSecond,
 			}})
 		},
-		want: `{"key":{"key_salt":"a\u003cb\u003ec\u0026d","key_kdf":{"note":"\u003cx\u0026y\u003e"},"encrypted_vault_key":"e","key_updated_at":"2026-02-03T04:05:06Z"}}`,
+		want: `{"key":{"key_salt":"a\u003cb\u003ec\u0026d","key_kdf":{"note":"\u003cx\u0026y\u003e"},"encrypted_vault_key":"e","key_updated_at":"2026-02-03T04:05:06Z","recovery_key_salt":null,"recovery_key_kdf":null,"recovery_encrypted_vault_key":null}}`,
 	}}
 
 	for _, tc := range cases {
@@ -151,12 +170,17 @@ func TestResponseWireFormat(t *testing.T) {
 
 // putKeyBody mirrors the request body decoded by handlePutCollectionKey. The
 // pointer fields carry meaning: previous_key_updated_at absent or null is a
-// claim, present is a rotation.
+// claim, present is a re-wrap; the recovery fields absent or null mean the
+// client sent no recovery envelope.
 type putKeyBody struct {
 	KeySalt              *string         `json:"key_salt"`
 	KeyKDF               json.RawMessage `json:"key_kdf"`
 	EncryptedVaultKey    *string         `json:"encrypted_vault_key"`
 	PreviousKeyUpdatedAt *string         `json:"previous_key_updated_at"`
+
+	RecoveryKeySalt           *string         `json:"recovery_key_salt"`
+	RecoveryKeyKDF            json.RawMessage `json:"recovery_key_kdf"`
+	RecoveryEncryptedVaultKey *string         `json:"recovery_encrypted_vault_key"`
 }
 
 func TestPutKeyBodyDecoding(t *testing.T) {
@@ -213,6 +237,52 @@ func TestPutKeyBodyDecoding(t *testing.T) {
 		check: func(t *testing.T, b putKeyBody) {
 			if got := string(b.KeyKDF); got != "null" {
 				t.Errorf("KeyKDF = %q, want %q", got, "null")
+			}
+		},
+	}, {
+		// A v1 body. Absent recovery fields must be distinguishable from
+		// empty ones, or the handler cannot tell "no recovery envelope" from
+		// "a broken one".
+		name: "recovery fields absent",
+		body: `{"key_salt":"s","key_kdf":{},"encrypted_vault_key":"e"}`,
+		check: func(t *testing.T, b putKeyBody) {
+			if b.RecoveryKeySalt != nil || b.RecoveryEncryptedVaultKey != nil || b.RecoveryKeyKDF != nil {
+				t.Errorf("recovery fields = %v/%s/%v, want all nil",
+					b.RecoveryKeySalt, b.RecoveryKeyKDF, b.RecoveryEncryptedVaultKey)
+			}
+		},
+	}, {
+		// Explicit nulls mean the same thing as absent on the way in, but
+		// recovery_key_kdf arrives as the literal "null" rather than nil, so
+		// the handler has to treat both as omitted.
+		name: "recovery fields null",
+		body: `{"key_salt":"s","key_kdf":{},"encrypted_vault_key":"e","recovery_key_salt":null,` +
+			`"recovery_key_kdf":null,"recovery_encrypted_vault_key":null}`,
+		check: func(t *testing.T, b putKeyBody) {
+			if b.RecoveryKeySalt != nil || b.RecoveryEncryptedVaultKey != nil {
+				t.Errorf("recovery pointers = %v/%v, want nil",
+					b.RecoveryKeySalt, b.RecoveryEncryptedVaultKey)
+			}
+			if got := string(b.RecoveryKeyKDF); got != "null" {
+				t.Errorf("RecoveryKeyKDF = %q, want %q", got, "null")
+			}
+			if !omittedJSON(b.RecoveryKeyKDF) {
+				t.Error("omittedJSON did not treat the null literal as omitted")
+			}
+		},
+	}, {
+		name: "recovery fields present",
+		body: `{"key_salt":"s","key_kdf":{},"encrypted_vault_key":"e","recovery_key_salt":"rs",` +
+			`"recovery_key_kdf":{ "kdf": "hkdf-sha256" },"recovery_encrypted_vault_key":"rk"}`,
+		check: func(t *testing.T, b putKeyBody) {
+			if b.RecoveryKeySalt == nil || *b.RecoveryKeySalt != "rs" {
+				t.Errorf("RecoveryKeySalt = %v, want rs", b.RecoveryKeySalt)
+			}
+			if b.RecoveryEncryptedVaultKey == nil || *b.RecoveryEncryptedVaultKey != "rk" {
+				t.Errorf("RecoveryEncryptedVaultKey = %v, want rk", b.RecoveryEncryptedVaultKey)
+			}
+			if got := string(b.RecoveryKeyKDF); got != `{ "kdf": "hkdf-sha256" }` {
+				t.Errorf("RecoveryKeyKDF = %s, want the original bytes including whitespace", got)
 			}
 		},
 	}, {

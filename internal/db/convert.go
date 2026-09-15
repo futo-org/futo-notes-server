@@ -24,7 +24,7 @@ type copyTable struct {
 
 var sqliteCopyTables = []copyTable{
 	{name: "users", columns: []string{"id", "sub", "name", "email"}},
-	{name: "collections", columns: []string{"id", "user_id", "created_at", "current_version", "key_salt", "key_kdf", "encrypted_vault_key", "key_updated_at"}, jsonColumns: map[string]bool{"key_kdf": true}},
+	{name: "collections", columns: []string{"id", "user_id", "created_at", "current_version", "key_salt", "key_kdf", "encrypted_vault_key", "key_updated_at", "recovery_key_salt", "recovery_key_kdf", "recovery_encrypted_vault_key"}, jsonColumns: map[string]bool{"key_kdf": true, "recovery_key_kdf": true}},
 	{name: "objects", columns: []string{"id", "collection_id", "user_id", "version", "deleted", "blob_key", "size_bytes", "created_at", "updated_at", "change_seq"}},
 	{name: "blob_ledger", columns: []string{"blob_key", "user_id", "size_bytes", "state", "collection_id", "object_id", "object_version", "created_at", "state_changed_at"}},
 	{name: "mutation_results", columns: []string{"user_id", "mutation_id", "kind", "collection_id", "object_id", "requested_version", "result", "created_at"}, jsonColumns: map[string]bool{"result": true}},

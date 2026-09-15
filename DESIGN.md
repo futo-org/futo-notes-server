@@ -179,15 +179,18 @@ The client chooses its own encryption scheme. The server is agnostic.
 Current client key model:
 - Notes are encrypted with a random AES-256-GCM vault key.
 - The vault key is wrapped client-side with a PBKDF2-SHA-256 password key.
-- The server stores `key_salt`, `key_kdf`, and `encrypted_vault_key` on the collection.
-- The server never sees the vault password, password-derived key, vault key, filenames, or note content.
+- The server stores `key_salt`, `key_kdf`, and `encrypted_vault_key` on the collection — the **password envelope**.
+- The vault key may be wrapped a second time under a Recovery Key, stored as the nullable `recovery_key_salt`, `recovery_key_kdf`, and `recovery_encrypted_vault_key` (ADR 0005). Optional and null together: a vault written by a client that knows only the Vault Password has no recovery envelope.
+- The server never sees the vault password, the recovery key, either derived key, the vault key, filenames, or note content.
 
 Key material is **not** on the 409-conflict path that object mutations use. A first
 claim of an unset key converges: the loser of the race is handed the authoritative
 material with `200` and adopts it, because one vault has exactly one key and the
-client has nothing to merge. Only a *rotation* — a write naming the exact revision
-it read — can conflict, and only when that revision is stale. The winner's key is
-never overwritten either way.
+client has nothing to merge. Only a *re-wrap* — a write naming the exact revision
+it read — can conflict, and only when that revision is stale. A client holding the
+current revision may re-wrap as often as it likes; that is what lets an unlocked
+device change the Vault Password or issue a new Recovery Key. Both envelopes are
+replaced together. The winner's key is never overwritten either way.
 
 ## Threat model
 
@@ -231,6 +234,9 @@ collections
   key_kdf     jsonb      -- client KDF parameters
   encrypted_vault_key text -- password-wrapped vault key bytes
   key_updated_at timestamptz
+  recovery_key_salt text  -- nullable; the recovery envelope, null together
+  recovery_key_kdf jsonb  -- nullable
+  recovery_encrypted_vault_key text -- nullable; recovery-key-wrapped vault key bytes
   created_at  timestamptz
 ```
 
