@@ -58,6 +58,41 @@ type Config struct {
 	// the provider authenticates; otherwise sign-in is limited to these
 	// email domains. Internal-MVP gate, removed before public sign-up.
 	HostedAllowedEmailDomains []string
+
+	// STANDIN_MODE, a test-only mode that runs hosted mode against
+	// in-process stand-ins for Zitadel and Polar. It exists so a client's
+	// automated suite can drive the whole sign-up path on localhost with no
+	// network and no credentials, and it must never be set anywhere real:
+	// its login signs anyone in and its checkout entitles for free.
+	//
+	// This is the only place the variable is read. Everything the mode does
+	// hangs off this one boolean, so a default server has no stand-in
+	// anything: no listeners, no routes, no settings replaced.
+	StandinMode bool
+}
+
+// standinRefusedEnv names the settings stand-in mode will not run alongside.
+// Every one of them names a real identity provider, a real payment provider,
+// or a real sign-up gate, so finding one set alongside STANDIN_MODE means the
+// variable has reached a server that was configured to be real. That is the
+// accident worth failing the boot over, so it is refused rather than
+// overridden.
+//
+// Stand-in mode supplies its own value for eight of these. It supplies none
+// for POLAR_DISCOUNT_ID or HOSTED_ALLOWED_EMAIL_DOMAINS — a stand-in checkout
+// carries no discount and a stand-in server admits its one identity — and
+// refuses them all the same, because what they name is just as real.
+var standinRefusedEnv = []string{
+	"OIDC_ISSUER",
+	"OIDC_CLIENT_ID",
+	"OIDC_CLIENT_SECRET",
+	"OIDC_REDIRECT_URI",
+	"POLAR_BASE_URL",
+	"POLAR_ACCESS_TOKEN",
+	"POLAR_PRODUCT_ID",
+	"POLAR_WEBHOOK_SECRET",
+	"POLAR_DISCOUNT_ID",
+	"HOSTED_ALLOWED_EMAIL_DOMAINS",
 }
 
 func Load() (Config, error) {
@@ -86,6 +121,29 @@ func Load() (Config, error) {
 		PolarDiscountID:    os.Getenv("POLAR_DISCOUNT_ID"),
 
 		HostedAllowedEmailDomains: emailDomains(os.Getenv("HOSTED_ALLOWED_EMAIL_DOMAINS")),
+
+		StandinMode: os.Getenv("STANDIN_MODE") == "true",
+	}
+	if cfg.StandinMode {
+		if set := namesAlreadySet(standinRefusedEnv); len(set) > 0 {
+			return Config{}, fmt.Errorf("STANDIN_MODE=true refuses to run alongside %s, because it replaces what they name with fakes; unset %s, or drop STANDIN_MODE if this server is meant to be real",
+				strings.Join(standinRefusedEnv, ", "), strings.Join(set, ", "))
+		}
+		// Nothing below is overridden either. A self-hosted server whose
+		// password login was quietly replaced by a stand-in that signs
+		// anyone in is exactly the accident worth refusing to boot over,
+		// and a server told to mark its cookies Secure is a server someone
+		// put behind TLS.
+		if mode, named := os.LookupEnv("AUTH_MODE"); named && mode != "" && mode != "oidc" {
+			return Config{}, fmt.Errorf("STANDIN_MODE=true runs hosted mode, so AUTH_MODE must be oidc or unset, got %q", mode)
+		}
+		if secure, named := os.LookupEnv("COOKIE_SECURE"); named && secure != "false" {
+			return Config{}, fmt.Errorf("STANDIN_MODE=true serves plain http on loopback, where a Secure cookie never comes back, so COOKIE_SECURE must be false or unset, got %q", secure)
+		}
+		// The stand-ins are hosted mode's two upstreams, so this is hosted
+		// mode with fakes in their place.
+		cfg.AuthMode = "oidc"
+		cfg.CookieSecure = false
 	}
 	if cfg.AuthMode != "dev" && cfg.AuthMode != "password" && cfg.AuthMode != "oidc" {
 		return Config{}, fmt.Errorf("AUTH_MODE must be dev, password, or oidc, got %q", cfg.AuthMode)
@@ -98,7 +156,10 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("FUTO_NOTES_PASSWORD or FUTO_NOTES_PASSWORD_HASH is required when AUTH_MODE=password")
 		}
 	}
-	if cfg.Hosted() {
+	// Stand-in mode is exempt: it has none of these yet, because the
+	// stand-ins it points them at are not listening until the server starts
+	// them.
+	if cfg.Hosted() && !cfg.StandinMode {
 		// Named in one table so the boot failure lists every missing value
 		// at once rather than one per restart.
 		required := []struct {
@@ -192,6 +253,29 @@ func DroppedEnvWarnings() []string {
 		}
 	}
 	return warnings
+}
+
+// ListenAddr is the address the HTTP server binds. Stand-in mode binds
+// loopback and nothing else: its login signs anyone in and its checkout
+// entitles for free, so a server running with it must be unreachable across
+// a network even when the variable has been set somewhere it should not be.
+func (c Config) ListenAddr() string {
+	if c.StandinMode {
+		return fmt.Sprintf("127.0.0.1:%d", c.Port)
+	}
+	return fmt.Sprintf(":%d", c.Port)
+}
+
+// namesAlreadySet returns the names, in the order given, that are set to a
+// non-empty value.
+func namesAlreadySet(names []string) []string {
+	var set []string
+	for _, name := range names {
+		if os.Getenv(name) != "" {
+			set = append(set, name)
+		}
+	}
+	return set
 }
 
 func getDefault(key, fallback string) string {

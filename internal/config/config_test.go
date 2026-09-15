@@ -278,3 +278,134 @@ func TestAllowsEmailDomain(t *testing.T) {
 		})
 	}
 }
+
+func TestStandinModeIsOffByDefault(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("DATABASE_URL", "postgres://example.test/notes")
+	t.Setenv("AUTH_MODE", "dev")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.StandinMode {
+		t.Fatal("StandinMode = true with STANDIN_MODE unset")
+	}
+	if cfg.ListenAddr() != ":3005" {
+		t.Fatalf("ListenAddr() = %q, want every interface", cfg.ListenAddr())
+	}
+
+	// Anything other than the exact word fails closed.
+	for _, value := range []string{"", "1", "yes", "TRUE", "on"} {
+		t.Setenv("STANDIN_MODE", value)
+		cfg, err := Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.StandinMode {
+			t.Fatalf("STANDIN_MODE=%q turned the stand-ins on", value)
+		}
+	}
+}
+
+func TestStandinModeSuppliesItsOwnHostedSettings(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("DATABASE_URL", "sqlite:notes.db")
+	t.Setenv("STANDIN_MODE", "true")
+
+	// None of the eight hosted settings are given, and hosted mode boots
+	// anyway: the stand-ins are what fills them in.
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() in stand-in mode: %v", err)
+	}
+	if !cfg.StandinMode {
+		t.Fatal("StandinMode = false for STANDIN_MODE=true")
+	}
+	if cfg.AuthMode != "oidc" {
+		t.Fatalf("AuthMode = %q, want oidc", cfg.AuthMode)
+	}
+	if cfg.CookieSecure {
+		t.Fatal("CookieSecure = true: stand-in mode serves plain http on loopback")
+	}
+	if cfg.ListenAddr() != "127.0.0.1:3005" {
+		t.Fatalf("ListenAddr() = %q, want loopback only", cfg.ListenAddr())
+	}
+}
+
+func TestStandinModeRefusesSettingsThatNameSomethingReal(t *testing.T) {
+	real := map[string]string{
+		"OIDC_ISSUER":                  "https://futo.zitadel.cloud",
+		"OIDC_CLIENT_ID":               "client-id",
+		"OIDC_CLIENT_SECRET":           "client-secret",
+		"OIDC_REDIRECT_URI":            "https://notes.example.test/api/auth/oidc/callback",
+		"POLAR_BASE_URL":               "https://api.polar.sh",
+		"POLAR_ACCESS_TOKEN":           "polar_oat_real",
+		"POLAR_PRODUCT_ID":             "prod_real",
+		"POLAR_WEBHOOK_SECRET":         "whsec_cG9sYXItd2ViaG9vay1rZXk=",
+		"POLAR_DISCOUNT_ID":            "disc_real",
+		"HOSTED_ALLOWED_EMAIL_DOMAINS": "futo.org",
+	}
+	for name, value := range real {
+		t.Run(name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			t.Setenv("DATABASE_URL", "sqlite:notes.db")
+			t.Setenv("STANDIN_MODE", "true")
+			t.Setenv(name, value)
+
+			err := errorFromLoad(t)
+			if !strings.Contains(err.Error(), name) {
+				t.Fatalf("Load() error = %v, want it to name %s", err, name)
+			}
+			if !strings.Contains(err.Error(), "STANDIN_MODE") {
+				t.Fatalf("Load() error = %v, want it to name STANDIN_MODE", err)
+			}
+		})
+	}
+}
+
+func TestStandinModeRefusesAnotherAuthMode(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("DATABASE_URL", "sqlite:notes.db")
+	t.Setenv("STANDIN_MODE", "true")
+
+	// Quietly replacing a self-hoster's password login with a stand-in that
+	// signs anyone in is exactly the accident this refuses.
+	t.Setenv("AUTH_MODE", "password")
+	t.Setenv("FUTO_NOTES_PASSWORD", "correct password")
+	err := errorFromLoad(t)
+	if !strings.Contains(err.Error(), "AUTH_MODE") || !strings.Contains(err.Error(), "STANDIN_MODE") {
+		t.Fatalf("Load() error = %v, want it to name both AUTH_MODE and STANDIN_MODE", err)
+	}
+
+	// Naming oidc explicitly is the same request, so it is allowed.
+	t.Setenv("AUTH_MODE", "oidc")
+	if _, err := Load(); err != nil {
+		t.Fatalf("Load() with AUTH_MODE=oidc and STANDIN_MODE=true: %v", err)
+	}
+}
+
+func TestStandinModeRefusesSecureCookies(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("DATABASE_URL", "sqlite:notes.db")
+	t.Setenv("STANDIN_MODE", "true")
+
+	// A server told to mark its cookies Secure is a server someone put behind
+	// TLS. Stand-in mode serves plain http on loopback, so silently turning
+	// the flag off would be the same quiet override the refusals above exist
+	// to prevent.
+	t.Setenv("COOKIE_SECURE", "true")
+	err := errorFromLoad(t)
+	if !strings.Contains(err.Error(), "COOKIE_SECURE") || !strings.Contains(err.Error(), "STANDIN_MODE") {
+		t.Fatalf("Load() error = %v, want it to name both COOKIE_SECURE and STANDIN_MODE", err)
+	}
+
+	t.Setenv("COOKIE_SECURE", "false")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() with COOKIE_SECURE=false and STANDIN_MODE=true: %v", err)
+	}
+	if cfg.CookieSecure {
+		t.Fatal("CookieSecure = true for COOKIE_SECURE=false")
+	}
+}

@@ -99,6 +99,47 @@ It drops and recreates the scratch database's public schema on every run, so
 never point it at anything worth keeping. Deploying the hosted service, and
 the full list of settings it reads, are in [Hosted deployment](./Hosted%20deployment.md).
 
+### Stand-in test mode
+
+For an automated suite — the client's cross-platform tests especially — the
+server can run the whole hosted path with **no network, no credentials, and no
+browser**. `STANDIN_MODE=true` starts it in hosted mode against in-process
+stand-ins for Zitadel and Polar:
+
+```bash
+STANDIN_MODE=true DATABASE_URL=sqlite:./data/standin.db \
+  GOTOOLCHAIN=auto go run ./cmd/server
+```
+
+It supplies the hosted settings itself, so give it none of them — a server
+that has any `OIDC_*`, `POLAR_*`, or `HOSTED_ALLOWED_EMAIL_DOMAINS` set, or an
+`AUTH_MODE` other than `oidc`, or `COOKIE_SECURE` anything but `false`,
+**refuses to boot** rather than override what somebody configured. It binds
+`127.0.0.1` only, and it says what it is doing in a `WARN` on every start.
+Never set it on a real server; the reasoning is in
+[ADR 0009](./adr/0009-stand-in-test-mode.md).
+
+The two URLs below are fetched by a **browser-shaped client: one that follows
+redirects and keeps cookies**. The login chain hands the `oidc_flow` cookie
+back at the callback, so a client that drops it gets
+`missing oidc flow cookie` instead of a session. In Go that is an
+`http.Client` with a `cookiejar`; with curl it is `curl -L -c jar -b jar`.
+
+What a suite can then do:
+
+| Step | Call |
+|---|---|
+| Log in | `POST /api/auth/handoff`, then **fetch the `url` it answers with** — the stand-in issuer auto-approves, so that one request completes the login. `GET /api/auth/handoff/{ticket}` then hands back `{user, token}`. |
+| Pay | `POST /api/billing/checkout`, then **fetch the `url` it answers with** — that completes the checkout, delivers a signed `subscription.created` to the webhook, and redirects to the success page. The account is entitled by the time the fetch returns. |
+| Reach `402` | `POST /standin/lapse` — delivers the signed `subscription.revoked` a real lapse would. Writes stop; reads do not. |
+| Reach `507` | `POST /standin/quota` with an empty body fills the Storage Quota, so the next upload is refused. `{"storage_quota_bytes": 10000000000}` puts it back. |
+
+Both `/standin` routes need a session, act on the account that called them,
+and exist **only** under the flag: on any other server they are `404`.
+
+Every login is `person@standin.test`. A suite that needs a second account
+starts a second server on a fresh database.
+
 Postgres remains available for exercising existing-install and hosted paths:
 
 ```bash

@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -185,10 +184,15 @@ func routes(cfg config.Config, database *db.DB, blobStore *blobs.Store, eventHub
 		// session, so the webhook is mounted outside requireAuth. The
 		// literal pattern takes precedence over "/api/".
 		polarWebhook = handlePolarWebhook(cfg, database)
-		mux.HandleFunc("POST /api/billing/polar/webhook", polarWebhook)
+		mux.HandleFunc("POST "+polarWebhookPath, polarWebhook)
 		// Polar returns the browser here after a checkout. It holds no
 		// session, so it sits outside requireAuth too.
 		mux.HandleFunc("GET "+billingDonePath, handleBillingDone)
+		if cfg.StandinMode {
+			// Stand-in mode is hosted mode, so this is the only place these
+			// can be reached from — and only when the flag asked for them.
+			registerStandinRoutes(mux, cfg, database, polarWebhook)
+		}
 	}
 	if cfg.DevUI {
 		mux.HandleFunc("GET /dev", handleDevUI(database))
@@ -233,6 +237,20 @@ func main() {
 		slog.Warn(warning)
 	}
 
+	addr := cfg.ListenAddr()
+	if cfg.StandinMode {
+		// Before anything else opens: the stand-ins supply the settings the
+		// rest of the boot reads, and the OIDC discovery below has to find
+		// the stand-in issuer already listening.
+		var stopStandins func()
+		cfg, stopStandins, err = startStandins(cfg, "http://"+addr)
+		if err != nil {
+			slog.Error("starting the stand-ins", "err", err)
+			os.Exit(1)
+		}
+		defer stopStandins()
+	}
+
 	database, err := db.Open(cfg)
 	if err != nil {
 		slog.Error("opening database", "err", err)
@@ -268,7 +286,6 @@ func main() {
 		}
 	}
 
-	addr := fmt.Sprintf(":%d", cfg.Port)
 	slog.Info("listening", "addr", addr)
 	if err := http.ListenAndServe(addr, routes(cfg, database, blobStore, eventHub, publisher, provider)); err != nil {
 		slog.Error("serving HTTP", "err", err)

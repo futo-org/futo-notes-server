@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"futo-notes-server/internal/polar"
+	"futo-notes-server/internal/standins"
 )
 
 // The identity the rehearsal signs in as. The sub is what the account is
@@ -44,8 +45,8 @@ const (
 type session struct {
 	client *http.Client
 	server *serverProcess
-	issuer *fakeIssuer
-	polar  *fakePolar
+	issuer *standins.Issuer
+	polar  *standins.Polar
 
 	// databaseURL is the scratch database, which the quota step edits the
 	// Plan row in directly.
@@ -133,7 +134,7 @@ func (s *session) checkCapability() error {
 // completeHandoff is the whole login: the app mints a ticket, opens the URL
 // in a browser, and polls until the ticket hands back a session.
 func (s *session) completeHandoff() error {
-	s.issuer.signInAs(personSub, personEmail, personName)
+	s.issuer.SignInAs(personSub, personEmail, personName)
 
 	ticket, loginURL, err := s.mintHandoff()
 	if err != nil {
@@ -200,8 +201,8 @@ func (s *session) checkTicketSpent() error {
 // that is not on HOSTED_ALLOWED_EMAIL_DOMAINS is refused, the app is not left
 // polling a login that will never arrive, and no account is created.
 func (s *session) checkAllowlist() error {
-	s.issuer.signInAs("rehearsal-outsider", outsiderEmail, "Outsider")
-	defer s.issuer.signInAs(personSub, personEmail, personName)
+	s.issuer.SignInAs("rehearsal-outsider", outsiderEmail, "Outsider")
+	defer s.issuer.SignInAs(personSub, personEmail, personName)
 
 	ticket, loginURL, err := s.mintHandoff()
 	if err != nil {
@@ -303,7 +304,7 @@ func (s *session) startCheckout() error {
 		return fmt.Errorf("the checkout returned no URL for the app to open")
 	}
 
-	request, err := s.polar.lastRequest("/v1/checkouts/")
+	request, err := s.polar.LastRequest("/v1/checkouts/")
 	if err != nil {
 		return err
 	}
@@ -395,7 +396,7 @@ func (s *session) openPortal() error {
 	}
 	// Polar refuses a second customer for an external id it has seen, so the
 	// account has to be registered exactly once across checkout and portal.
-	if calls := s.polar.callCount("/v1/customers/"); calls != 1 {
+	if calls := s.polar.CallCount("/v1/customers/"); calls != 1 {
 		return fmt.Errorf("the server registered %d Polar customers for one account, want 1", calls)
 	}
 	return nil

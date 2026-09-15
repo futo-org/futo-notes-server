@@ -79,6 +79,7 @@ reading first in any review of `hosted.yml`.
 | `BLOB_DIR` | `./blobs` | `/data/blobs`, on the `/futo-notes-hosted-data/` host volume. |
 | `COOKIE_SECURE` | `true` | Leave on. The instance is behind the loadbalancer's TLS. |
 | `DEV_UI` | `false` | Leave off. It serves `/dev`, which can sign Polar deliveries with the configured webhook secret. |
+| `STANDIN_MODE` | `false` | **Never set this.** It replaces Zitadel and Polar with in-process fakes: anyone who opens the login URL is signed in, and opening a checkout URL entitles the account for free. It refuses to boot alongside any `OIDC_*`, `POLAR_*`, or `HOSTED_ALLOWED_EMAIL_DOMAINS` value, so it cannot start on this instance's configuration at all — and if it somehow did, it binds loopback only and the loadbalancer would find nothing answering. It exists for automated test suites; see [ADR 0009](./adr/0009-stand-in-test-mode.md). |
 | `BLOB_GC_ENABLED` | `true` | Off disables irreversible blob collection. |
 | `DB_POOL_MAX` | `10` | Postgres only. |
 | `DB_POOL_IDLE_TIMEOUT_MS` | `10000` | Postgres only. |

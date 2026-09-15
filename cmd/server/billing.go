@@ -163,6 +163,11 @@ func accountQuotaExceededEntry(account usage.Account) map[string]any {
 	}
 }
 
+// polarWebhookPath is where Polar delivers. It is named because the stand-in
+// test mode and the /dev subscription card both put a signed delivery through
+// this exact route rather than around it.
+const polarWebhookPath = "/api/billing/polar/webhook"
+
 // maxWebhookBody caps one Polar delivery. Subscription payloads are a few
 // kilobytes; the cap is what keeps an unauthenticated route from buffering
 // whatever an unsigned caller sends.

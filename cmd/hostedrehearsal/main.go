@@ -10,8 +10,9 @@
 // Login Hand-off, the email-domain allowlist, a refused write, a checkout, a
 // signed Polar delivery, an accepted write, and billing status with usage.
 //
-// Zitadel and Polar are stood in for by local fakes (see fakes.go), so the
-// rehearsal needs no credentials and no network. What it therefore does NOT
+// Zitadel and Polar are stood in for by the local stand-ins in
+// internal/standins, so the rehearsal needs no credentials and no
+// network. What it therefore does NOT
 // prove is anything on the far side of those two: that a Zitadel application
 // is registered for the right redirect URI, that a Polar webhook endpoint
 // exists, or that the discount reads 100%-forever in Polar's dashboard.
@@ -26,9 +27,7 @@
 package main
 
 import (
-	"crypto/rand"
 	"database/sql"
-	"encoding/base64"
 	"fmt"
 	"io"
 	"net"
@@ -42,6 +41,7 @@ import (
 	"time"
 
 	"futo-notes-server/internal/config"
+	"futo-notes-server/internal/standins"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
@@ -97,20 +97,28 @@ func run(databaseURL string) error {
 	}
 	step("scratch Postgres database reset to empty")
 
-	issuer, stopIssuer, err := startFakeIssuer(clientID, clientSecret)
+	// The server's origin is known before it is started, because the port is
+	// this project's fixed development one. The stand-in Polar needs it in
+	// order to deliver a webhook back.
+	serverOrigin := fmt.Sprintf("http://127.0.0.1:%d", port)
+
+	issuer, stopIssuer, err := standins.StartIssuer(clientID, clientSecret, personSub, personEmail, personName)
 	if err != nil {
-		return fmt.Errorf("starting the fake issuer: %w", err)
+		return fmt.Errorf("starting the stand-in issuer: %w", err)
 	}
 	defer stopIssuer()
 
-	polar, stopPolar, err := startFakePolar(accessToken)
+	polar, stopPolar, err := standins.StartPolar(accessToken, standins.Webhook{
+		URL:    serverOrigin + "/api/billing/polar/webhook",
+		Secret: webhookSecret,
+	})
 	if err != nil {
-		return fmt.Errorf("starting the fake Polar: %w", err)
+		return fmt.Errorf("starting the stand-in Polar: %w", err)
 	}
 	defer stopPolar()
-	step("fake Zitadel at %s, fake Polar at %s", issuer.origin, polar.origin)
+	step("stand-in Zitadel at %s, stand-in Polar at %s", issuer.Origin, polar.Origin)
 
-	server, err := startServer(databaseURL, issuer.origin, polar.origin)
+	server, err := startServer(databaseURL, serverOrigin, issuer.Origin, polar.Origin)
 	if err != nil {
 		return err
 	}
@@ -188,7 +196,7 @@ type serverProcess struct {
 // It runs in an empty working directory on purpose. config.Load reads a .env
 // file from the process's directory, and a rehearsal that silently inherited
 // a developer's .env would not be testing the contract this documents.
-func startServer(databaseURL, issuerOrigin, polarOrigin string) (*serverProcess, error) {
+func startServer(databaseURL, origin, issuerOrigin, polarOrigin string) (*serverProcess, error) {
 	workDir, err := os.MkdirTemp("", "hosted-rehearsal-*")
 	if err != nil {
 		return nil, err
@@ -200,7 +208,6 @@ func startServer(databaseURL, issuerOrigin, polarOrigin string) (*serverProcess,
 		return nil, fmt.Errorf("building the server: %w", err)
 	}
 
-	origin := fmt.Sprintf("http://127.0.0.1:%d", port)
 	logPath := filepath.Join(workDir, "server.log")
 	logFile, err := os.Create(logPath)
 	if err != nil {
@@ -312,14 +319,6 @@ func newClient() (*http.Client, error) {
 		return nil, err
 	}
 	return &http.Client{Jar: jar, Timeout: 20 * time.Second}, nil
-}
-
-func randomToken() string {
-	raw := make([]byte, 16)
-	if _, err := rand.Read(raw); err != nil {
-		panic(err)
-	}
-	return base64.RawURLEncoding.EncodeToString(raw)
 }
 
 // step reports one thing that held. Both the setup in this file and the walk

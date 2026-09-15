@@ -6,17 +6,13 @@ import (
 	_ "embed"
 	"encoding/json"
 	"html"
-	"io"
 	"net/http"
-	"net/url"
-	"time"
 
 	"futo-notes-server/internal/auth"
 	"futo-notes-server/internal/blobs"
 	"futo-notes-server/internal/config"
 	"futo-notes-server/internal/db"
 	"futo-notes-server/internal/jobs"
-	"futo-notes-server/internal/polar"
 	"futo-notes-server/internal/subscriptions"
 	"futo-notes-server/internal/usage"
 )
@@ -79,8 +75,7 @@ func handleDevPlan(database *db.DB) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "invalid storage_quota_bytes")
 			return
 		}
-		if _, err := database.ExecContext(r.Context(),
-			`UPDATE plans SET storage_quota_bytes = $1 WHERE id = 'default'`, *body.StorageQuotaBytes); err != nil {
+		if err := setStorageQuota(r.Context(), database, *body.StorageQuotaBytes); err != nil {
 			serverError(w, r, "setting the dev plan quota", err)
 			return
 		}
@@ -102,11 +97,10 @@ func handleDevJob[T any](run func(context.Context) (T, error)) http.HandlerFunc 
 	}
 }
 
-// handleDevSubscription is the /dev card's stand-in for Polar: it builds a
-// subscription event for the signed-in account, signs it with the configured
-// webhook secret, and puts it through the real webhook route. Signature
-// verification runs for real, so the card demonstrates the whole path rather
-// than a shortcut around it. Dev UI only, and only in hosted mode.
+// handleDevSubscription is the /dev card's stand-in for Polar: it signs a
+// subscription event for the signed-in account and puts it through the real
+// webhook route, so the card demonstrates the whole path rather than a
+// shortcut around it. Dev UI only, and only in hosted mode.
 //
 // Mounted behind requireAuth, so sessionFrom holds the account it acts for.
 func handleDevSubscription(cfg config.Config, database *db.DB, webhook http.HandlerFunc) http.HandlerFunc {
@@ -123,45 +117,7 @@ func handleDevSubscription(cfg config.Config, database *db.DB, webhook http.Hand
 			writeError(w, http.StatusBadRequest, "type and status are required")
 			return
 		}
-
-		var sub string
-		if err := database.QueryRowContext(r.Context(),
-			`SELECT sub FROM users WHERE id = $1`, sessionFrom(r).User.ID).Scan(&sub); err != nil {
-			serverError(w, r, "reading the signed-in account's sub", err)
-			return
-		}
-		now := time.Now()
-		periodEnd := now.AddDate(0, 1, 0).UTC()
-		delivery, err := polar.Delivery(polar.Event{
-			Type: body.Type,
-			Subscription: polar.Subscription{
-				ID:                 "dev_subscription",
-				Status:             body.Status,
-				CustomerID:         "dev_customer",
-				ExternalCustomerID: sub,
-				CurrentPeriodEnd:   &periodEnd,
-			},
-		})
-		if err != nil {
-			serverError(w, r, "building a dev Polar delivery", err)
-			return
-		}
-		header, err := polar.Sign(cfg.PolarWebhookSecret, "dev_"+db.Timestamp(now), now, delivery)
-		if err != nil {
-			serverError(w, r, "signing a dev Polar delivery", err)
-			return
-		}
-
-		// The signed delivery goes through the webhook handler itself and
-		// answers straight into this response, so what the card shows is
-		// what Polar would have got.
-		signed := r.Clone(r.Context())
-		signed.Method = http.MethodPost
-		signed.URL = &url.URL{Path: "/api/billing/polar/webhook"}
-		signed.Header = header
-		signed.Body = io.NopCloser(bytes.NewReader(delivery))
-		signed.ContentLength = int64(len(delivery))
-		webhook(w, signed)
+		deliverSignedSubscription(w, r, cfg, database, webhook, body.Type, body.Status)
 	}
 }
 
