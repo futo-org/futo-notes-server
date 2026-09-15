@@ -180,7 +180,7 @@ Current client key model:
 - Notes are encrypted with a random AES-256-GCM vault key.
 - The vault key is wrapped client-side with a PBKDF2-SHA-256 password key.
 - The server stores `key_salt`, `key_kdf`, and `encrypted_vault_key` on the collection — the **password envelope**.
-- The vault key may be wrapped a second time under a Recovery Key, stored as the nullable `recovery_key_salt`, `recovery_key_kdf`, and `recovery_encrypted_vault_key` (ADR 0005). Optional and null together: a vault written by a client that knows only the Vault Password has no recovery envelope.
+- The vault key may be wrapped a second time under a Recovery Key, stored as the nullable `recovery_key_salt`, `recovery_key_kdf`, and `recovery_encrypted_vault_key` (ADR 0005, named by ADR 0006). Optional and null together: a vault written by a client that knows only the Vault Password has no recovery envelope.
 - The server never sees the vault password, the recovery key, either derived key, the vault key, filenames, or note content.
 
 Key material is **not** on the 409-conflict path that object mutations use. A first

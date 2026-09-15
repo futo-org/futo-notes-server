@@ -188,6 +188,8 @@ The server stores — but cannot read — the material your client needs to unlo
 - The **password envelope** (`key_salt`, `key_kdf`, `encrypted_vault_key`) wraps the vault key under the vault password. Always present.
 - The **recovery envelope** (`recovery_key_salt`, `recovery_key_kdf`, `recovery_encrypted_vault_key`) wraps the same vault key under a generated recovery key instead. **Optional**, and the three fields are `null` together. Their absence means that vault has no recovery key: the vault password, or a device that is already unlocked, is the only way in.
 
+> **On a PUT, "optional" does not mean "leave unchanged".** Omitting the three `recovery_*` fields **deletes** any recovery envelope already stored. See [A PUT replaces the whole of the key material](#vault-key-material) below before you write one.
+
 Every field is opaque to the server, which never sees a vault password, a recovery key, either derived key, or the vault key itself.
 
 ```
@@ -233,16 +235,21 @@ not a conflict; only a stale token is. That is what lets an already-unlocked dev
 change the vault password or issue a new recovery key without racing a first claim. On
 a `409`, re-read, re-wrap from the token that came back, and retry.
 
-**A PUT replaces the whole of the key material, both envelopes together.** Omitting the
-`recovery_*` fields therefore **clears** the stored recovery envelope.
+**A PUT replaces the whole of the key material, both envelopes together.** There is no
+partial update and no way to address one envelope on its own, so **omitting the three
+`recovery_*` fields deletes any recovery envelope already stored for this vault**, in
+the same write that stores the password envelope. `null` and omitted mean the same
+thing here; neither means "leave it alone".
 
 Take that seriously if you are changing only one envelope. Changing the vault password
 re-wraps the *same* vault key, so the recovery envelope you did not send would still
-have opened the vault — dropping it destroys a working recovery door. **Send the other
-envelope back unchanged in the same request.** Same the other way round: issuing a new
-recovery key means sending the untouched password envelope alongside it.
+have opened the vault — dropping it destroys a working recovery door and the person
+loses their way back in. **Send the other envelope back unchanged in the same request**,
+taking it from the `GET` (or the previous `PUT`) you read the revision token from. Same
+the other way round: issuing a new recovery key means sending the untouched password
+envelope alongside it.
 
-The one case where clearing is the right outcome is a client that knows nothing about
+Deleting is the right outcome in exactly one case: a client that knows nothing about
 recovery keys. A v1 client re-wrapping generates a fresh vault key, so the recovery
 envelope it omits wrapped a key that no longer exists; keeping it would leave a recovery
 door that opens nothing.

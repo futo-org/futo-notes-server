@@ -939,20 +939,29 @@ paths:
         retry. This is what lets an already-unlocked client change the vault
         password or issue a new recovery key without a first-claim conflict.
 
-        **The recovery envelope is optional.** Send all three `recovery_*`
-        fields or none; a partial set is a `400`. A client that knows only the
-        vault password — a v1 client, or self-hosted password mode — omits them
-        and is otherwise unaffected.
+        **The recovery envelope is optional, and "optional" does not mean
+        "leave unchanged".** A PUT replaces the whole of the key material, both
+        envelopes together. **Omitting the three `recovery_*` fields DELETES
+        any recovery envelope already stored for this vault**, in the same
+        write that stores the password envelope. There is no partial update and
+        no way to address one envelope on its own.
 
-        **A PUT replaces the whole of the key material, both envelopes
-        together**, so omitting the `recovery_*` fields **clears** any stored
-        recovery envelope. Changing the vault password re-wraps the *same*
-        vault key, so a recovery envelope left out of that request would still
-        have opened the vault — dropping it destroys a working recovery door.
-        A client changing one envelope sends the other back unchanged. The one
-        case where clearing is right is a v1 client, which mints a fresh vault
-        key when it re-wraps, leaving the old recovery envelope wrapping a key
-        that no longer exists.
+        So a client re-wrapping one envelope **must send the other back
+        unchanged in the same request**. Changing the vault password re-wraps
+        the *same* vault key, so a recovery envelope left out of that request
+        would still have opened the vault — leaving it out destroys a working
+        recovery door and the person loses their way back in. The same holds in
+        reverse when issuing a new recovery key.
+
+        Deleting is the right outcome in exactly one case: a v1 client, which
+        mints a fresh vault key when it re-wraps and so leaves any old recovery
+        envelope wrapping a key that no longer exists. Keeping that would be a
+        recovery door that opens nothing.
+
+        Send all three `recovery_*` fields or none; a partial set is a `400`,
+        because half an envelope is a recovery door that cannot be opened. A
+        client that knows only the vault password — a v1 client, or self-hosted
+        password mode — omits all three and is otherwise unaffected.
 
         A successful re-wrap does not emit an SSE `change` event; peers learn
         about it on their next poll.
@@ -985,15 +994,24 @@ paths:
                   minLength: 1
                   description: |
                     Part of the optional recovery envelope. Send all three
-                    `recovery_*` fields or none.
+                    `recovery_*` fields or none; a partial set is a `400`.
+                    **Omitting all three deletes any stored recovery
+                    envelope** — it does not leave it unchanged. Re-send the
+                    stored envelope to keep it.
                 recovery_key_kdf:
                   type: object
                   additionalProperties: true
-                  description: Any JSON object — the client's recovery-key KDF parameters.
+                  description: |
+                    Any JSON object — the client's recovery-key KDF parameters.
+                    **Omitting the `recovery_*` fields deletes any stored
+                    recovery envelope.**
                 recovery_encrypted_vault_key:
                   type: string
                   minLength: 1
-                  description: The vault key wrapped under the recovery key.
+                  description: |
+                    The vault key wrapped under the recovery key. **Omitting
+                    the `recovery_*` fields deletes any stored recovery
+                    envelope.**
       responses:
         "200":
           description: Material stored, or the authoritative material adopted
