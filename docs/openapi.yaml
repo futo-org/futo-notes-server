@@ -1812,7 +1812,11 @@ components:
       scheme: bearer
       description: |
         The raw session token returned by a login endpoint. Preferred for
-        non-browser clients.
+        non-browser clients. A token redeemed from a Login Hand-off ticket
+        slides: it expires 90 days after the last authenticated request. If
+        the request also carries a `session` cookie, the cookie is checked
+        first and wins, and the request gets the cookie's fixed 7-day session
+        instead of this token's sliding one.
     cookieAuth:
       type: apiKey
       in: cookie
