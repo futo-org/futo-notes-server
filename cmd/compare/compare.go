@@ -58,6 +58,10 @@ type wireResponse struct {
 	Header http.Header
 	Body   []byte
 	JSON   any
+	// Normalized is JSON with identities and timestamps replaced by
+	// placeholders — the form the two sides are actually compared in, and the
+	// only form an allowance may reason about field-by-field.
+	Normalized any
 }
 
 type responsePair struct {
@@ -182,6 +186,7 @@ func (r *runner) stepNamed(ctx context.Context, label string, spec requestSpec) 
 		}
 		tsJSON := normalizeJSON(pair.TS.JSON, r.ts, r.startedAt)
 		goJSON := normalizeJSON(pair.Go.JSON, r.goTarget, r.startedAt)
+		pair.TS.Normalized, pair.Go.Normalized = tsJSON, goJSON
 		if !reflect.DeepEqual(tsJSON, goJSON) {
 			problems = append(problems, fmt.Sprintf("JSON differs %s=%s %s=%s", r.ts.name, compactJSON(tsJSON), r.goTarget.name, compactJSON(goJSON)))
 		}
@@ -217,6 +222,8 @@ const (
 	allowCapabilityVersion      = "capability-version"
 	allowMalformedAuthorization = "malformed-authorization"
 	allowTombstoneRedelete      = "tombstone-redelete"
+	allowTombstoneStaleVersion  = "tombstone-stale-version"
+	allowRecoveryEnvelope       = "recovery-envelope"
 	allowLegacyMutationID       = "legacy-mutation-id"
 )
 
@@ -255,6 +262,22 @@ func matchAcceptedDeviation(kind string, problems []string, pair responsePair) (
 			return "", false
 		}
 		return "accepted no-op tombstone behavior (docs/Rewriting the server in Go.md §Delete)", true
+	case allowTombstoneStaleVersion:
+		goCurrentVersion, goCurrentOK := jsonInt(pair.Go.JSON, "currentVersion")
+		goError, _ := jsonPath(pair.Go.JSON, "error")
+		tsDeleted, _ := jsonPath(pair.TS.JSON, "object.deleted")
+		if len(problems) != 3 || pair.TS.Status != http.StatusOK || pair.Go.Status != http.StatusConflict ||
+			goError != "version conflict" || !goCurrentOK || goCurrentVersion <= tombstoneStaleVersion || tsDeleted != true {
+			return "", false
+		}
+		return "accepted tombstone race-guard behavior (docs/Rewriting the server in Go.md §Delete)", true
+	case allowRecoveryEnvelope:
+		if len(problems) != 1 || !strings.HasPrefix(problems[0], "JSON differs ") ||
+			pair.TS.Status != http.StatusOK || pair.Go.Status != http.StatusOK ||
+			!keyMaterialDiffersOnlyByRecoveryEnvelope(pair.TS.Normalized, pair.Go.Normalized) {
+			return "", false
+		}
+		return "accepted recovery envelope fields (docs/Rewriting the server in Go.md §Collection Keys)", true
 	case allowLegacyMutationID:
 		goError, _ := jsonPath(pair.Go.JSON, "error")
 		tsDeleted, _ := jsonPath(pair.TS.JSON, "object.deleted")
@@ -266,6 +289,41 @@ func matchAcceptedDeviation(kind string, problems []string, pair responsePair) (
 	default:
 		return "", false
 	}
+}
+
+// recoveryEnvelopeFields are the three nullable fields the Go rewrite always
+// reports on the key material so a client can tell "no recovery key" from
+// "server too old" (docs/adr/0006-recovery-envelope-wire-contract.md). The
+// TypeScript server predates them and reports neither the fields nor a null.
+var recoveryEnvelopeFields = []string{"recovery_key_salt", "recovery_key_kdf", "recovery_encrypted_vault_key"}
+
+// keyMaterialDiffersOnlyByRecoveryEnvelope is true when the Go key material is
+// the TypeScript key material plus exactly those three fields, all null. A
+// non-null value there is a real difference: it means state the TypeScript
+// server cannot have, which is not what this allowance is for.
+func keyMaterialDiffersOnlyByRecoveryEnvelope(tsValue, goValue any) bool {
+	tsBody, tsOK := tsValue.(map[string]any)
+	goBody, goOK := goValue.(map[string]any)
+	if !tsOK || !goOK || len(tsBody) != 1 || len(goBody) != 1 {
+		return false
+	}
+	tsKey, tsKeyOK := tsBody["key"].(map[string]any)
+	goKey, goKeyOK := goBody["key"].(map[string]any)
+	if !tsKeyOK || !goKeyOK {
+		return false
+	}
+	goWithoutRecovery := make(map[string]any, len(goKey))
+	for name, value := range goKey {
+		goWithoutRecovery[name] = value
+	}
+	for _, name := range recoveryEnvelopeFields {
+		value, present := goWithoutRecovery[name]
+		if !present || value != nil {
+			return false
+		}
+		delete(goWithoutRecovery, name)
+	}
+	return reflect.DeepEqual(tsKey, goWithoutRecovery)
 }
 
 func capabilitiesDifferOnlyByVersion(tsValue, goValue any) bool {
