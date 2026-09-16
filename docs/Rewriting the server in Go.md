@@ -350,6 +350,8 @@ We rely on SQL transactions for writes and other operations to avoid conflicts f
 ## Migrating existing users to the new server
 In the Go rewrite, include all server migrations up to `011_mutation_results`, the current one on the server, and give it the same name. Use the `kysely_migration` table. Will need a folder to store the migrations.
 
+Since v0.8.0 the Go server also ships migrations the TypeScript server never had (`012_login_handoffs` onward, for the hosted service). They go in the same shared `kysely_migration` table, and Kysely refuses to start against a database holding migrations it does not know — so **adoption is forward-only from v0.8.0**: once a Go server has started against a database, the TypeScript server cannot take it back. A hoster's way back is a restore from the backup they take before the swap, not a downgrade in place. The decision, the measurements behind it, and the self-hoster procedure are in `docs/adr/0010-typescript-adoption-is-forward-only.md`.
+
 ## Notes on building this agentically
 The goal is to have this be a painless, invisble transition. We could build a harness that uses the Rust core to simulate a client, perhaps two copies, and has the client(s) do a bunch of transactions with a copy of the old and new server and compare at every step. We just want the behavior visible to the client to be the same, it doesn't have to be 100% the same from within the server. This is a gate to launch.
 

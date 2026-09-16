@@ -61,7 +61,10 @@ test:image:
 
 # This is the cutover gate, not a unit approximation. It creates databases with
 # the current and historical TypeScript servers, drives them with the native
-# Rust sync client, swaps Go in, audits cleanup, and rolls back to TypeScript.
+# Rust sync client, swaps Go in, and audits cleanup. Since v0.8.0 the swap is
+# one-way, so the last leg asserts the TypeScript server REFUSES the adopted
+# database rather than that it takes it back
+# (docs/adr/0010-typescript-adoption-is-forward-only.md).
 test:adoption:
   extends: .skip-soak-schedule
   stage: adoption

@@ -106,6 +106,36 @@ assert_eq() {
   fi
 }
 
+# Migration expectations are derived from the two checkouts rather than written
+# down, so landing a migration does not silently make this gate stale.
+migration_names() {
+  local directory=$1
+  local extension=$2
+  local names
+  names=$(find "$directory" -maxdepth 1 -name "*$extension" -exec basename {} "$extension" \; | sort | paste -sd, -)
+  if [[ -z "$names" ]]; then
+    echo "no *$extension migrations found in $directory" >&2
+    exit 1
+  fi
+  printf '%s' "$names"
+}
+
+# Names in the first list that the second does not have.
+migration_difference() {
+  comm -23 <(tr ',' '\n' <<<"$1" | sort) <(tr ',' '\n' <<<"$2" | sort) | paste -sd, -
+}
+
+# What the Go server reported applying on its most recent start, comma-joined.
+# Empty when it applied none, which is itself an expectation worth asserting.
+# Anchored on the whole log message (cmd/server/main.go:268) so an unrelated
+# `migrations=` field could never be mistaken for this one.
+applied_migrations() {
+  local line
+  line=$(rg -o 'msg="applied database migrations" count=[0-9]+ migrations="[^"]*"' "$server_log" | tail -1 || true)
+  [[ -n "$line" ]] || return 0
+  sed 's/.*migrations="//; s/"$//; s/ //g' <<<"$line"
+}
+
 create_database() {
   active_database=$1
   admin_psql -c "CREATE DATABASE \"$active_database\"" >/dev/null
@@ -331,7 +361,18 @@ verify_swap_continuity() {
   json_request POST /api/auth/password/login 200 '' "{\"password\":\"$password\"}"
   go_token=$(jq -er '.token' <<<"$RESPONSE")
   json_request GET "/api/collections/$collection_id/key" 200 "$go_token"
-  assert_eq "collection key after swap" "$(jq -cS '.key | del(.key_updated_at)' <<<"$RESPONSE")" "$key_before"
+  local key_after
+  key_after=$(jq -cS '.key | del(.key_updated_at)' <<<"$RESPONSE")
+  # Everything the TypeScript server wrote has to survive the swap byte for
+  # byte. The Go server additionally always reports the recovery envelope
+  # (docs/adr/0006-recovery-envelope-wire-contract.md), which on an adopted
+  # database must read as "this vault has no recovery key" -- present, and null.
+  assert_eq "collection key after swap" \
+    "$(jq -cS 'del(.recovery_key_salt, .recovery_key_kdf, .recovery_encrypted_vault_key)' <<<"$key_after")" "$key_before"
+  assert_eq "recovery envelope after swap" \
+    "$(jq -er '[(has("recovery_key_salt") and .recovery_key_salt == null),
+                (has("recovery_key_kdf") and .recovery_key_kdf == null),
+                (has("recovery_encrypted_vault_key") and .recovery_encrypted_vault_key == null)] | all' <<<"$key_after")" true
 
   json_request GET "/api/collections/$collection_id/objects?sinceVersion=$pre_swap_cursor" 200 "$ts_token"
   assert_eq "pre-swap cursor delta size" "$(jq -er '.objects | length' <<<"$RESPONSE")" 2
@@ -381,13 +422,63 @@ write_through_go() {
   json_request DELETE "/api/collections/$collection_id/objects/$go_object?version=2" 200 "$go_token" '' rehearsal-go-delete
 }
 
-verify_rollback() {
+# Adoption is forward-only from v0.8.0 (docs/adr/0010-typescript-adoption-is-
+# forward-only.md): both servers share the kysely_migration table, and Kysely
+# refuses to start against a database holding migrations its provider does not
+# list. This asserts the refusal explicitly, and asserts WHY it refuses, so that
+# making the return trip work again fails this job instead of passing quietly.
+start_ts_expecting_migration_refusal() {
+  local source=$1
+  local want_migration=$2
+  : >"$server_log"
+  (
+    cd "$source"
+    exec env AUTH_MODE=password PORT="$port" DATABASE_URL="postgres://futo_notes:$postgres_password@$postgres_host:$postgres_port/$active_database" \
+      BLOB_DIR="$blob_dir" COOKIE_SECURE=false BLOB_GC_ENABLED=false LOG_LEVEL=warn \
+      FUTO_NOTES_PASSWORD= FUTO_NOTES_PASSWORD_HASH="$password_hash" bun src/index.ts
+  ) >"$server_log" 2>&1 &
+  server_pid=$!
+  for _ in {1..200}; do
+    if ! kill -0 "$server_pid" 2>/dev/null; then
+      break
+    fi
+    if curl --silent --fail --max-time 1 "http://127.0.0.1:$port/health" >/dev/null; then
+      echo "the TypeScript server started against a forward-only database; adoption is no longer one-way" >&2
+      echo "if that is intended, change docs/adr/0010-typescript-adoption-is-forward-only.md first" >&2
+      stop_server
+      exit 1
+    fi
+    sleep 0.1
+  done
+  if kill -0 "$server_pid" 2>/dev/null; then
+    echo "the TypeScript server neither started nor exited within 20s" >&2
+    stop_server
+    exit 1
+  fi
+  wait "$server_pid" 2>/dev/null || true
+  server_pid=
+  if ! rg -q "corrupted migrations: previously executed migration $want_migration is missing" "$server_log"; then
+    echo "the TypeScript server refused the adopted database for the wrong reason" >&2
+    echo "wanted: corrupted migrations naming $want_migration" >&2
+    tail -20 "$server_log" >&2 || true
+    exit 1
+  fi
+}
+
+# A refused rollback must also be a rollback that changed nothing: the adopted
+# database still serves every write Go made. This is what survives of the old
+# verify_rollback, asserted through Go because there is no longer another way.
+verify_forward_only() {
+  local first_go_only=$1
+  start_ts_expecting_migration_refusal "$ts_repo" "$first_go_only"
+
+  start_go
   json_request GET /api/auth 200 "$ts_token"
-  assert_eq "TS session user after rollback" "$(jq -er '.user.id' <<<"$RESPONSE")" "$user_id"
+  assert_eq "TS session user after the refused rollback" "$(jq -er '.user.id' <<<"$RESPONSE")" "$user_id"
   json_request GET "/api/collections/$collection_id/objects?sinceVersion=$rollback_cursor" 200 "$ts_token"
-  assert_eq "rollback cursor delta size" "$(jq -er '.objects | length' <<<"$RESPONSE")" 1
-  assert_eq "Go tombstone visible to TS" "$(jq -er --arg id "$go_object" '[.objects[] | select(.id == $id and .version == "3" and .deleted == true)] | length' <<<"$RESPONSE")" 1
-  assert_eq "rollback migration count" "$(scalar 'SELECT count(*) FROM kysely_migration')" 11
+  assert_eq "post-Go-write cursor delta size" "$(jq -er '.objects | length' <<<"$RESPONSE")" 1
+  assert_eq "Go tombstone survived the refused rollback" "$(jq -er --arg id "$go_object" '[.objects[] | select(.id == $id and .version == "3" and .deleted == true)] | length' <<<"$RESPONSE")" 1
+  assert_eq "migrations after the refused rollback" "$(scalar "SELECT string_agg(name, ',' ORDER BY name) FROM kysely_migration")" "$go_migrations"
   run_rust_case single_note_round_trip_and_cursor_advance
 }
 
@@ -401,11 +492,14 @@ prepare_old_source() {
 rehearse() {
   local kind=$1
   local ts_source=$ts_repo
-  local before_migrations=11
   if [[ "$kind" == old ]]; then
     ts_source=$old_ts_source
-    before_migrations=8
   fi
+  # What this TypeScript source ships, and therefore what Go has to add on top.
+  local source_migrations
+  source_migrations=$(migration_names "$ts_source/src/db/migrations" .ts)
+  local expected_applied
+  expected_applied=$(migration_difference "$go_migrations" "$source_migrations")
 
   echo "rehearsing $kind TypeScript adoption"
   active_database="futo_notes_adoption_${kind}_${run_id}"
@@ -413,7 +507,7 @@ rehearse() {
   mkdir -p "$blob_dir"
   create_database "$active_database"
   start_ts "$ts_source" "$kind TypeScript server"
-  assert_eq "$kind TS migration count" "$(scalar 'SELECT count(*) FROM kysely_migration')" "$before_migrations"
+  assert_eq "$kind TS migrations before adoption" "$(scalar "SELECT string_agg(name, ',' ORDER BY name) FROM kysely_migration")" "$source_migrations"
   seed_ts_traffic
   stop_server
 
@@ -424,37 +518,42 @@ rehearse() {
   fi
 
   start_go
-  assert_eq "$kind Go migration count" "$(scalar 'SELECT count(*) FROM kysely_migration')" 11
-  if [[ "$kind" == latest ]]; then
-    if rg -q 'applied database migrations' "$server_log"; then
-      echo "Go unexpectedly applied migrations to the latest TS database" >&2
-      exit 1
-    fi
-  else
-    assert_eq "old-version migrations applied" \
-      "$(scalar "SELECT string_agg(name, ',' ORDER BY name) FROM kysely_migration WHERE name >= '009_'")" \
-      '009_restore_plural_collections,010_authoritative_blob_ledger,011_mutation_results'
-    if ! rg -q 'count=3 migrations="009_restore_plural_collections, 010_authoritative_blob_ledger, 011_mutation_results"' "$server_log"; then
-      echo "Go did not report exactly migrations 009-011 for old TS adoption" >&2
-      exit 1
-    fi
+  # Go must apply exactly the migrations this TypeScript source does not ship,
+  # report them, and leave the table holding the full Go set -- no more, no less.
+  assert_eq "$kind migrations applied on adoption" "$(applied_migrations)" "$expected_applied"
+  assert_eq "$kind migrations after adoption" "$(scalar "SELECT string_agg(name, ',' ORDER BY name) FROM kysely_migration")" "$go_migrations"
+  if [[ "$kind" == old ]]; then
     plant_aged_rows
   fi
-
   verify_swap_continuity
   audit_jobs
   write_through_go
   stop_server
 
-  start_ts "$ts_repo" "rollback TypeScript server"
-  verify_rollback
+  verify_forward_only "$first_go_only_migration"
   stop_server
   drop_database "$active_database"
-  echo "$kind adoption and rollback passed"
+  echo "$kind adoption passed, and rollback to TypeScript is refused as designed"
 }
 
 echo "building Go server"
 (cd "$repo_root" && GOTOOLCHAIN=auto go build -o "$go_server" ./cmd/server)
+
+# The forward-only boundary (docs/adr/0010-typescript-adoption-is-forward-only.md)
+# is wherever the Go migration set runs past the latest TypeScript one. Derive it
+# rather than name it, so a new migration lands without touching this script --
+# and so the boundary disappearing is a loud failure, not a quiet pass.
+go_migrations=$(migration_names "$repo_root/internal/db/migrations/postgres" .sql)
+latest_ts_migrations=$(migration_names "$ts_repo/src/db/migrations" .ts)
+go_only_migrations=$(migration_difference "$go_migrations" "$latest_ts_migrations")
+if [[ -z "$go_only_migrations" ]]; then
+  echo "the Go server ships no migration the TypeScript server lacks, so adoption is no longer forward-only" >&2
+  echo "that is a contract change: update docs/adr/0010-typescript-adoption-is-forward-only.md before this script" >&2
+  exit 1
+fi
+first_go_only_migration=${go_only_migrations%%,*}
+echo "forward-only from $first_go_only_migration (Go-only migrations: $go_only_migrations)"
+
 password_hash=$(cd "$ts_repo" && bun src/index.ts hash "$password")
 if [[ "$password_hash" != scrypt:* ]]; then
   echo "TypeScript server did not mint a scrypt hash" >&2

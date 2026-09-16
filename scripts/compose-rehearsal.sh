@@ -210,6 +210,23 @@ bring_up_server() {
   assert_health "$label"
 }
 
+# The first migration the TypeScript server does not ship is where adoption
+# stops being reversible (docs/adr/0010-typescript-adoption-is-forward-only.md).
+# Derived from the two checkouts so a new migration does not make phase 6 stale;
+# scripts/adoption-rehearsal.sh derives the same boundary the same way.
+first_go_only_migration=$(
+  comm -23 \
+    <(find "$repo_root/internal/db/migrations/postgres" -maxdepth 1 -name '*.sql' -exec basename {} .sql \; | sort) \
+    <(find "$ts_repo/src/db/migrations" -maxdepth 1 -name '*.ts' -exec basename {} .ts \; | sort) \
+    | head -1
+)
+if [[ -z "$first_go_only_migration" ]]; then
+  echo "the Go server ships no migration the TypeScript server lacks, so adoption is no longer forward-only" >&2
+  echo "that is a contract change: update docs/adr/0010-typescript-adoption-is-forward-only.md before this script" >&2
+  exit 1
+fi
+echo "forward-only from $first_go_only_migration"
+
 echo "== build images =="
 docker build --tag "$ts_image" "$ts_repo" >/dev/null
 echo "built TypeScript image $ts_image"
@@ -375,30 +392,67 @@ post_go_head=$(jq -er '.collectionVersion' <<<"$RESPONSE")
 pass "Go created, updated and deleted through version $post_go_head"
 
 echo
-echo "== phase 6: roll back to the TypeScript image =="
+echo "== phase 6: re-tagging back to TypeScript is refused, and costs nothing =="
+# Adoption is forward-only from v0.8.0 (docs/adr/0010-typescript-adoption-is-
+# forward-only.md). Re-pointing the tag is exactly what a Docker self-hoster
+# would try, so the thing worth proving at the container level is no longer that
+# it works: it is that it fails closed. The container must refuse to come up, say
+# why, and leave the volumes exactly as the Go server left them.
 compose stop --timeout 20 server >/dev/null
 docker tag "$ts_image" "$swap_tag"
-bring_up_server "rollback TypeScript"
+compose up -d --no-wait server >/dev/null
+refused_container=$(compose ps -qa server)
+if [[ -z "$refused_container" ]]; then
+  echo "FAIL  rollback TypeScript: no server container after compose up" >&2
+  exit 1
+fi
+refused_log=
+for _ in $(seq 1 "$wait_timeout"); do
+  refused_log=$(docker logs "$refused_container" 2>&1 || true)
+  if grep -q 'corrupted migrations' <<<"$refused_log"; then
+    break
+  fi
+  if curl --silent --fail --max-time 1 "http://127.0.0.1:$port/health" >/dev/null; then
+    echo "FAIL  the TypeScript image started against a forward-only database; adoption is no longer one-way" >&2
+    echo "      if that is intended, change docs/adr/0010-typescript-adoption-is-forward-only.md first" >&2
+    exit 1
+  fi
+  sleep 1
+done
+if ! grep -q "corrupted migrations: previously executed migration $first_go_only_migration is missing" <<<"$refused_log"; then
+  echo "FAIL  the TypeScript image did not refuse the adopted database for the expected reason" >&2
+  echo "      wanted: corrupted migrations naming $first_go_only_migration" >&2
+  tail -20 <<<"$refused_log" >&2
+  exit 1
+fi
+pass "the TypeScript image refuses the adopted database, naming $first_go_only_migration"
+
+echo
+echo "== phase 6b: re-tag forward again; the refused rollback changed nothing =="
+compose stop --timeout 20 server >/dev/null
+docker tag "$go_image" "$swap_tag"
+current_container=
+bring_up_server "recovered Go"
 
 json_request GET /api/auth 200 "$ts_token"
-assert_eq "token still authenticates after rollback" "$(jq -er '.user.id' <<<"$RESPONSE")" "$user_id"
+assert_eq "token still authenticates after the refused rollback" "$(jq -er '.user.id' <<<"$RESPONSE")" "$user_id"
 
 json_request GET "/api/collections/$collection_id/objects?sinceVersion=$rollback_cursor" 200 "$ts_token"
-assert_eq "rollback cursor delta size" "$(jq -er '.objects | length' <<<"$RESPONSE")" 2
-assert_eq "Go tombstone visible to TypeScript" \
+assert_eq "post-Go-write cursor delta size" "$(jq -er '.objects | length' <<<"$RESPONSE")" 2
+assert_eq "Go tombstone survived the refused rollback" \
   "$(jq -er --arg id "$go_object" '[.objects[] | select(.id == $id and .version == "3" and .deleted == true)] | length' <<<"$RESPONSE")" 1
-assert_eq "Go-created object visible to TypeScript" \
+assert_eq "Go-created object survived the refused rollback" \
   "$(jq -er --arg id "$go_kept_object" '[.objects[] | select(.id == $id and .version == "1" and .deleted == false)] | length' <<<"$RESPONSE")" 1
-assert_blob "Go-written blob bytes round-trip through TypeScript" "$ts_token" "$go_kept_key" "$go_kept_bytes"
+assert_blob "Go-written blob bytes still round-trip" "$ts_token" "$go_kept_key" "$go_kept_bytes"
 
-rollback_bytes='post-rollback ts bytes'
-upload_blob "$ts_token" "$rollback_bytes"
-rollback_key=$(jq -er '.key' <<<"$RESPONSE")
-json_request POST "/api/collections/$collection_id/objects" 201 "$ts_token" \
-  "{\"blob_key\":\"$rollback_key\",\"size_bytes\":${#rollback_bytes}}" compose-ts-rollback-create
-assert_eq "TypeScript still accepts writes after rollback" \
+recovered_bytes='post-refusal go bytes'
+upload_blob "$go_token" "$recovered_bytes"
+recovered_key=$(jq -er '.key' <<<"$RESPONSE")
+json_request POST "/api/collections/$collection_id/objects" 201 "$go_token" \
+  "{\"blob_key\":\"$recovered_key\",\"size_bytes\":${#recovered_bytes}}" compose-go-post-refusal-create
+assert_eq "the server still accepts writes after the refused rollback" \
   "$(jq -er '.object.version' <<<"$RESPONSE")" 1
-assert_blob "post-rollback blob bytes round-trip" "$ts_token" "$rollback_key" "$rollback_bytes"
+assert_blob "post-refusal blob bytes round-trip" "$go_token" "$recovered_key" "$recovered_bytes"
 
 echo
 echo "== phase 7: tear down the upgrade project and boot a shipped SQLite new install =="
