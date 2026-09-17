@@ -53,6 +53,8 @@ Seeded from the migration plan's accepted deviations, keyed by step + JSON path,
 - Malformed `Authorization` header: Go `401 {"error":"unauthorized"}` vs TS `invalid_session` + `WWW-Authenticate` (plan §How Authentication Works).
 - Legacy-syntax Mutation-Id: Go `400` vs TS recorded outcome (plan §Mutation ID format).
 - Capability doc `version` only: the implementation versions legitimately differ (plan §How Authentication Works). Any other capability metadata difference is a divergence.
+- Re-delete of a tombstone: Go returns the frozen tombstone as a no-op, TS advances the object version and collection cursor by one (plan §Delete).
+- Stale `?version` against a tombstone: Go `409 version conflict`, TS ignores the race guard once `deleted` is set and answers `200` with an advanced tombstone (plan §Delete).
 
 Anything not on the allowlist that diffs = triage: Go bug (fix it) or newly discovered accepted deviation (document in the migration plan, then allowlist).
 
@@ -63,7 +65,7 @@ Run once in dev mode, once in password mode (`-mode dev|password|all`):
 3. **Auth (password)**: correct/wrong password, plaintext and scrypt-hash configs, rate limit: 11th attempt in 60s → 429 + `Retry-After`.
 4. **Collections**: claim, second claim (one-per-account behavior), list, get, get unknown → 404, key PUT/GET, delete, post-delete 404s.
 5. **Blobs**: `POST /api/blobs`, GET round-trip bytes, DELETE, oversize (>100 MiB real body, once), bad key shapes.
-6. **Objects**: create (blob-first flow), list with `sinceVersion`/`limit` incl. clamp at 1000, get, update happy path, stale-version update → 409 body shape, delete, **re-delete → no-op tombstone**, delete with wrong version → 409. The clamp check seeds identical deterministic rows directly into both scratch databases, then requires exactly 1000 objects, `hasMore: true`, and the expected `nextCursor`; this keeps the boundary observable without adding 1000 unrelated mutation steps and identity bindings.
+6. **Objects**: create (blob-first flow), list with `sinceVersion`/`limit` incl. clamp at 1000, get, update happy path, stale-version update → 409 body shape, delete, **re-delete → no-op tombstone**, **stale `?version` against the tombstone → 409**, delete with wrong version → 409. The clamp check seeds identical deterministic rows directly into both scratch databases, then requires exactly 1000 objects, `hasMore: true`, and the expected `nextCursor`; this keeps the boundary observable without adding 1000 unrelated mutation steps and identity bindings.
 7. **Blob-objects + mutations**: create with `Mutation-Id`, exact replay → `replayed`, `GET create-mutations/:id` for done/unknown, update via blob-objects, batch upload (mixed create/update frames, malformed frame, >200 entries, whole-request cap), batch download (present/missing keys, `omitted` at cap). The per-entry `too_large` result is unreachable with the fixed v1 limits because the 32 MiB request cap is lower than the 100 MiB entry cap; exercise it only if a later change makes the limits configurable or raises `MAX_BATCH_BYTES`.
 8. **Ownership**: user B (dev mode's multi-user) hits user A's collection/objects/blobs → 404 everywhere, never 403.
 9. **SSE checkpoint** after a mutation burst.

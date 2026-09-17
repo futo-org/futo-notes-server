@@ -217,6 +217,7 @@ const (
 	allowCapabilityVersion      = "capability-version"
 	allowMalformedAuthorization = "malformed-authorization"
 	allowTombstoneRedelete      = "tombstone-redelete"
+	allowTombstoneStaleVersion  = "tombstone-stale-version"
 	allowLegacyMutationID       = "legacy-mutation-id"
 )
 
@@ -255,6 +256,15 @@ func matchAcceptedDeviation(kind string, problems []string, pair responsePair) (
 			return "", false
 		}
 		return "accepted no-op tombstone behavior (docs/Rewriting the server in Go.md §Delete)", true
+	case allowTombstoneStaleVersion:
+		goCurrentVersion, goCurrentOK := jsonInt(pair.Go.JSON, "currentVersion")
+		goError, _ := jsonPath(pair.Go.JSON, "error")
+		tsDeleted, _ := jsonPath(pair.TS.JSON, "object.deleted")
+		if len(problems) != 3 || pair.TS.Status != http.StatusOK || pair.Go.Status != http.StatusConflict ||
+			goError != "version conflict" || !goCurrentOK || goCurrentVersion <= tombstoneStaleVersion || tsDeleted != true {
+			return "", false
+		}
+		return "accepted tombstone race-guard behavior (docs/Rewriting the server in Go.md §Delete)", true
 	case allowLegacyMutationID:
 		goError, _ := jsonPath(pair.Go.JSON, "error")
 		tsDeleted, _ := jsonPath(pair.TS.JSON, "object.deleted")

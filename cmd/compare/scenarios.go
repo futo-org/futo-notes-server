@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"futo-notes-server/internal/config"
@@ -447,14 +448,29 @@ func (r *runner) scenarioSSE(ctx context.Context) {
 	}
 }
 
+// The stale version the tombstone race-guard step sends. phObjectOne is at
+// version 3 by the time the tail runs, so 1 is unambiguously behind it.
+const tombstoneStaleVersion = 1
+
 // Accepted deviations that mutate only one side run after every parity
 // checkpoint so their intentionally different state cannot create cascades.
 func (r *runner) scenarioAcceptedTail(ctx context.Context) {
 	if r.enabled("objects") {
-		r.step(ctx, "objects", "re-delete tombstone", requestSpec{
-			Method: http.MethodDelete, Path: "/api/collections/" + phCollectionA + "/objects/" + phObjectOne + "?version=1",
+		// Unconditional first: TS advances the tombstone once per re-delete, and
+		// allowTombstoneRedelete asserts TS is exactly one version ahead of Go's
+		// no-op. Running the stale guard first would advance TS a second time and
+		// that invariant would no longer describe the pair.
+		r.step(ctx, "objects", "re-delete tombstone is a no-op", requestSpec{
+			Method: http.MethodDelete, Path: "/api/collections/" + phCollectionA + "/objects/" + phObjectOne,
 			Auth: phTokenA, WantStatus: http.StatusOK,
 			Allow: allowTombstoneRedelete,
+		})
+		r.step(ctx, "objects", "stale re-delete is a version conflict", requestSpec{
+			Method: http.MethodDelete,
+			Path: "/api/collections/" + phCollectionA + "/objects/" + phObjectOne +
+				"?version=" + strconv.Itoa(tombstoneStaleVersion),
+			Auth: phTokenA, WantStatus: http.StatusConflict,
+			Allow: allowTombstoneStaleVersion,
 		})
 	}
 	if r.enabled("blob-objects") {
