@@ -47,6 +47,57 @@ func TestCapabilityVersionDeviationIsNarrow(t *testing.T) {
 	}
 }
 
+// The tombstone race guard is the one place the Go rewrite answers a different
+// status than the TypeScript server, so the allowance has to accept exactly
+// that pair and nothing wider.
+func TestTombstoneStaleVersionDeviationIsNarrow(t *testing.T) {
+	problems := []string{"expected status 409", "status differs", "JSON differs"}
+	pair := responsePair{
+		TS: wireResponse{Status: http.StatusOK, JSON: decodeStrict([]byte(`{"object":{"id":"one","version":"4","change_seq":"9","deleted":true},"collectionVersion":9}`))},
+		Go: wireResponse{Status: http.StatusConflict, JSON: decodeStrict([]byte(`{"error":"version conflict","currentVersion":3,"currentBlobKey":"blob"}`))},
+	}
+	if _, ok := matchAcceptedDeviation(allowTombstoneStaleVersion, problems, pair); !ok {
+		t.Fatal("known tombstone stale-version shape was not accepted")
+	}
+	if _, ok := matchAcceptedDeviation(allowTombstoneStaleVersion, append(problems, "new difference"), pair); ok {
+		t.Fatal("allowlist hid an additional difference")
+	}
+	stillOK := pair
+	stillOK.Go = wireResponse{Status: http.StatusOK, JSON: decodeStrict([]byte(`{"object":{"id":"one","version":"3","change_seq":"8","deleted":true},"collectionVersion":8}`))}
+	if _, ok := matchAcceptedDeviation(allowTombstoneStaleVersion, problems, stillOK); ok {
+		t.Fatal("allowlist accepted a Go side that skipped the race guard")
+	}
+	staleCurrent := pair
+	staleCurrent.Go.JSON = decodeStrict([]byte(`{"error":"version conflict","currentVersion":1,"currentBlobKey":"blob"}`))
+	if _, ok := matchAcceptedDeviation(allowTombstoneStaleVersion, problems, staleCurrent); ok {
+		t.Fatal("allowlist accepted a conflict that did not report a newer version")
+	}
+}
+
+// The Go rewrite always reports the three recovery-envelope fields; the
+// TypeScript server has never heard of them. Everything else about the key
+// material still has to match.
+func TestRecoveryEnvelopeDeviationIsNarrow(t *testing.T) {
+	problems := []string{"JSON differs here"}
+	pair := responsePair{
+		TS: wireResponse{Status: http.StatusOK, Normalized: decodeStrict([]byte(`{"key":{"key_salt":"c2FsdA","key_kdf":{"name":"scrypt"},"key_updated_at":"<timestamp>","encrypted_vault_key":"d3JhcHBlZA"}}`))},
+		Go: wireResponse{Status: http.StatusOK, Normalized: decodeStrict([]byte(`{"key":{"key_salt":"c2FsdA","key_kdf":{"name":"scrypt"},"key_updated_at":"<timestamp>","encrypted_vault_key":"d3JhcHBlZA","recovery_key_salt":null,"recovery_key_kdf":null,"recovery_encrypted_vault_key":null}}`))},
+	}
+	if _, ok := matchAcceptedDeviation(allowRecoveryEnvelope, problems, pair); !ok {
+		t.Fatal("recovery-envelope-only key difference was not accepted")
+	}
+	populated := pair
+	populated.Go.Normalized = decodeStrict([]byte(`{"key":{"key_salt":"c2FsdA","key_kdf":{"name":"scrypt"},"encrypted_vault_key":"d3JhcHBlZA","recovery_key_salt":"cw","recovery_key_kdf":null,"recovery_encrypted_vault_key":null}}`))
+	if _, ok := matchAcceptedDeviation(allowRecoveryEnvelope, problems, populated); ok {
+		t.Fatal("allowlist accepted a populated recovery envelope")
+	}
+	otherField := pair
+	otherField.Go.Normalized = decodeStrict([]byte(`{"key":{"key_salt":"ZGlmZmVyZW50","key_kdf":{"name":"scrypt"},"encrypted_vault_key":"d3JhcHBlZA","recovery_key_salt":null,"recovery_key_kdf":null,"recovery_encrypted_vault_key":null}}`))
+	if _, ok := matchAcceptedDeviation(allowRecoveryEnvelope, problems, otherField); ok {
+		t.Fatal("allowlist hid a password-envelope difference")
+	}
+}
+
 func TestPullLimitProblems(t *testing.T) {
 	objects := make([]any, 1000)
 	value := map[string]any{

@@ -9,7 +9,10 @@ TS version several migrations behind. That reframes what confidence means:
    rehearsed once, but an automated rehearsal that synthesizes a TS installation
    and swaps Go into it, runnable on every commit.
 2. The **rollback path** must be documented and tested, because we can't be there
-   when a cutover goes sideways.
+   when a cutover goes sideways. **From v0.8.0 the honest answer is that there
+   is no in-place rollback** — the path that must be documented and tested is
+   restore-from-backup, and the gate asserts the downgrade is refused rather
+   than that it works (`docs/adr/0010-typescript-adoption-is-forward-only.md`).
 3. The **env contract** must be settled: every old var is either honored or
    deliberately dropped with a note.
 
@@ -20,8 +23,9 @@ Implementation update later on 2026-08-21:
 - Step 1 is implemented. `BLOB_GC_ENABLED=false` omits only the destructive GC
   job, and boot warnings identify every recognized dropped variable.
 - Step 2 is implemented by `scripts/adoption-rehearsal.sh`; both `latest` and
-  the pinned migration-008 variant pass locally, including rollback. The CI
-  adoption job runs this plus the wire comparison and both full Rust targets.
+  the pinned migration-008 variant pass locally. The CI adoption job runs this
+  plus the wire comparison and both full Rust targets. (The rollback leg they
+  then included is forward-only from v0.8.0; see the note under Step 2.5.)
 - Step 3's build definitions and documentation are implemented: multi-arch
   Docker publishing, cross-platform binaries/checksums, production Compose, and
   `docs/UPGRADING_FROM_TYPESCRIPT.md`. Publishing awaits a release tag.
@@ -63,8 +67,13 @@ The wire-parity gate from the migration plan passes today:
 - `./scripts/rust-acceptance.sh ts` then `go` — 28 + 2 tests green against both.
 - `./scripts/adoption-rehearsal.sh all` — latest-TS and migration-008 adoption,
   destructive-job auditing, Go writes, and rollback to latest TS all green.
-- `./scripts/compose-rehearsal.sh` — the same swap and rollback at the container
-  level, through one Compose project and one re-tagged image, all green.
+  **Superseded from v0.8.0:** the rollback leg is gone. Adoption is forward-only
+  (`docs/adr/0010-typescript-adoption-is-forward-only.md`) and the script now
+  asserts the TypeScript server refuses the adopted database.
+- `./scripts/compose-rehearsal.sh` — the same swap at the container level,
+  through one Compose project and one re-tagged image, all green. **From v0.8.0**
+  its phase 6 asserts that re-tagging back to the TypeScript image is refused and
+  costs nothing, then re-tags forward again.
 - `docker buildx build --platform linux/amd64,linux/arm64 ...` — both image
   architectures build successfully; the cross-platform release script also
   produces Linux, macOS, and Windows binaries plus checksums.
@@ -106,6 +115,10 @@ applies only pending migrations, refuses on history gaps, and refuses when the
 database records a migration this binary doesn't ship (a newer server touched it).
 The adoption rehearsal now proves both a current TS-authored database (zero Go
 migrations) and a migration-008 TS-authored database (exactly 009–011 applied).
+**Superseded from v0.8.0:** the Go server ships `012_login_handoffs` onward, so a
+current TS-authored database is no longer a zero-migration adoption. The script
+derives the expected sets from the two checkouts' migration directories rather
+than naming them, so this paragraph cannot go stale again.
 
 ## Step 1 — Settle the env contract (small code, do first)
 
@@ -140,16 +153,18 @@ channel we have to a self-hoster mid-upgrade.
 
 ## Step 2 — Automated adoption rehearsal (the centerpiece)
 
-A script (shape of `scripts/rust-acceptance.sh`) that proves the swap and the
-rollback, repeatably, with no real user's data required:
+A script (shape of `scripts/rust-acceptance.sh`) that proves the swap, and what
+the way back is, repeatably, with no real user's data required:
 
 1. **Synthesize a TS installation**: scratch DB + blob dir, boot the TS server,
    drive real traffic through the Rust client (notes, updates, deletes, key
    round-trip), stop it. Then age the copy with SQL: backdate a superseded
    blob-ledger row past 365 days, a staged row past 24 h, mutation results past
    both expiry tiers, one session past its TTL.
-2. **Swap Go in** on the same `DATABASE_URL` and `BLOB_DIR`. Assert: zero
-   migrations applied, boots clean.
+2. **Swap Go in** on the same `DATABASE_URL` and `BLOB_DIR`. Assert: exactly the
+   migrations this TypeScript source does not ship are applied, boots clean.
+   (Written as "zero migrations applied"; true until v0.8.0 added the hosted
+   migrations.)
 3. **Continuity asserts**: the TS-issued session token still authenticates (no
    re-login); the TS-minted scrypt hash verifies; a pre-swap sync cursor pulls
    exactly the expected delta; blob bytes round-trip; the Rust client syncs.
@@ -160,12 +175,19 @@ rollback, repeatably, with no real user's data required:
 5. **Rollback**: write through Go (create/update/delete), stop it, boot the TS
    server on the same DB, assert the client still syncs. This proves the
    back-out line in the upgrade guide.
+   **Superseded from v0.8.0** by `docs/adr/0010-typescript-adoption-is-forward-only.md`:
+   the TS server cannot boot on an adopted DB at all, so the step asserts the
+   refusal and that the refused attempt left every Go write intact. The upgrade
+   guide's back-out line becomes "restore the backup you took", not "put the old
+   binary back".
 6. **Old-version variant**: rebuild the fixture with the TS server checked out at
    a pre-011 migration state (e.g. 008), swap Go in, assert it applies exactly
    009–011 with Kysely-compatible bookkeeping and everything above still holds.
    Caveat for the guide: after Go has migrated, rollback is to the *latest* TS
    server, not the old version the hoster came from — old Kysely errors on
-   migration names it doesn't know.
+   migration names it doesn't know. **From v0.8.0 that same mechanism closes the
+   door entirely**: the latest TS server does not know `012_login_handoffs`
+   either.
 
 ## Step 3 — Release artifacts + upgrade guide
 
@@ -177,7 +199,8 @@ The self-hoster deliverables:
 - **Upgrade guide**, one page: back up DB + blob dir first; same `DATABASE_URL`
   and `BLOB_DIR` (note: `BLOB_DIR` defaults are cwd-relative on both servers —
   tell people to set it absolute); the dropped-env-var table from Step 1;
-  rollback instructions proven in Step 2.5, with the pre-011 caveat from 2.6.
+  and the way back — which from v0.8.0 is "restore the backup", not a downgrade
+  in place (`docs/adr/0010-typescript-adoption-is-forward-only.md`).
 
 ## Step 4 — Dogfood soak
 

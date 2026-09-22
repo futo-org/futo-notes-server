@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"futo-notes-server/internal/config"
@@ -199,9 +200,14 @@ func (r *runner) scenarioCollections(ctx context.Context) {
 	r.step(ctx, "collections", "get", requestSpec{Method: http.MethodGet, Path: "/api/collections/" + phCollectionA, Auth: phTokenA, WantStatus: http.StatusOK})
 	r.step(ctx, "collections", "get unknown", requestSpec{Method: http.MethodGet, Path: "/api/collections/ffffffff-ffff-ffff-ffff-ffffffffffff", Auth: phTokenA, WantStatus: http.StatusNotFound})
 	r.step(ctx, "collections", "key initially null", requestSpec{Method: http.MethodGet, Path: "/api/collections/" + phCollectionA + "/key", Auth: phTokenA, WantStatus: http.StatusOK})
-	r.step(ctx, "collections", "put key", jsonRequest(http.MethodPut, "/api/collections/"+phCollectionA+"/key",
-		`{"key_salt":"c2FsdA","key_kdf":{"name":"scrypt","cost":16384},"encrypted_vault_key":"d3JhcHBlZA"}`, phTokenA, http.StatusOK))
-	r.step(ctx, "collections", "get key", requestSpec{Method: http.MethodGet, Path: "/api/collections/" + phCollectionA + "/key", Auth: phTokenA, WantStatus: http.StatusOK})
+	putKey := jsonRequest(http.MethodPut, "/api/collections/"+phCollectionA+"/key",
+		`{"key_salt":"c2FsdA","key_kdf":{"name":"scrypt","cost":16384},"encrypted_vault_key":"d3JhcHBlZA"}`, phTokenA, http.StatusOK)
+	putKey.Allow = allowRecoveryEnvelope
+	r.step(ctx, "collections", "put key", putKey)
+	r.step(ctx, "collections", "get key", requestSpec{
+		Method: http.MethodGet, Path: "/api/collections/" + phCollectionA + "/key", Auth: phTokenA,
+		WantStatus: http.StatusOK, Allow: allowRecoveryEnvelope,
+	})
 }
 
 func (r *runner) setupPrimaryBlob(ctx context.Context) bool {
@@ -447,14 +453,29 @@ func (r *runner) scenarioSSE(ctx context.Context) {
 	}
 }
 
+// The stale version the tombstone race-guard step sends. phObjectOne is at
+// version 3 by the time the tail runs, so 1 is unambiguously behind it.
+const tombstoneStaleVersion = 1
+
 // Accepted deviations that mutate only one side run after every parity
 // checkpoint so their intentionally different state cannot create cascades.
 func (r *runner) scenarioAcceptedTail(ctx context.Context) {
 	if r.enabled("objects") {
-		r.step(ctx, "objects", "re-delete tombstone", requestSpec{
-			Method: http.MethodDelete, Path: "/api/collections/" + phCollectionA + "/objects/" + phObjectOne + "?version=1",
+		// Unconditional first: TS advances the tombstone once per re-delete, and
+		// allowTombstoneRedelete asserts TS is exactly one version ahead of Go's
+		// no-op. Running the stale guard first would advance TS a second time and
+		// that invariant would no longer describe the pair.
+		r.step(ctx, "objects", "re-delete tombstone is a no-op", requestSpec{
+			Method: http.MethodDelete, Path: "/api/collections/" + phCollectionA + "/objects/" + phObjectOne,
 			Auth: phTokenA, WantStatus: http.StatusOK,
 			Allow: allowTombstoneRedelete,
+		})
+		r.step(ctx, "objects", "stale re-delete is a version conflict", requestSpec{
+			Method: http.MethodDelete,
+			Path: "/api/collections/" + phCollectionA + "/objects/" + phObjectOne +
+				"?version=" + strconv.Itoa(tombstoneStaleVersion),
+			Auth: phTokenA, WantStatus: http.StatusConflict,
+			Allow: allowTombstoneStaleVersion,
 		})
 	}
 	if r.enabled("blob-objects") {

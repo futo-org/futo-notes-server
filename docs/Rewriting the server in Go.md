@@ -53,6 +53,8 @@ Here's how the flow might work to enable encryption on vault content:
 - device A PUTS the encrypted vault key along with the salt
 - device B downloads the encypted vault key, derives the wrapping key using the same method as Device A, uses it to unwrap the vault key. Boom, now both devices have the same vault key without the server ever seeing it.
 
+Go deviation: `GET`/`PUT /api/collections/{id}/key` also carry `recovery_key_salt`, `recovery_key_kdf` and `recovery_encrypted_vault_key` — the second wrapping of the same vault key, under the Recovery Key (`docs/adr/0006-recovery-envelope-wire-contract.md`). They are always present in the response, null when there is no recovery envelope, so a client can tell "no recovery key" from "server too old"; the legacy TS server reports neither the fields nor a null. A client that sends and reads only the password envelope is unaffected. Accepted.
+
 ## Retries and Mutations
 When the client tries to create an object/blob, there's always a chance that it doesn't go through properly. The problem is that the client can't know if the upload was successful or not. That's where mutations come in. When the client is creating something net new, it attaches a mutation ID, which is a way for it to check back in on it later.
 
@@ -333,6 +335,7 @@ Blobs on-disk aren't immediately deleted.
 5. check for and lock the objects row
 6. If the client requested deletion of a specific version, check that version and return 409 when it does not match; this applies to tombstones too. Otherwise, if the object has already been deleted, return the current tombstone as a successful no-op without changing the object version, collection cursor, or publishing an event.
    Go deviation: the legacy TS server increments the tombstone and collection cursor again on every re-delete. The OpenAPI contract now specifies a successful no-op, which avoids spurious sync work and makes retries stable. A client receives an older version/cursor than it would from TS only when it deletes an object that is already a tombstone. Accepted.
+   Go deviation: the legacy TS server skips the `?version` guard entirely once `deleted` is set (`!current.deleted` is part of its conflict condition), so a stale `?version` against a tombstone answers `200` there and `409` here. Leaving the guard unreachable made the documented edit-vs-delete race check a silent no-op on exactly the objects a racing client is most likely to retry against. Accepted.
 7. Update the collection row's version to +=1, return the value
 8. Update `objects` table, set deleted to true, bump the object version number and change_seq
 9. Release the blob: set blob_ledger state to `retained`, null out object_id and object_version, stamp state_changed_at. The bytes stay readable on disk so the blob can still serve as a merge ancestor, and the 365-day retention clock starts — the same treatment an update's superseded blob gets. This covers the blob the object held at delete time. A later update against the tombstone claims its replacement blob while leaving `deleted = true`, so a tombstone can still carry a `claimed` blob indefinitely; nothing releases those today.
@@ -346,6 +349,8 @@ We rely on SQL transactions for writes and other operations to avoid conflicts f
 
 ## Migrating existing users to the new server
 In the Go rewrite, include all server migrations up to `011_mutation_results`, the current one on the server, and give it the same name. Use the `kysely_migration` table. Will need a folder to store the migrations.
+
+Since v0.8.0 the Go server also ships migrations the TypeScript server never had (`012_login_handoffs` onward, for the hosted service). They go in the same shared `kysely_migration` table, and Kysely refuses to start against a database holding migrations it does not know — so **adoption is forward-only from v0.8.0**: once a Go server has started against a database, the TypeScript server cannot take it back. A hoster's way back is a restore from the backup they take before the swap, not a downgrade in place. The decision, the measurements behind it, and the self-hoster procedure are in `docs/adr/0010-typescript-adoption-is-forward-only.md`.
 
 ## Notes on building this agentically
 The goal is to have this be a painless, invisble transition. We could build a harness that uses the Rust core to simulate a client, perhaps two copies, and has the client(s) do a bunch of transactions with a copy of the old and new server and compare at every step. We just want the behavior visible to the client to be the same, it doesn't have to be 100% the same from within the server. This is a gate to launch.
