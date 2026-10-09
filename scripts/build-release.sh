@@ -15,15 +15,17 @@ mkdir -p "$output_dir"
 build() {
   local goos=$1
   local goarch=$2
+  local goarm=${3:-}
+  local arch=$goarch${goarm:+v$goarm}
   local suffix=
   if [[ "$goos" == windows ]]; then
     suffix=.exe
   fi
-  local name="futo-notes-server_${version}_${goos}_${goarch}${suffix}"
+  local name="futo-notes-server_${version}_${goos}_${arch}${suffix}"
   echo "building $name"
   (
     cd "$repo_root"
-    CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" GOTOOLCHAIN=auto \
+    CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" GOARM="$goarm" GOTOOLCHAIN=auto \
       go build -trimpath -ldflags="-s -w -X main.serverVersion=$version" \
       -o "$output_dir/$name" ./cmd/server
   )
@@ -31,6 +33,8 @@ build() {
 
 build linux amd64
 build linux arm64
+# 32-bit ARMv6: original Raspberry Pi Zero / Zero W and 32-bit Pi OS.
+build linux arm 6
 build darwin amd64
 build darwin arm64
 build windows amd64

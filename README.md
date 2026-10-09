@@ -53,8 +53,8 @@ SQLite metadata and encrypted blobs both live under `FUTO_NOTES_DATA_DIR`.
 
 Download a binary for your platform from the
 [package registry](https://gitlab.futo.org/futo-notes/futo-notes-server/-/packages).
-Each release tag publishes Linux amd64/arm64, macOS amd64/arm64, and Windows
-amd64 binaries plus a SHA-256 checksum file.
+Each release tag publishes Linux amd64/arm64/armv6, macOS amd64/arm64, and
+Windows amd64 binaries plus a SHA-256 checksum file.
 
 New installs do not need a database server or `DATABASE_URL`. Set one password
 variable and an absolute `BLOB_DIR`; SQLite defaults to `./data/notes.db`:
@@ -104,6 +104,22 @@ sudo useradd --system --home /srv/futo-notes --shell /usr/sbin/nologin futo-note
 sudo install -d -o futo-notes -g futo-notes /srv/futo-notes
 sudo systemctl enable --now futo-notes-server
 ```
+
+### Single-board computers and other small devices
+
+The server runs well on low-power Linux hardware, such as a Raspberry Pi, an
+Orange Pi, an old thin client or a home NAS. Use a release binary there, not
+Docker: Docker uses memory a small board can't spare, and the image only covers
+amd64 and arm64. Run `uname -m` on the device to pick the file:
+
+| `uname -m`         | Download      | Examples                                             |
+| ------------------ | ------------- | ---------------------------------------------------- |
+| `x86_64`           | `linux_amd64` | Thin clients, mini PCs, most NAS boxes               |
+| `aarch64`          | `linux_arm64` | Pi Zero 2 W, Pi 3/4/5 and most boards on a 64-bit OS |
+| `armv6l`, `armv7l` | `linux_armv6` | Original Pi Zero, Pi 1, any board on a 32-bit ARM OS |
+
+Then follow the steps above. If the data directory lives on an SD card, back it
+up regularly: the server writes on every change, and SD cards wear out.
 
 ## Connect the app
 

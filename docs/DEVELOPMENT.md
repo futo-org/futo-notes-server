@@ -84,6 +84,6 @@ publishes `futotech/notes-server:go-candidate` (moving) alongside
 
 ## Release binaries
 
-Release tags produce Linux amd64/arm64, macOS amd64/arm64, and Windows amd64
-binaries plus SHA-256 checksums. `scripts/build-release.sh <version>` produces
-the same files locally.
+Release tags produce Linux amd64/arm64/armv6, macOS amd64/arm64, and Windows
+amd64 binaries plus SHA-256 checksums. `scripts/build-release.sh <version>`
+produces the same files locally.
