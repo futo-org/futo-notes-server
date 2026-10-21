@@ -12,7 +12,7 @@ workflow:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME =~ /^(hosted-server|go-rewrite)$/'
       when: never
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
-    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS && $CI_COMMIT_BRANCH !~ /^(hosted-server|go-rewrite)$/'
+    - if: "$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS && $CI_COMMIT_BRANCH !~ /^(hosted-server|go-rewrite)$/"
       when: never
     - when: always
 
@@ -211,7 +211,8 @@ deploy:hosted-staging:
   variables:
     MANIFEST_SETUP_COMMAND: quick
     MANIFEST_QUICK_TARGETS: inventory/futo-notes/hosted-staging.yml:staging
-    MANIFEST_STAGGER_TIME_OVERWRITE: "10"
+
+    MANIFEST_STAGGER_TIME_OVERWRITE: "60"
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule" && $FUTO_SOAK_CHECK == "true"'
       when: never
