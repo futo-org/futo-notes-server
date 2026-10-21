@@ -317,7 +317,9 @@ func handleOIDCCallback(cfg config.Config, provider *oidc.Provider, database *db
 			http.Redirect(w, r, "/dev", http.StatusFound)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"user": u, "token": token})
+		// A browser login no app started lands on the account page, which
+		// reads the session cookie set above.
+		http.Redirect(w, r, accountPath, http.StatusFound)
 	}
 }
 

@@ -188,6 +188,7 @@ func routes(cfg config.Config, database *db.DB, blobStore *blobs.Store, eventHub
 		// Polar returns the browser here after a checkout. It holds no
 		// session, so it sits outside requireAuth too.
 		mux.HandleFunc("GET "+billingDonePath, handleBillingDone)
+		mux.HandleFunc("GET "+accountPath, handleAccountPage)
 		if cfg.StandinMode {
 			// Stand-in mode is hosted mode, so this is the only place these
 			// can be reached from — and only when the flag asked for them.

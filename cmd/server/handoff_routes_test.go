@@ -26,8 +26,8 @@ const (
 )
 
 // handoffHarness is an oidc-mode server on SQLite in front of a fake issuer.
-// DevUI is off, so a callback without a ticket answers with login JSON and any
-// hand-off page in a response is the ticketed path's own work.
+// DevUI is off, so a callback without a ticket redirects to the account page
+// and any hand-off page in a response is the ticketed path's own work.
 type handoffHarness struct {
 	url      string
 	client   *http.Client
@@ -297,8 +297,8 @@ func TestHostedAllowlistAdmitsOnlyItsEmailDomains(t *testing.T) {
 	// The comparison ignores case on both sides.
 	h.claims.Sub, h.claims.Email = "insider-sub", "Person@FUTO.ORG"
 	admitted := h.login(t, "", "insider-code")
-	if admitted.StatusCode != http.StatusOK {
-		t.Fatalf("allowlisted callback = %d %q, want 200", admitted.StatusCode, admitted.Body)
+	if admitted.StatusCode != http.StatusFound {
+		t.Fatalf("allowlisted callback = %d %q, want 302", admitted.StatusCode, admitted.Body)
 	}
 	if count := h.userCount(t); count != 1 {
 		t.Fatalf("users after an allowlisted login = %d, want 1", count)
@@ -309,11 +309,37 @@ func TestUnsetHostedAllowlistAdmitsEveryone(t *testing.T) {
 	h := newHandoffHarness(t)
 	h.claims.Sub, h.claims.Email = "anyone-sub", "anyone@somewhere.test"
 
-	if response := h.login(t, "", "anyone-code"); response.StatusCode != http.StatusOK {
-		t.Fatalf("callback with no allowlist = %d %q, want 200", response.StatusCode, response.Body)
+	if response := h.login(t, "", "anyone-code"); response.StatusCode != http.StatusFound {
+		t.Fatalf("callback with no allowlist = %d %q, want 302", response.StatusCode, response.Body)
 	}
 	if count := h.userCount(t); count != 1 {
 		t.Fatalf("users = %d, want the identity admitted", count)
+	}
+}
+
+func TestABrowserLoginLandsOnTheAccountPage(t *testing.T) {
+	h := newHandoffHarness(t)
+
+	callback := h.login(t, "", "browser-code")
+	if callback.StatusCode != http.StatusFound || callback.Header.Get("Location") != accountPath {
+		t.Fatalf("callback = %d, location %q, want 302 to %s", callback.StatusCode, callback.Header.Get("Location"), accountPath)
+	}
+	var session *http.Cookie
+	for _, cookie := range callback.Cookies {
+		if cookie.Name == "session" && cookie.Value != "" {
+			session = cookie
+		}
+	}
+	if session == nil {
+		t.Fatal("browser login set no session cookie for the account page to read")
+	}
+	if me := doRequest(t, h.client, http.MethodGet, h.url+"/api/auth", "", "", session); me.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/auth on the browser session = %d %q", me.StatusCode, me.Body)
+	}
+
+	page := doRequest(t, h.client, http.MethodGet, h.url+accountPath, "", "", nil)
+	if page.StatusCode != http.StatusOK || !strings.Contains(page.Body, "/api/auth/oidc/start") {
+		t.Fatalf("GET %s = %d, want the page with a login link: %q", accountPath, page.StatusCode, page.Body)
 	}
 }
 

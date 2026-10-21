@@ -279,8 +279,8 @@ paths:
         ticket. A ticket whose identity is turned away by
         `HOSTED_ALLOWED_EMAIL_DOMAINS` is spent rather than parked, so that
         poll answers `404` immediately. Without a ticket: if the server is running with
-        `DEV_UI=true`, redirects to `/dev`; otherwise returns the standard
-        login JSON body.
+        `DEV_UI=true`, redirects to `/dev`; otherwise redirects to `/account`,
+        a bare browser page for signing in and managing the subscription.
       parameters:
         - name: code
           in: query
@@ -294,9 +294,11 @@ paths:
             type: string
       responses:
         "200":
-          $ref: "#/components/responses/LoginSuccess"
+          description: The "go back to the app" page, for a login carrying a hand-off ticket
+          content:
+            text/html: {}
         "302":
-          description: Redirect to `/dev` (only when `DEV_UI=true`)
+          description: Redirect to `/dev` when `DEV_UI=true`, otherwise to `/account`
         "400":
           description: Missing or mismatched `state`, or a missing `oidc_flow` cookie
           content:

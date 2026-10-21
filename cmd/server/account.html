@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FUTO Notes account</title>
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; max-width: 36rem; margin: 2rem auto; padding: 0 1rem; }
+  pre { background: #8882; padding: 0.75rem; overflow-x: auto; }
+  button { margin-right: 0.5rem; }
+</style>
+</head>
+<body>
+<h1>FUTO Notes account</h1>
+<main id="main">Loading…</main>
+<script>
+const main = document.getElementById('main');
+
+async function call(method, path) {
+  const response = await fetch(path, { method });
+  const body = response.status === 204 ? null : await response.json().catch(() => null);
+  return { status: response.status, body };
+}
+
+function element(tag, text, onclick) {
+  const node = document.createElement(tag);
+  node.textContent = text;
+  if (onclick) node.onclick = onclick;
+  return node;
+}
+
+// Checkout and the portal answer with a Polar URL to open.
+async function act(method, path) {
+  const { status, body } = await call(method, path);
+  if (body && body.url) {
+    location.href = body.url;
+    return;
+  }
+  if (status >= 400) alert(status + ' ' + JSON.stringify(body));
+  render();
+}
+
+async function render() {
+  const me = await call('GET', '/api/auth');
+  if (me.status === 401) {
+    const login = element('a', 'Log in with FUTO');
+    login.href = '/api/auth/oidc/start';
+    main.replaceChildren(login);
+    return;
+  }
+  const billing = await call('GET', '/api/billing');
+  main.replaceChildren(
+    element('p', 'Signed in as ' + me.body.user.email),
+    element('pre', JSON.stringify(billing.body, null, 2)),
+    element('button', 'Subscribe', () => act('POST', '/api/billing/checkout')),
+    element('button', 'Manage subscription', () => act('GET', '/api/billing/portal')),
+    element('button', 'Log out', () => act('POST', '/api/auth/logout')),
+  );
+}
+
+render();
+</script>
+</body>
+</html>

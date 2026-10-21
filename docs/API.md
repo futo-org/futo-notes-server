@@ -131,7 +131,7 @@ GET $BASE/api/auth/oidc/callback  → completes the flow
 ```
 - `start` sets a short-lived `oidc_flow` cookie carrying the OAuth `state` and PKCE verifier, and redirects.
 - `callback` requires that cookie and a matching `state` query parameter (`400` otherwise), exchanges the `code`, reads `sub`/`email`/`name` from the identity provider's userinfo endpoint, and upserts the user by `sub`. `502` if the provider omits `sub` or `email`.
-- On success: if the server runs with `DEV_UI=true`, redirects to `/dev`; otherwise returns the same `{ user, token }` body as password/dev login.
+- On success: if the server runs with `DEV_UI=true`, redirects to `/dev`; otherwise redirects to `/account`, a bare page that signs a browser in and shows the billing status, with buttons for checkout, the customer portal, and logout. Apps log in through the Login Hand-off below instead.
 - Rate limited like password login.
 - `403 { "error": "sign-up is not open yet", "code": "signup_not_open" }` when `HOSTED_ALLOWED_EMAIL_DOMAINS` is set and the identity's email domain is not on it. Checked before any user row exists, compared case-insensitively. Unset the variable to admit everyone.
 
