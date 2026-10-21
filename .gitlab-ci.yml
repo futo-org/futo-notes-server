@@ -8,6 +8,7 @@ stages:
   - adoption
   - build
   - publish
+  - deploy
 
 variables:
   GOTOOLCHAIN: auto
@@ -159,16 +160,46 @@ publish:candidate-image:
     # their image for code they never asked for.
     - MOVING_TAGS=""
     - if [ "$CI_COMMIT_BRANCH" = "go-rewrite" ]; then MOVING_TAGS="--tag $DOCKERHUB_IMAGE:go-candidate --tag $GITLAB_IMAGE:candidate"; fi
+    # hosted-server owns its own moving tag, the one the hosted staging
+    # instance's Manifest entry names, so deploy:hosted-staging can roll it out
+    # without an edit to manifest-inventory.
+    - if [ "$CI_COMMIT_BRANCH" = "hosted-server" ]; then MOVING_TAGS="--tag $GITLAB_IMAGE:hosted-staging"; fi
     - docker buildx build --platform linux/amd64,linux/arm64 --provenance=false --build-arg VERSION="$CANDIDATE_TAG" --tag "$DOCKERHUB_IMAGE:$CANDIDATE_TAG" --tag "$GITLAB_IMAGE:$CANDIDATE_TAG" $MOVING_TAGS --push .
     - docker buildx imagetools inspect "$GITLAB_IMAGE:$CANDIDATE_TAG"
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule" && $FUTO_SOAK_CHECK == "true"'
       when: never
     - if: $CI_COMMIT_BRANCH == "go-rewrite"
-    # The hosted service deploys from an immutable candidate tag, and its
-    # Manifest entry names one. Without this the hosted branch produces no
-    # image and there is nothing to point the internal instance at. Drop this
-    # line once the branch merges.
+    # The hosted staging instance runs the hosted-staging tag this branch
+    # moves. Without this the hosted branch produces no image and there is
+    # nothing to point the internal instance at. Drop this line once the
+    # branch merges.
+    - if: $CI_COMMIT_BRANCH == "hosted-server"
+
+# Redeploys the hosted staging instance with the image publish:candidate-image
+# just tagged hosted-staging, the way notes-app-crashlog redeploys itself: a
+# quick Manifest run scoped to the one inventory file. It runs as whoever
+# pushed, so it needs Maintainer on devops/manifest. Not interruptible, so a
+# newer push queues behind a rollout instead of cancelling it halfway. The
+# server applies database migrations at boot, so every push here migrates the
+# staging database; make this `when: manual` once other people's data is on it.
+deploy:hosted-staging:
+  stage: deploy
+  needs:
+    - publish:candidate-image
+  interruptible: false
+  resource_group: hosted-staging
+  trigger:
+    project: devops/manifest
+    branch: master
+    strategy: depend
+  variables:
+    MANIFEST_SETUP_COMMAND: quick
+    MANIFEST_QUICK_TARGETS: inventory/futo-notes/hosted-staging.yml:staging
+    MANIFEST_STAGGER_TIME_OVERWRITE: "10"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule" && $FUTO_SOAK_CHECK == "true"'
+      when: never
     - if: $CI_COMMIT_BRANCH == "hosted-server"
 
 publish:image:

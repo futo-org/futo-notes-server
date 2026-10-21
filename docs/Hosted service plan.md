@@ -404,3 +404,27 @@ Small chunks, each with a `/dev` demo (`cmd/server/devui.go`) and tests:
 4. Polar: subscription record, webhook, checkout, portal, entitlement gate,
    `GET /api/billing`, `billing: true` capability.
 5. Manifest deployment on Patroni Postgres with a host volume.
+
+## Client-driven follow-ups (client ADR 0003, 2026-09-15)
+
+The client flow was designed on 2026-09-15 (`futo-notes/docs/adr/0003-hosted-sync-client-flow.md`).
+It needs four server changes before the client pin can move:
+
+1. **Sliding app sessions.** A session minted through the Login Hand-off lives 90 days from its
+   last authenticated request, not a fixed 7 days. Without this every device is bounced into a
+   browser weekly, because the hand-off is the only login path. Browser cookie sessions stay at
+   7 days.
+2. **Pairing relay**, account-scoped, same shape as the hand-off ticket: create with a one-time
+   public key and a device name, post ciphertext to it (only from a session on the same account),
+   poll it, short expiry, single use. The server holds only ciphertext it cannot open. This is
+   what lets a laptop with no camera be the new device.
+3. **Key re-wrap.** `PUT /api/collections/{id}/key` accepts an update from an unlocked client
+   (vault-password change, new recovery key): 409 only when the caller's `key_updated_at` is
+   stale, not on every second write. Both envelopes are sent together.
+4. **Stand-in test mode** in the release binary: the `cmd/hostedrehearsal` Zitadel and Polar
+   stand-ins reachable from a flag, so the client's cross-platform suite drives the real hand-off,
+   checkout, vault creation, and pairing on localhost.
+
+Plus the recovery-envelope columns from ADR 0005. The client bakes in `notes-sync.futo.org`,
+which for the MVP should be DNS'd at the staging load balancer alongside
+`staging-notes-sync.futo.org`, so launch needs no client release for the hostname.
