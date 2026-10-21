@@ -1,0 +1,253 @@
+# S3 blob storage plan
+
+Status: ready to implement, 2026-10-21. Reviewed by Codex; its findings are folded in.
+
+Goal: hosted staging runs on two hosts behind one load balancer, and every host
+can serve every blob. Today it can't. This is the "S3 blob store" that ADR 0004
+and `Hosted service plan.md` §7 call the first task after the MVP; running two
+hosts moved it ahead of launch.
+
+The client sees no change. Every route, status code and response body stays as
+it is.
+
+## Why now
+
+`hosted-staging.yml` deploys the server to manifest-staging and
+manifest-staging2. Postgres is shared, but `BLOB_DIR=/data/blobs` is each
+host's own disk. Measured on 2026-10-21 against staging: a blob written through
+one host is `404` from the other, in both directions. The load balancer sends
+everything to manifest-staging until it stops answering, which happens on every
+deploy. Any note saved during that window has its bytes only on
+manifest-staging2, and once traffic moves back, every other device gets `404`
+for it.
+
+Everything else is already safe across hosts. Sessions, Login Hand-offs and
+pairings are in Postgres. The SSE doorbell crosses hosts through Postgres
+`LISTEN/NOTIFY` (measured: 25 ms from a write on one host to the event on the
+other). Blob GC already locks rows with `FOR UPDATE SKIP LOCKED`, so two hosts
+can run it at once. The one per-host thing left is the login rate limiter,
+which lives in memory, so two hosts allow twice the attempts. That's
+acceptable and out of scope.
+
+## Shape
+
+Follow Yucca's `packages/michael` (github.com/insertish/yucca): the server
+talks to S3 with `aws-sdk-go-v2`, using a configured endpoint and path-style
+addressing, and streams bytes through itself. No presigned URLs, so auth and
+the blob-key namespace check stay where they are.
+
+### 1. A storage backend behind `blobs.Store`
+
+`internal/blobs` keeps the ledger logic (`Stage`, `Delete`) and gets a small
+backend with two implementations, filesystem (today's code) and S3. The server
+uses three operations:
+
+| Operation | Filesystem | S3 |
+|---|---|---|
+| `Put(ctx, key, data)` | `MkdirAll` + `WriteFile`, as now | `PutObject` with a `bytes.Reader` over the upload already in memory: no second copy, no multipart |
+| `Open(ctx, key)` → reader, size | `os.Open` + `Stat` | `GetObject`, size from `ContentLength` |
+| `Remove(ctx, key)` | `os.Remove`, missing is success | `DeleteObject`, already idempotent |
+
+GC's `blobFileExists` check goes away rather than becoming a fourth operation
+(an extra `HeadObject` per purge only fed a counter). `FilesRemoved` then
+counts successful removals, not files confirmed present beforehand.
+
+Errors:
+
+- Only a confirmed missing object is `blobs.ErrNotFound` (S3 `NoSuchKey`, or
+  HTTP 404 from `GetObject`). Handlers map it to `404` and stop checking
+  `os.ErrNotExist`.
+- Everything else (auth failure, timeout, S3 down) stays an error: `500` on
+  single routes, and an aborted stream on the batch route. "S3 is down" must
+  never read as "your note doesn't exist".
+- `GetObject` with no `ContentLength`, or a negative one, is an error, never
+  size 0. The batch frame header carries the length before the bytes.
+
+Context and timeouts:
+
+- Every backend call takes a context. Handlers pass the request context, and
+  jobs pass theirs. Today `Stage`, `Open` and `Remove` take none.
+- The S3 HTTP client gets a dial timeout and a response-header timeout, so a
+  stalled S3 server fails a request instead of hanging it. A body being
+  streamed to a client is bounded by the request context, which ends when the
+  client goes away.
+
+Keys stay `{userId}/{uuid}`, used as the object key unchanged in one bucket.
+
+No write-once (`If-None-Match`): keys are server-minted UUIDv7s, so a collision
+is not a case to handle, and leaving it out keeps the backend to calls every S3
+server supports.
+
+### 2. Handlers
+
+- `GET /api/blobs/{userId}/{blobId}`: the filesystem path keeps
+  `http.ServeContent` (it hands back an `*os.File`, which can seek), so
+  self-hosters keep `Last-Modified`, `Range` and conditional requests exactly as
+  now. The S3 path sets `Content-Type: application/octet-stream` and
+  `Content-Length` and copies the body; `HEAD` gets the same headers and no
+  body, which `net/http` already does. The S3 path drops `Range`,
+  `Last-Modified` and conditional requests. That's deliberate: the client never
+  sends those headers (checked in `crates/futo-notes-sync` on the client's
+  `origin/main`), and the OpenAPI spec promises only 200/401/404 and
+  octet-stream. A copy that fails partway aborts the response.
+- `POST /api/blobs/batch` (`streamBlobBatch`): it needs the size before writing
+  a frame header. It takes that from `Open` instead of `Stat`, checking it
+  before the header is written. The existing "short read fails the response"
+  check stays, and it covers an S3 body that errors partway; the spec requires
+  that abort (`docs/openapi.yaml:1890`).
+- Upload routes don't change; they already go through `blobs.Stage`.
+
+### 3. Jobs
+
+- **Blob GC**: calls `Remove` on the backend. Two hosts running it at once is
+  already safe: `purgeBlobRow` locks with `FOR UPDATE SKIP LOCKED`.
+- **Storage reconciliation** (`jobs.ReconcileStorage`) walks `BLOB_DIR` and
+  adopts files the ledger doesn't know about. It stays for the filesystem
+  backend and doesn't run on S3, because the ledger is authoritative (ADR 0001)
+  and there are no legacy files in a new bucket.
+- **Known gap: orphaned objects.** On the filesystem, reconciliation re-adopts
+  a file whose row was deleted but whose bytes weren't. On S3 nothing does.
+  Both places commit the row before removing the bytes: GC (`purgeBlobRow`,
+  then `Remove`) and a client's `DELETE /api/blobs/...` (`blobs.Delete`). Both
+  already log the failed key. Cleanup, if the logs ever show it, is by hand:
+  delete those keys from the bucket. Listing the bucket to adopt orphans is a
+  later task, not this one.
+
+### 4. Config
+
+S3 mode is on when `S3_ENDPOINT` is set. In that mode all of these are
+required, and boot fails naming any that are missing:
+
+| Variable | Notes |
+|---|---|
+| `S3_ENDPOINT` | e.g. `http://100.76.177.70:3900` |
+| `S3_BUCKET` | |
+| `S3_ACCESS_KEY_ID` | |
+| `S3_SECRET_ACCESS_KEY` | |
+| `S3_REGION` | optional, default `us-east-1`; signing needs some value |
+
+Path-style addressing is always on. Garage, SeaweedFS, Ceph RGW and R2 all
+accept it, so it isn't a setting.
+
+At startup the server runs `HeadBucket` with a 10 s timeout and exits if the
+bucket is unreachable or missing, the same way it treats an unreachable OIDC
+issuer. It doesn't create the bucket.
+
+`BLOB_DIR` is ignored in S3 mode. The default stays filesystem, so self-hosters
+and the SQLite default are untouched. Places that read `BLOB_DIR` today:
+
+- The SQLite fresh-database guard (`prepareSQLiteFile`, `internal/db/db.go:240`)
+  refuses to create a new database next to existing blob files. It only runs
+  with the filesystem backend.
+- The Dockerfile entrypoint creates and chowns `BLOB_DIR`. That's harmless in
+  S3 mode, so it stays.
+- `cmd/hostedrehearsal` builds its server's environment from `os.Environ()`, so
+  stray `S3_*` variables would switch it to S3. It drops them, staying on the
+  filesystem backend it sets up.
+- `cmd/compare` and the docker-compose files stay on the filesystem.
+
+### 5. Dev UI
+
+`/dev` shows which backend is active (directory, or endpoint + bucket). The
+"storage reconciliation" job button reports that it doesn't apply on S3,
+instead of walking a directory that isn't used.
+
+### 6. Tests
+
+- One backend contract test (put, open with size, open missing →
+  `ErrNotFound`, remove, remove missing) run against both backends. The
+  S3 run needs `BLOBS_TEST_S3_ENDPOINT` and skips without it, the same way the
+  Postgres tests skip without `*_TEST_DATABASE_URL`.
+- The server route tests for download, batch fetch, `POST /api/blobs` and the
+  blob-object create and update routes also run once on S3 when that variable
+  is set.
+- Failure tests against a fake S3 (an `httptest` server): a missing
+  `ContentLength`, a body shorter than its length, and a body that errors
+  partway through all abort the batch stream. A `500` from S3 on download is a
+  `500`, not a `404`. A stalled S3 fails within the timeout instead of hanging.
+- CI: `test:go` gets a Garage service container (`dxflrs/garage`, pinned to
+  the same version as staging) started with
+  `garage server --single-node --default-bucket`. That creates the layout, an
+  access key and the bucket from `GARAGE_DEFAULT_ACCESS_KEY`,
+  `GARAGE_DEFAULT_SECRET_KEY` and `GARAGE_DEFAULT_BUCKET` (v2.3.0 or later).
+  The job waits for the S3 port before the tests start. Garage's quick-start
+  still shows a config file; check whether the flags make it optional.
+- A two-host check, run by hand after deploy: write through
+  `100.76.177.70:3011`, read through `100.127.246.105:3011`, and the reverse.
+  Both must be `200`. That's the test that failed on 2026-10-21.
+
+## Deploy (manifest-inventory)
+
+S3 server: **Garage** (v2.4.1, AGPL-3.0, single binary), chosen 2026-10-21.
+
+- Not MinIO: its open-source repo was archived in April 2026, and its images
+  stopped in October 2025.
+- Garage over SeaweedFS and Versity Gateway: simple to run, the most
+  vouched-for in the Hacker News threads on replacing MinIO, and it can later
+  replicate across hosts.
+- The server only uses put, get and delete, so moving to Yucca's Ceph RGW or
+  anything else later is a config change.
+
+**Replication needs three hosts.** Garage's docs (configuration reference,
+`replication_factor`):
+
+| Setup | What happens when one Garage node is down |
+|---|---|
+| 1 node, `replication_factor = 1` | Nothing to fall back on. The docs call it test-only. |
+| 2 nodes, factor 2 | Reads work, **writes fail**. Worse than one node: either host failing stops writes. |
+| 3 nodes, factor 3 | Reads and writes continue. About 3× the stored size in disk. |
+
+Staging has two hosts, so staging runs **one node** (`--single-node`). That is
+the same single point of failure as any one-box option, and fine for an
+internal alpha. Production runs three nodes on three separate hosts with factor
+3, which needs a third host.
+
+1. New `inventory/futo-notes/hosted-staging-s3.yml`: one Garage node on
+   manifest-staging, with a host volume (Garage wants its metadata on SSD) and
+   the S3 port (3900 by default; check it's free). It starts with
+   `garage server --single-node --default-bucket`, taking the access key, secret
+   and bucket name from new fields on the 1Password item
+   `Manifest/futo-notes-hosted-staging`. That creates the bucket itself, so no
+   hand step is needed.
+2. Both hosts use the direct tailnet address,
+   `S3_ENDPOINT=http://100.76.177.70:3900` (decided 2026-10-21). That's fine
+   for one node. Production's three nodes go behind a per-host HAProxy route,
+   the way Postgres is reached through `pghaproxy` at `$PODNAME:15510`. After
+   deploying Garage, confirm port 3900 answers from manifest-staging2 before
+   switching the server over.
+3. `hosted-staging.yml`: add the `S3_*` variables and secrets, and drop
+   `BLOB_DIR` and the `/data` volume.
+4. Push only when no full Manifest run is in progress: a manifest-inventory
+   push cancels it.
+5. **Cut over before anyone has a vault on staging.** Today there are none
+   (checked 2026-10-21: zero rows in `collections`). A rolling deploy briefly
+   runs one host on the filesystem and one on S3, which reintroduces the 404
+   this fixes, but only for blobs written in that window. So: check
+   `collections` is still empty right before the deploy, deploy, then run the
+   two-host check. If a vault has appeared by then, stop and plan a real
+   migration instead. Rollback is putting `BLOB_DIR` back, which is safe only
+   while no blobs have been written to S3.
+6. Remove the old `/futo-notes-hosted-staging-data/blobs` folders on both hosts
+   by hand afterward.
+
+The S3 node is a single point of failure, and its volume has no backup, unlike
+Patroni. That is acceptable for an internal alpha, not for paying users. Before
+launch, blobs need backups independent of Postgres's. Garage has no S3 bucket
+versioning; we don't rely on it, since keys are never overwritten and the
+ledger keeps superseded blobs for 365 days. Don't put live blobs on `bigminio`
+(`manifest-inventory/config-inv.yml:471`): it's the Postgres backup target, and
+it runs MinIO.
+
+## Open questions
+
+- **Can manifest-staging2 reach port 3900 on `100.76.177.70` over Tailscale,
+  or does a host firewall block it?** Ask devops; deploy step 2 checks it
+  either way.
+- **The third host for production Garage.** Does it come from the
+  dedicated-host item already on the pre-launch list?
+
+## Not in scope
+
+Presigned URLs, bucket listing and orphan adoption, migrating existing
+filesystem blobs into S3, per-host rate limiting, and the move to Yucca's
+Kubernetes.
