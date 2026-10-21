@@ -260,20 +260,27 @@ assert_blob() {
 }
 
 run_rust_case() {
-  local test_name=$1
+  local test_name=$1 output
   echo "running Rust client case: $test_name"
-  (
+  output=$(
     cd "$client_repo"
     FUTO_TEST_SERVER="http://127.0.0.1:$port" \
       cargo test -q -p futo-notes-sync --test server_integration "$test_name" \
-        -- --ignored --exact --test-threads=1
-  )
+        -- --ignored --exact --test-threads=1 2>&1
+  ) || { echo "$output"; return 1; }
+  echo "$output"
+  # --exact runs nothing, and passes, when the client renames or moves a test.
+  # That leaves the database unseeded and fails much later, far from the cause.
+  if ! grep -q 'test result: ok. 1 passed' <<<"$output"; then
+    echo "Rust client case $test_name ran no test; was it renamed in the client?" >&2
+    return 1
+  fi
 }
 
 seed_ts_traffic() {
-  run_rust_case single_note_round_trip_and_cursor_advance
-  run_rust_case update_propagates
-  run_rust_case delete_propagates_as_tombstone
+  run_rust_case round_trip::single_note_round_trip_and_cursor_advance
+  run_rust_case round_trip::update_propagates
+  run_rust_case round_trip::delete_propagates_as_tombstone
 
   json_request POST /api/auth/password/login 200 '' "{\"password\":\"$password\"}"
   ts_token=$(jq -er '.token' <<<"$RESPONSE")
@@ -379,7 +386,7 @@ verify_swap_continuity() {
   assert_eq "updated object in cursor delta" "$(jq -er --arg id "$object_a" '[.objects[] | select(.id == $id and .version == "2" and .deleted == false)] | length' <<<"$RESPONSE")" 1
   assert_eq "deleted object in cursor delta" "$(jq -er --arg id "$object_b" '[.objects[] | select(.id == $id and .deleted == true)] | length' <<<"$RESPONSE")" 1
   assert_blob "$ts_token" "$continuity_key" 'continuity blob bytes'
-  run_rust_case single_note_round_trip_and_cursor_advance
+  run_rust_case round_trip::single_note_round_trip_and_cursor_advance
 }
 
 audit_jobs() {
@@ -479,7 +486,7 @@ verify_forward_only() {
   assert_eq "post-Go-write cursor delta size" "$(jq -er '.objects | length' <<<"$RESPONSE")" 1
   assert_eq "Go tombstone survived the refused rollback" "$(jq -er --arg id "$go_object" '[.objects[] | select(.id == $id and .version == "3" and .deleted == true)] | length' <<<"$RESPONSE")" 1
   assert_eq "migrations after the refused rollback" "$(scalar "SELECT string_agg(name, ',' ORDER BY name) FROM kysely_migration")" "$go_migrations"
-  run_rust_case single_note_round_trip_and_cursor_advance
+  run_rust_case round_trip::single_note_round_trip_and_cursor_advance
 }
 
 prepare_old_source() {

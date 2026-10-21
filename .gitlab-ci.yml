@@ -102,6 +102,10 @@ test:adoption:
     - git clone "$CI_REPOSITORY_URL" "$FUTO_TS_SERVER_REPO"
     - git -C "$FUTO_TS_SERVER_REPO" checkout 5449502
     - git clone https://gitlab.futo.org/futo-notes/futo-notes.git "$FUTO_NOTES_CLIENT_REPO"
+    # Pinned like the TypeScript server above: the rehearsals name client tests
+    # exactly, so an unpinned clone broke here when the client moved them into
+    # modules (futo-notes 2e49aec99). Bump it deliberately.
+    - git -C "$FUTO_NOTES_CLIENT_REPO" checkout 6db8de0e
     - bun install --cwd "$FUTO_TS_SERVER_REPO" --frozen-lockfile
   script:
     - export PATH="$BUN_INSTALL/bin:$CARGO_HOME/bin:$PATH"

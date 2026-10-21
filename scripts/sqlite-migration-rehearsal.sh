@@ -185,14 +185,21 @@ assert_blob() {
 }
 
 run_rust_case() {
-  local test_name=$1
+  local test_name=$1 output
   echo "running Rust client case: $test_name"
-  (
+  output=$(
     cd "$client_repo"
     FUTO_TEST_SERVER="http://127.0.0.1:$port" \
       cargo test -q -p futo-notes-sync --test server_integration "$test_name" \
-        -- --ignored --exact --test-threads=1
-  )
+        -- --ignored --exact --test-threads=1 2>&1
+  ) || { echo "$output"; return 1; }
+  echo "$output"
+  # --exact runs nothing, and passes, when the client renames or moves a test.
+  # That leaves the database unseeded and fails much later, far from the cause.
+  if ! grep -q 'test result: ok. 1 passed' <<<"$output"; then
+    echo "Rust client case $test_name ran no test; was it renamed in the client?" >&2
+    return 1
+  fi
 }
 
 echo "building Go server"
@@ -202,7 +209,7 @@ postgres_url="postgres://futo_notes:$postgres_password@$postgres_host:$postgres_
 
 echo "== populate Postgres =="
 start_server "$postgres_url" "Go/Postgres source"
-run_rust_case single_note_round_trip_and_cursor_advance
+run_rust_case round_trip::single_note_round_trip_and_cursor_advance
 json_request POST /api/auth/dev/login 200 '' \
   '{"email":"sqlite-migration@example.invalid","name":"SQLite Migration"}'
 source_token=$(jq -er '.token' <<<"$RESPONSE")
@@ -256,8 +263,8 @@ json_request PUT "/api/collections/$source_collection/objects/$durable_object" 2
   "{\"version\":2,\"blob_key\":\"$updated_key\",\"size_bytes\":${#updated_bytes}}" migration-sqlite-update
 assert_blob "$source_token" "$updated_key" "$updated_bytes"
 
-run_rust_case single_note_round_trip_and_cursor_advance
-run_rust_case update_propagates
+run_rust_case round_trip::single_note_round_trip_and_cursor_advance
+run_rust_case round_trip::update_propagates
 for job in sessions reconciliation mutation-results blob-gc; do
   json_request POST "/dev/jobs/$job" 200
 done
