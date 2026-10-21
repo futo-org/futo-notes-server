@@ -107,14 +107,21 @@ test:adoption:
     # modules (futo-notes 2e49aec99). Bump it deliberately.
     - git -C "$FUTO_NOTES_CLIENT_REPO" checkout 6db8de0e
     - bun install --cwd "$FUTO_TS_SERVER_REPO" --frozen-lockfile
+  # Each leg runs in its own job so the legs run side by side instead of one
+  # after another.
+  parallel:
+    matrix:
+      - LEG: [compare, accept-ts, accept-go, accept-go-sqlite, rehearsals]
   script:
     - export PATH="$BUN_INSTALL/bin:$CARGO_HOME/bin:$PATH"
-    - go run ./cmd/compare -mode all -ts-repo "$FUTO_TS_SERVER_REPO" -postgres "postgres://futo_notes:$FUTO_POSTGRES_PASSWORD@$FUTO_POSTGRES_HOST:$FUTO_POSTGRES_PORT/futo_notes"
-    - ./scripts/rust-acceptance.sh ts
-    - ./scripts/rust-acceptance.sh go
-    - ./scripts/rust-acceptance.sh go sqlite
-    - ./scripts/sqlite-migration-rehearsal.sh
-    - ./scripts/adoption-rehearsal.sh all
+    - |
+      case "$LEG" in
+        compare) go run ./cmd/compare -mode all -ts-repo "$FUTO_TS_SERVER_REPO" -postgres "postgres://futo_notes:$FUTO_POSTGRES_PASSWORD@$FUTO_POSTGRES_HOST:$FUTO_POSTGRES_PORT/futo_notes" ;;
+        accept-ts) ./scripts/rust-acceptance.sh ts ;;
+        accept-go) ./scripts/rust-acceptance.sh go ;;
+        accept-go-sqlite) ./scripts/rust-acceptance.sh go sqlite ;;
+        rehearsals) ./scripts/sqlite-migration-rehearsal.sh && ./scripts/adoption-rehearsal.sh all ;;
+      esac
 
 build:binaries:
   extends: .skip-soak-schedule
