@@ -3,15 +3,28 @@ default:
   tags:
     - dind
 
+# One pipeline per push: an MR pipeline when the branch has an open MR, a
+# branch pipeline otherwise. hosted-server and go-rewrite keep their branch
+# pipelines even with an MR open, because their publish and deploy jobs key on
+# the branch, so their MR pipelines are the ones skipped.
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME =~ /^(hosted-server|go-rewrite)$/'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS && $CI_COMMIT_BRANCH !~ /^(hosted-server|go-rewrite)$/'
+      when: never
+    - when: always
+
 stages:
   - test
-  - adoption
   - build
   - publish
   - deploy
 
 variables:
   GOTOOLCHAIN: auto
+  CI_IMAGE_TAG: client-6db8de0e
 
 .skip-soak-schedule:
   rules:
@@ -37,6 +50,13 @@ test:go:
     SERVER_TEST_DATABASE_URL: postgres://futo_notes:ci@postgres:5432/server_test
     MIGRATION_TEST_DATABASE_URL: postgres://futo_notes:ci@postgres:5432/migration_test
     USAGE_TEST_DATABASE_URL: postgres://futo_notes:ci@postgres:5432/usage_test
+    GOMODCACHE: $CI_PROJECT_DIR/.go/mod
+  cache:
+    key:
+      files:
+        - go.sum
+    paths:
+      - .go/mod/
   before_script:
     - apt-get update && apt-get install -y --no-install-recommends postgresql-client
     - |
@@ -60,16 +80,16 @@ test:image:
     - docker build --build-arg VERSION="$CI_COMMIT_SHORT_SHA" -t futo-notes-server:ci .
     - docker image inspect futo-notes-server:ci --format '{{.Architecture}} {{.Size}}'
 
-# This is the cutover gate, not a unit approximation. It creates databases with
-# the current and historical TypeScript servers, drives them with the native
-# Rust sync client, swaps Go in, and audits cleanup. Since v0.8.0 the swap is
-# one-way, so the last leg asserts the TypeScript server REFUSES the adopted
-# database rather than that it takes it back
-# (docs/adr/0010-typescript-adoption-is-forward-only.md).
-test:adoption:
+# The native Rust sync client's integration suite, run against the Go server on
+# each engine. The image comes from build:ci-image with the client tests
+# already compiled.
+test:client:
   extends: .skip-soak-schedule
-  stage: adoption
-  image: golang:1.27-bookworm
+  stage: test
+  image: $CI_REGISTRY_IMAGE/ci:$CI_IMAGE_TAG
+  needs:
+    - job: build:ci-image
+      optional: true
   services:
     - name: postgres:16
       alias: postgres
@@ -81,47 +101,31 @@ test:adoption:
     FUTO_POSTGRES_HOST: postgres
     FUTO_POSTGRES_PORT: "5432"
     FUTO_POSTGRES_PASSWORD: ci
-    FUTO_TS_SERVER_REPO: $CI_PROJECT_DIR/.rehearsal/ts-server
-    FUTO_NOTES_CLIENT_REPO: $CI_PROJECT_DIR/.rehearsal/client
-    CARGO_HOME: $CI_PROJECT_DIR/.cargo
-    RUSTUP_HOME: $CI_PROJECT_DIR/.rustup
-    BUN_INSTALL: $CI_PROJECT_DIR/.bun
-  cache:
-    key: adoption-toolchains
-    paths:
-      - .cargo/
-      - .rustup/
-      - .bun/install/cache/
-  before_script:
-    - apt-get update
-    - apt-get install -y --no-install-recommends build-essential curl git jq postgresql-client ripgrep unzip
-    - curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
-    - curl -fsSL https://bun.sh/install | bash
-    - export PATH="$BUN_INSTALL/bin:$CARGO_HOME/bin:$PATH"
-    - mkdir -p .rehearsal
-    - git clone "$CI_REPOSITORY_URL" "$FUTO_TS_SERVER_REPO"
-    - git -C "$FUTO_TS_SERVER_REPO" checkout 5449502
-    - git clone https://gitlab.futo.org/futo-notes/futo-notes.git "$FUTO_NOTES_CLIENT_REPO"
-    # Pinned like the TypeScript server above: the rehearsals name client tests
-    # exactly, so an unpinned clone broke here when the client moved them into
-    # modules (futo-notes 2e49aec99). Bump it deliberately.
-    - git -C "$FUTO_NOTES_CLIENT_REPO" checkout 6db8de0e
-    - bun install --cwd "$FUTO_TS_SERVER_REPO" --frozen-lockfile
-  # Each leg runs in its own job so the legs run side by side instead of one
-  # after another.
   parallel:
     matrix:
-      - LEG: [compare, accept-ts, accept-go, accept-go-sqlite, rehearsals]
+      - ENGINE: [postgres, sqlite]
   script:
-    - export PATH="$BUN_INSTALL/bin:$CARGO_HOME/bin:$PATH"
-    - |
-      case "$LEG" in
-        compare) go run ./cmd/compare -mode all -ts-repo "$FUTO_TS_SERVER_REPO" -postgres "postgres://futo_notes:$FUTO_POSTGRES_PASSWORD@$FUTO_POSTGRES_HOST:$FUTO_POSTGRES_PORT/futo_notes" ;;
-        accept-ts) ./scripts/rust-acceptance.sh ts ;;
-        accept-go) ./scripts/rust-acceptance.sh go ;;
-        accept-go-sqlite) ./scripts/rust-acceptance.sh go sqlite ;;
-        rehearsals) ./scripts/sqlite-migration-rehearsal.sh && ./scripts/adoption-rehearsal.sh all ;;
-      esac
+    - ./scripts/rust-acceptance.sh go "$ENGINE"
+    - if [ "$ENGINE" = sqlite ]; then ./scripts/sqlite-migration-rehearsal.sh; fi
+
+# Rebuilds the test:client image only when its Dockerfile changes. Bump
+# CI_IMAGE_TAG along with CLIENT_COMMIT so old pipelines keep their image.
+build:ci-image:
+  stage: .pre
+  image: docker:27
+  services:
+    - docker:27-dind
+  variables:
+    DOCKER_TLS_CERTDIR: /certs
+  script:
+    - printf '%s' "$CI_REGISTRY_PASSWORD" | docker login --username "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+    - docker build -t "$CI_REGISTRY_IMAGE/ci:$CI_IMAGE_TAG" ci
+    - docker push "$CI_REGISTRY_IMAGE/ci:$CI_IMAGE_TAG"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - changes:
+        - ci/Dockerfile
 
 build:binaries:
   extends: .skip-soak-schedule
@@ -157,7 +161,7 @@ publish:candidate-image:
   needs:
     - test:go
     - test:image
-    - test:adoption
+    - test:client
   before_script:
     - printf '%s' "$DOCKERHUB_TOKEN" | docker login --username "$DOCKERHUB_USERNAME" --password-stdin docker.io
     - printf '%s' "$CI_REGISTRY_PASSWORD" | docker login --username "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
@@ -225,7 +229,7 @@ publish:image:
   needs:
     - test:go
     - test:image
-    - test:adoption
+    - test:client
   before_script:
     - printf '%s' "$DOCKERHUB_TOKEN" | docker login --username "$DOCKERHUB_USERNAME" --password-stdin docker.io
     - printf '%s' "$CI_REGISTRY_PASSWORD" | docker login --username "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
@@ -248,7 +252,7 @@ publish:binaries:
   needs:
     - job: build:binaries
       artifacts: true
-    - job: test:adoption
+    - job: test:client
   script:
     - PACKAGE_URL="$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/futo-notes-server/$CI_COMMIT_TAG"
     - for file in dist/*; do curl --fail --header "JOB-TOKEN:$CI_JOB_TOKEN" --upload-file "$file" "$PACKAGE_URL/$(basename "$file")"; done
