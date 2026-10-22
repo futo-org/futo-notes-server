@@ -1,13 +1,51 @@
 # S3 blob storage plan
 
-Status: deployed to hosted staging 2026-10-22. Server side is `32fadab` on
-`hosted-server`; Garage is manifest-inventory `acee419` and the cutover is
-`b11c809`. The two-host check passed in both directions at 21:56 UTC. Left:
-deploy step 6, removing the old blob folders by hand. Reviewed by Codex; its
+Status: live on hosted staging since 2026-10-22. Reviewed by Codex; its
 findings are folded in.
 
-Goal: hosted staging runs on two hosts behind one load balancer, and every host
-can serve every blob. Today it can't. This is the "S3 blob store" that ADR 0004
+## Current state (2026-10-22)
+
+Both staging hosts store blobs in one Garage bucket, and each serves every
+blob. The two-host check (write through one host, read through the other,
+both directions) passed at 21:56 UTC after the cutover, and again at 23:06 UTC
+after a later redeploy put both hosts on `candidate-be066c95`.
+
+| Piece | Where |
+|---|---|
+| Server S3 backend, tests, CI Garage | futo-notes-server `32fadab` on `hosted-server` (pipeline #38530 green) |
+| Garage node on manifest-staging | manifest-inventory `acee419`, `inventory/futo-notes-s3/garage-staging.yml` |
+| Cutover of `hosted-staging.yml` to S3 | manifest-inventory `b11c809` |
+| Garage RPC secret and S3 key pair | new fields on 1Password `Manifest/futo-notes-hosted-staging` |
+
+Left to do:
+
+- **Deploy step 6:** remove `/futo-notes-hosted-staging-data/blobs` on both
+  hosts by hand. Nothing reads it now. It holds the 5 staged test blobs from
+  the 2026-10-21 measurement (131 bytes, no objects point at them); their
+  ledger rows go to blob GC, whose `DeleteObject` on the missing S3 keys
+  succeeds.
+- **Backups for the bucket** before paying users (see the end of Deploy).
+- **A third host for production Garage** (see Open questions).
+
+Found along the way, outside this plan:
+
+- **The Postgres replica on manifest-staging2 lacks `futo_notes_hosted_staging`.**
+  `pg_is_in_recovery()` is true there, but it lists only `postgres` and
+  `futo_notes`, so it seems to have stopped following the primary before that
+  database was created on 2026-10-21. The app is unaffected, since both hosts
+  reach the primary through `pghaproxy` at `$PODNAME:15510`. A failover to
+  staging2 would not have the database. Raise with devops.
+- **Every push to `hosted-server` starts a full Manifest run**, because its
+  pipeline triggers `deploy:hosted-staging`, and a new Manifest run cancels the
+  unfinished jobs of the one in progress. A doc-only push on 2026-10-22 cut off
+  the cutover run's `update-hosts` and `backup-check-partial` (the next run
+  redid both). Check `devops/manifest` pipelines before pushing here or to
+  manifest-inventory.
+
+## Goal
+
+Hosted staging runs on two hosts behind one load balancer, and every host
+can serve every blob. Before this plan it couldn't. This is the "S3 blob store" that ADR 0004
 and `Hosted service plan.md` §7 call the first task after the MVP; running two
 hosts moved it ahead of launch.
 
@@ -210,8 +248,10 @@ the same single point of failure as any one-box option, and fine for an
 internal alpha. Production runs three nodes on three separate hosts with factor
 3, which needs a third host.
 
-1. New `inventory/futo-notes-s3/garage-staging.yml` (done 2026-10-21, local
-   commit on manifest-inventory `master`): one Garage node on manifest-staging,
+Steps 1 to 5 are done; step 6 is left.
+
+1. **Done** (`acee419`, deployed by Manifest #38536). New
+   `inventory/futo-notes-s3/garage-staging.yml`: one Garage node on manifest-staging,
    with a host volume and the S3 port 3900. Manifest maps a container port to
    the same host port when no other project holds it (`sm_utils.py`
    `assign_ports_to_pod`); no inventory file declares 3900. It starts with
@@ -229,30 +269,32 @@ internal alpha. Production runs three nodes on three separate hosts with factor
      the image has no shell and Manifest's plain-string checks run through
      `/bin/sh -c`. Checked locally under podman 5.8.7: the startup check
      passes and the container reports `healthy`.
+   - Garage landed on host port 3900. A signed `HeadBucket` with the
+     1Password keys returns `200`.
 2. Both hosts use the direct tailnet address,
    `S3_ENDPOINT=http://100.76.177.70:3900` (decided 2026-10-21). That's fine
    for one node. Production's three nodes go behind a per-host HAProxy route,
-   the way Postgres is reached through `pghaproxy` at `$PODNAME:15510`. After
-   deploying Garage, confirm port 3900 answers from manifest-staging2 before
-   switching the server over.
-3. `hosted-staging.yml`: add the `S3_*` variables and secrets, and drop
-   `BLOB_DIR` and the `/data` volume. Done as a local commit on the
-   manifest-inventory branch `futo-notes-s3-cutover`, to merge only after a
-   server image that understands `S3_*` is on the `hosted-staging` tag;
-   without one, removing `BLOB_DIR` and the volume would put blobs on the
-   container's own disk.
+   the way Postgres is reached through `pghaproxy` at `$PODNAME:15510`. Port
+   3900 was not probed from manifest-staging2 itself (no SSH access). The
+   server's boot-time `HeadBucket` covered it: staging2 came up healthy in S3
+   mode, and the two-host check passed through it.
+3. **Done** (`b11c809`, deployed by Manifest #38559). `hosted-staging.yml`:
+   add the `S3_*` variables and secrets, and drop `BLOB_DIR` and the `/data`
+   volume. It went out after `candidate-32fadabb`, the first image that
+   understands `S3_*`, was on both hosts; without that image, removing
+   `BLOB_DIR` and the volume would have put blobs on the container's own disk.
 4. Push only when no full Manifest run is in progress: a manifest-inventory
-   push cancels it.
-5. **Cut over before anyone has a vault on staging.** Today there are none
-   (checked 2026-10-21: zero rows in `collections`). A rolling deploy briefly
-   runs one host on the filesystem and one on S3, which reintroduces the 404
-   this fixes, but only for blobs written in that window. So: check
-   `collections` is still empty right before the deploy, deploy, then run the
-   two-host check. If a vault has appeared by then, stop and plan a real
-   migration instead. Rollback is putting `BLOB_DIR` back, which is safe only
-   while no blobs have been written to S3.
-6. Remove the old `/futo-notes-hosted-staging-data/blobs` folders on both hosts
-   by hand afterward.
+   push, or a push to `hosted-server`, cancels it. On 2026-10-22 one push
+   cancelled a teammate's run (#38553); the next run redeployed their change.
+5. **Done.** Cut over before anyone had a vault on staging: `collections` and
+   `objects` were both empty right before the deploy (checked 2026-10-22),
+   and the two-host check then passed in both directions. Empty mattered
+   because a rolling deploy briefly runs one host on the filesystem and one on
+   S3, which brings back the 404 for blobs written in that window. Rollback
+   would now be putting `BLOB_DIR` back, which strands every blob written to
+   the bucket since the cutover, so it's no longer a free undo.
+6. **Left.** Remove the old `/futo-notes-hosted-staging-data/blobs` folders on
+   both hosts by hand.
 
 The S3 node is a single point of failure, and its volume has no backup, unlike
 Patroni. That is acceptable for an internal alpha, not for paying users. Before
@@ -265,9 +307,9 @@ it runs MinIO.
 ## Open questions
 
 - ~~Can manifest-staging2 reach port 3900 on `100.76.177.70` over
-  Tailscale?~~ Yes by construction: Manifest's nftables rules accept all
-  input on `tailscale0` (`sm_utils.py` `firewall_change`). Deploy step 2
-  still checks it.
+  Tailscale?~~ Yes: Manifest's nftables rules accept all input on
+  `tailscale0` (`sm_utils.py` `firewall_change`), and staging2 has served
+  blobs from the bucket since the cutover.
 - **The third host for production Garage.** Does it come from the
   dedicated-host item already on the pre-launch list?
 
