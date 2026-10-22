@@ -1,7 +1,9 @@
 # S3 blob storage plan
 
-Status: server side implemented 2026-10-22 on `hosted-server`; Garage manifest
-and cutover written, deploy pending (see Deploy). Reviewed by Codex; its
+Status: deployed to hosted staging 2026-10-22. Server side is `32fadab` on
+`hosted-server`; Garage is manifest-inventory `acee419` and the cutover is
+`b11c809`. The two-host check passed in both directions at 21:56 UTC. Left:
+deploy step 6, removing the old blob folders by hand. Reviewed by Codex; its
 findings are folded in.
 
 Goal: hosted staging runs on two hosts behind one load balancer, and every host
