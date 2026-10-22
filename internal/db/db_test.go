@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"futo-notes-server/internal/config"
 )
 
 func TestSQLiteRebindPreservesPostgresArgumentNumbers(t *testing.T) {
@@ -59,6 +61,29 @@ func TestFreshSQLiteGuard(t *testing.T) {
 	if err := prepareSQLiteFile(databasePath, blobDir, false); err == nil {
 		t.Fatal("zero-byte database bypassed the fresh-database guard")
 	}
+}
+
+// In S3 mode BLOB_DIR is unused, so leftover files in it say nothing about
+// whether DATABASE_URL was lost.
+func TestFreshSQLiteGuardStandsDownInS3Mode(t *testing.T) {
+	root := t.TempDir()
+	blobDir := filepath.Join(root, "blobs")
+	if err := os.MkdirAll(filepath.Join(blobDir, "owner"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(blobDir, "owner", "blob"), []byte("ciphertext"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{DatabaseURL: "sqlite:" + filepath.Join(root, "notes.db"), BlobDir: blobDir}
+	if _, err := Open(cfg); err == nil {
+		t.Fatal("Open() on the filesystem backend skipped the fresh-database guard")
+	}
+	cfg.S3Endpoint = "http://100.76.177.70:3900"
+	database, err := Open(cfg)
+	if err != nil {
+		t.Fatalf("Open() in S3 mode: %v", err)
+	}
+	database.Close()
 }
 
 func TestTimestampRoundTrip(t *testing.T) {

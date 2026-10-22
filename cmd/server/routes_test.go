@@ -46,7 +46,7 @@ func TestRoutesComposePublicAuthAndRecoveryMiddleware(t *testing.T) {
 		BlobDir:      t.TempDir(),
 	}
 	hub := events.NewHub()
-	server := httptest.NewServer(routes(cfg, database, &blobs.Store{Dir: cfg.BlobDir}, hub,
+	server := httptest.NewServer(routes(cfg, database, &blobs.FileStore{Dir: cfg.BlobDir}, hub,
 		events.NewPublisher(database.Dialect(), hub), nil))
 	defer server.Close()
 	client := serverClient(server)
@@ -140,7 +140,7 @@ func TestRoutesComposePasswordLoginRateLimit(t *testing.T) {
 		BlobDir:      t.TempDir(),
 	}
 	hub := events.NewHub()
-	server := httptest.NewServer(routes(cfg, database, &blobs.Store{Dir: cfg.BlobDir}, hub,
+	server := httptest.NewServer(routes(cfg, database, &blobs.FileStore{Dir: cfg.BlobDir}, hub,
 		events.NewPublisher(database.Dialect(), hub), nil))
 	defer server.Close()
 	client := serverClient(server)

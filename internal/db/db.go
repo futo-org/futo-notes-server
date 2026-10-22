@@ -197,7 +197,14 @@ func Open(cfg config.Config) (*DB, error) {
 	driverName := "pgx"
 	dsn := cfg.DatabaseURL
 	if dialect.engine == SQLite {
-		if err := prepareSQLiteFile(dialect.path, cfg.BlobDir, cfg.AllowFreshDatabase); err != nil {
+		// The fresh-database guard looks for blob files beside the
+		// database. In S3 mode BLOB_DIR is unused, and an empty directory
+		// name finds none.
+		blobDir := cfg.BlobDir
+		if cfg.S3() {
+			blobDir = ""
+		}
+		if err := prepareSQLiteFile(dialect.path, blobDir, cfg.AllowFreshDatabase); err != nil {
 			return nil, err
 		}
 		driverName = "sqlite"

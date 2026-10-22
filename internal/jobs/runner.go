@@ -25,7 +25,7 @@ var DefaultSchedule = Schedule{
 
 // Run executes recurring jobs until ctx is cancelled. Both schedules first
 // fire after InitialDelay, and an error from one job never stops later jobs.
-func Run(ctx context.Context, database *db.DB, store *blobs.Store, schedule Schedule, collectGarbage bool) {
+func Run(ctx context.Context, database *db.DB, store blobs.Store, schedule Schedule, collectGarbage bool) {
 	maintenance := maintenanceJobs(database, store, collectGarbage)
 
 	run(ctx, schedule, scheduledJobs{
@@ -56,23 +56,24 @@ func Run(ctx context.Context, database *db.DB, store *blobs.Store, schedule Sche
 	})
 }
 
-func maintenanceJobs(database *db.DB, store *blobs.Store, collectGarbage bool) []scheduledJob {
-	maintenance := []scheduledJob{
-		{
+func maintenanceJobs(database *db.DB, store blobs.Store, collectGarbage bool) []scheduledJob {
+	var maintenance []scheduledJob
+	if files, ok := store.(*blobs.FileStore); ok {
+		maintenance = append(maintenance, scheduledJob{
 			name: "storage reconciliation",
 			run: func(ctx context.Context) (string, error) {
-				result, err := ReconcileStorage(ctx, database, store)
+				result, err := ReconcileStorage(ctx, database, files)
 				return fmt.Sprintf("adopted %d, skipped %d, cap hit %t", result.Adopted, result.Skipped, result.CapHit), err
 			},
-		},
-		{
-			name: "mutation results",
-			run: func(ctx context.Context) (string, error) {
-				result, err := ExpireMutationResults(ctx, database)
-				return fmt.Sprintf("expired %d pending, %d other", result.PendingExpired, result.OtherExpired), err
-			},
-		},
+		})
 	}
+	maintenance = append(maintenance, scheduledJob{
+		name: "mutation results",
+		run: func(ctx context.Context) (string, error) {
+			result, err := ExpireMutationResults(ctx, database)
+			return fmt.Sprintf("expired %d pending, %d other", result.PendingExpired, result.OtherExpired), err
+		},
+	})
 	if collectGarbage {
 		maintenance = append(maintenance, scheduledJob{
 			name: "blob GC",

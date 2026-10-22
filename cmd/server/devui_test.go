@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"futo-notes-server/internal/blobs"
 	"futo-notes-server/internal/db"
 )
 
@@ -18,7 +19,7 @@ func TestDevUIIncludesRecurringJobPanel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handleDevUI(db.Wrap(nil, dialect))(response, request)
+	handleDevUI(db.Wrap(nil, dialect), &blobs.FileStore{Dir: "/var/lib/futo/blobs"})(response, request)
 
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", response.Code)
@@ -57,6 +58,7 @@ func TestDevUIIncludesRecurringJobPanel(t *testing.T) {
 		"last webhook received",
 		"Run now",
 		"sqlite: /var/lib/futo/notes.db",
+		"blobs: /var/lib/futo/blobs",
 		"/dev/session",
 		"app (hand-off)",
 		"recovery_encrypted_vault_key",
@@ -65,6 +67,31 @@ func TestDevUIIncludesRecurringJobPanel(t *testing.T) {
 		if !strings.Contains(body, text) {
 			t.Fatalf("dev UI does not contain %q", text)
 		}
+	}
+}
+
+func TestDevUIShowsTheS3BucketAndSkipsReconciliation(t *testing.T) {
+	dialect, err := db.ParseDialect("sqlite:/var/lib/futo/notes.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	database := db.Wrap(nil, dialect)
+	store := blobs.NewS3Store(blobs.S3Config{Endpoint: "http://garage.invalid:3900", Bucket: "notes-blobs", Region: "us-east-1"})
+
+	response := httptest.NewRecorder()
+	handleDevUI(database, store)(response, httptest.NewRequest(http.MethodGet, "/dev", nil))
+	if body := response.Body.String(); !strings.Contains(body, "blobs: S3 http://garage.invalid:3900, bucket notes-blobs") {
+		t.Fatalf("dev UI does not name the bucket")
+	}
+
+	// Reconciliation walks BLOB_DIR, so on S3 the button reports that
+	// instead of touching the database.
+	mux := http.NewServeMux()
+	registerDevJobHandlers(mux, database, store)
+	response = httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/dev/jobs/reconciliation", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "does not run in S3 mode") {
+		t.Fatalf("reconciliation = %d %q", response.Code, response.Body.String())
 	}
 }
 

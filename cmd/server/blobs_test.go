@@ -28,9 +28,9 @@ func blobKey(userID string, n int) string {
 
 // sparseStore writes each requested size as a hole, so a cap test can use
 // multi-megabyte blobs without spending the disk or the time.
-func sparseStore(t testing.TB, sizes map[string]int64) *blobs.Store {
+func sparseStore(t testing.TB, sizes map[string]int64) *blobs.FileStore {
 	t.Helper()
-	store := &blobs.Store{Dir: t.TempDir()}
+	store := &blobs.FileStore{Dir: t.TempDir()}
 	for key, size := range sizes {
 		path := filepath.Join(store.Dir, filepath.FromSlash(key))
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -86,16 +86,16 @@ func TestStreamBlobBatch(t *testing.T) {
 	present, absent := blobKey(fuzzUser, 1), blobKey(fuzzUser, 2)
 	foreign := blobKey(otherUser, 3)
 	store := sparseStore(t, nil)
-	if err := store.Put(present, []byte("ciphertext")); err != nil {
+	if err := store.Put(context.Background(), present, []byte("ciphertext")); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Put(foreign, []byte("not yours")); err != nil {
+	if err := store.Put(context.Background(), foreign, []byte("not yours")); err != nil {
 		t.Fatal(err)
 	}
 
 	var out bytes.Buffer
 	keys := []string{present, absent, foreign, "../../etc/passwd", "", present}
-	if err := streamBlobBatch(&out, store, fuzzUser, keys); err != nil {
+	if err := streamBlobBatch(context.Background(), &out, store, fuzzUser, keys); err != nil {
 		t.Fatal(err)
 	}
 	frames := decodeFrames(t, out.Bytes())
@@ -129,7 +129,7 @@ func TestStreamBlobBatchCap(t *testing.T) {
 
 	var out bytes.Buffer
 	keys := []string{first, second, third, small}
-	if err := streamBlobBatch(&out, store, fuzzUser, keys); err != nil {
+	if err := streamBlobBatch(context.Background(), &out, store, fuzzUser, keys); err != nil {
 		t.Fatal(err)
 	}
 	if out.Len() > maxBatchBytes {
@@ -151,7 +151,7 @@ func TestStreamBlobBatchShipsFirstOversizeBlob(t *testing.T) {
 	store := sparseStore(t, map[string]int64{oversize: maxBatchBytes + 1, next: 8})
 
 	var out bytes.Buffer
-	if err := streamBlobBatch(&out, store, fuzzUser, []string{oversize, next}); err != nil {
+	if err := streamBlobBatch(context.Background(), &out, store, fuzzUser, []string{oversize, next}); err != nil {
 		t.Fatal(err)
 	}
 	frames := decodeFrames(t, out.Bytes())
@@ -168,7 +168,7 @@ func TestStreamBlobBatchSkipsUnframeableFile(t *testing.T) {
 	store := sparseStore(t, map[string]int64{huge: maxBlobBytes + 1})
 
 	var out bytes.Buffer
-	if err := streamBlobBatch(&out, store, fuzzUser, []string{huge}); err != nil {
+	if err := streamBlobBatch(context.Background(), &out, store, fuzzUser, []string{huge}); err != nil {
 		t.Fatal(err)
 	}
 	if frames := decodeFrames(t, out.Bytes()); frames[0].Status != frameMissing {
@@ -176,7 +176,7 @@ func TestStreamBlobBatchSkipsUnframeableFile(t *testing.T) {
 	}
 }
 
-func batchRequest(store *blobs.Store, body string) *httptest.ResponseRecorder {
+func batchRequest(store blobs.Store, body string) *httptest.ResponseRecorder {
 	r := httptest.NewRequest("POST", "/api/blobs/batch", strings.NewReader(body))
 	session := &auth.Session{ID: "session", User: auth.User{ID: fuzzUser}}
 	r = r.WithContext(context.WithValue(r.Context(), sessionCtxKey{}, session))
@@ -269,10 +269,10 @@ func FuzzBatchFetchBody(f *testing.F) {
 // own directory.
 func FuzzStreamBlobBatch(f *testing.F) {
 	store := sparseStore(f, nil)
-	if err := store.Put(blobKey(fuzzUser, 1), []byte("mine")); err != nil {
+	if err := store.Put(context.Background(), blobKey(fuzzUser, 1), []byte("mine")); err != nil {
 		f.Fatal(err)
 	}
-	if err := store.Put(blobKey(otherUser, 1), []byte("theirs")); err != nil {
+	if err := store.Put(context.Background(), blobKey(otherUser, 1), []byte("theirs")); err != nil {
 		f.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(store.Dir, "loose"), []byte("loose"), 0o644); err != nil {
@@ -299,7 +299,7 @@ func FuzzStreamBlobBatch(f *testing.F) {
 			}
 		}
 		var out bytes.Buffer
-		if err := streamBlobBatch(&out, store, fuzzUser, keys); err != nil {
+		if err := streamBlobBatch(context.Background(), &out, store, fuzzUser, keys); err != nil {
 			t.Fatalf("stream failed for %q: %v", keys, err)
 		}
 		frames := decodeFrames(t, out.Bytes())

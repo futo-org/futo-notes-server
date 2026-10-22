@@ -409,3 +409,52 @@ func TestStandinModeRefusesSecureCookies(t *testing.T) {
 		t.Fatal("CookieSecure = true for COOKIE_SECURE=false")
 	}
 }
+
+func TestS3IsOffUnlessTheEndpointIsSet(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("DATABASE_URL", "postgres://example.test/notes")
+	t.Setenv("AUTH_MODE", "dev")
+	t.Setenv("S3_ENDPOINT", "")
+	// A bucket without an endpoint stays on BLOB_DIR.
+	t.Setenv("S3_BUCKET", "notes-blobs")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.S3() {
+		t.Fatal("S3() = true without S3_ENDPOINT")
+	}
+}
+
+func TestS3EndpointRequiresBucketAndKeys(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("DATABASE_URL", "postgres://example.test/notes")
+	t.Setenv("AUTH_MODE", "dev")
+	t.Setenv("S3_ENDPOINT", "http://100.76.177.70:3900")
+	t.Setenv("S3_BUCKET", "")
+	t.Setenv("S3_ACCESS_KEY_ID", "")
+	t.Setenv("S3_SECRET_ACCESS_KEY", "")
+	t.Setenv("S3_REGION", "")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() error = nil, want missing S3 vars error")
+	}
+	for _, name := range []string{"S3_BUCKET", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY"} {
+		if !strings.Contains(err.Error(), name) {
+			t.Fatalf("Load() error = %v, want it to name %s", err, name)
+		}
+	}
+
+	t.Setenv("S3_BUCKET", "notes-blobs")
+	t.Setenv("S3_ACCESS_KEY_ID", "GK0123")
+	t.Setenv("S3_SECRET_ACCESS_KEY", "secret")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() with all S3 vars set: %v", err)
+	}
+	if !cfg.S3() || cfg.S3Region != "us-east-1" {
+		t.Fatalf("S3() = %t, S3Region = %q, want true and the us-east-1 default", cfg.S3(), cfg.S3Region)
+	}
+}

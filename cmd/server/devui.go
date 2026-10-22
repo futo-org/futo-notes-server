@@ -20,29 +20,48 @@ import (
 //go:embed devui.html
 var devUIHTML []byte
 
-func handleDevUI(database *db.DB) http.HandlerFunc {
+func handleDevUI(database *db.DB, store blobs.Store) http.HandlerFunc {
 	engine := string(database.Dialect().Engine())
 	if database.Dialect().Path() != "" {
 		engine += ": " + database.Dialect().Path()
 	}
 	body := bytes.ReplaceAll(devUIHTML, []byte("{{DATABASE_INFO}}"), []byte(html.EscapeString(engine)))
+	body = bytes.ReplaceAll(body, []byte("{{BLOB_STORAGE_INFO}}"), []byte(html.EscapeString(blobStorageInfo(store))))
 	return func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(body)
 	}
 }
 
+func blobStorageInfo(store blobs.Store) string {
+	switch store := store.(type) {
+	case *blobs.FileStore:
+		return "blobs: " + store.Dir
+	case *blobs.S3Store:
+		return "blobs: S3 " + store.Endpoint + ", bucket " + store.Bucket
+	}
+	return "blobs: unknown"
+}
+
 func handleDevPanic(http.ResponseWriter, *http.Request) {
 	panic("intentional dev panic")
 }
 
-func registerDevJobHandlers(mux *http.ServeMux, database *db.DB, store *blobs.Store) {
+func registerDevJobHandlers(mux *http.ServeMux, database *db.DB, store blobs.Store) {
 	mux.HandleFunc("POST /dev/jobs/sessions", handleDevJob(func(ctx context.Context) (jobs.SessionReapResult, error) {
 		return jobs.ReapSessions(ctx, database)
 	}))
-	mux.HandleFunc("POST /dev/jobs/reconciliation", handleDevJob(func(ctx context.Context) (jobs.ReconciliationResult, error) {
-		return jobs.ReconcileStorage(ctx, database, store)
-	}))
+	if files, ok := store.(*blobs.FileStore); ok {
+		mux.HandleFunc("POST /dev/jobs/reconciliation", handleDevJob(func(ctx context.Context) (jobs.ReconciliationResult, error) {
+			return jobs.ReconcileStorage(ctx, database, files)
+		}))
+	} else {
+		mux.HandleFunc("POST /dev/jobs/reconciliation", func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, http.StatusOK, map[string]string{
+				"skipped": "storage reconciliation walks BLOB_DIR, and blobs are in S3; the job does not run in S3 mode",
+			})
+		})
+	}
 	mux.HandleFunc("POST /dev/jobs/mutation-results", handleDevJob(func(ctx context.Context) (jobs.MutationExpiryResult, error) {
 		return jobs.ExpireMutationResults(ctx, database)
 	}))

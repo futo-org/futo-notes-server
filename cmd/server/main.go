@@ -99,7 +99,7 @@ func handleHealth(database *db.DB) http.HandlerFunc {
 	}
 }
 
-func routes(cfg config.Config, database *db.DB, blobStore *blobs.Store, eventHub *events.Hub, publisher events.Publisher, provider *oidc.Provider) http.Handler {
+func routes(cfg config.Config, database *db.DB, blobStore blobs.Store, eventHub *events.Hub, publisher events.Publisher, provider *oidc.Provider) http.Handler {
 	// The Storage Quota is a hosted limit, so only the hosted deployment
 	// refuses a write for being over it. The per-blob cap comes from the Plan
 	// everywhere, where the one plan carries the value the server used as a
@@ -196,7 +196,7 @@ func routes(cfg config.Config, database *db.DB, blobStore *blobs.Store, eventHub
 		}
 	}
 	if cfg.DevUI {
-		mux.HandleFunc("GET /dev", handleDevUI(database))
+		mux.HandleFunc("GET /dev", handleDevUI(database, blobStore))
 		mux.HandleFunc("POST /dev/panic", handleDevPanic)
 		registerDevJobHandlers(mux, database, blobStore)
 		mux.HandleFunc("POST /dev/plan", handleDevPlan(database))
@@ -268,7 +268,26 @@ func main() {
 	if len(applied) > 0 {
 		slog.Info("applied database migrations", "count", len(applied), "migrations", strings.Join(applied, ", "))
 	}
-	blobStore := &blobs.Store{Dir: cfg.BlobDir}
+	var blobStore blobs.Store = &blobs.FileStore{Dir: cfg.BlobDir}
+	if cfg.S3() {
+		s3Store := blobs.NewS3Store(blobs.S3Config{
+			Endpoint:        cfg.S3Endpoint,
+			Bucket:          cfg.S3Bucket,
+			AccessKeyID:     cfg.S3AccessKeyID,
+			SecretAccessKey: cfg.S3SecretAccessKey,
+			Region:          cfg.S3Region,
+		})
+		// The same treatment as an unreachable OIDC issuer: a server that
+		// cannot reach its blobs refuses to start rather than serve 500s.
+		checkCtx, checkCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err := s3Store.CheckBucket(checkCtx)
+		checkCancel()
+		if err != nil {
+			slog.Error("reaching the S3 bucket", "endpoint", cfg.S3Endpoint, "bucket", cfg.S3Bucket, "err", err)
+			os.Exit(1)
+		}
+		blobStore = s3Store
+	}
 	eventHub := events.NewHub()
 	publisher := events.NewPublisher(database.Dialect(), eventHub)
 	if database.Dialect().Engine() == db.Postgres {

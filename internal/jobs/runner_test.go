@@ -14,7 +14,7 @@ import (
 
 func TestReconcileStorageMissingDirectoryIsEmpty(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "not-created")
-	result, err := ReconcileStorage(context.Background(), nil, &blobs.Store{Dir: dir})
+	result, err := ReconcileStorage(context.Background(), nil, &blobs.FileStore{Dir: dir})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -24,25 +24,38 @@ func TestReconcileStorageMissingDirectoryIsEmpty(t *testing.T) {
 }
 
 func TestBlobGCRegistrationCanBeDisabled(t *testing.T) {
+	files := &blobs.FileStore{Dir: t.TempDir()}
+	bucket := blobs.NewS3Store(blobs.S3Config{Endpoint: "http://garage.invalid:3900", Bucket: "notes-blobs", Region: "us-east-1"})
 	for _, test := range []struct {
 		name      string
+		store     blobs.Store
 		enabled   bool
 		wantNames []string
 	}{
 		{
 			name:      "enabled",
+			store:     files,
 			enabled:   true,
 			wantNames: []string{"storage reconciliation", "mutation results", "blob GC", "usage reconciliation"},
 		},
 		{
 			name:      "disabled",
+			store:     files,
 			enabled:   false,
 			wantNames: []string{"storage reconciliation", "mutation results", "usage reconciliation"},
+		},
+		{
+			// Reconciliation walks BLOB_DIR, and a bucket holds nothing the
+			// ledger did not record first.
+			name:      "S3",
+			store:     bucket,
+			enabled:   true,
+			wantNames: []string{"mutation results", "blob GC", "usage reconciliation"},
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var names []string
-			for _, job := range maintenanceJobs(nil, nil, test.enabled) {
+			for _, job := range maintenanceJobs(nil, test.store, test.enabled) {
 				names = append(names, job.name)
 			}
 			if !slices.Equal(names, test.wantNames) {

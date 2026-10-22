@@ -50,6 +50,17 @@ test:go:
     SERVER_TEST_DATABASE_URL: postgres://futo_notes:ci@postgres:5432/server_test
     MIGRATION_TEST_DATABASE_URL: postgres://futo_notes:ci@postgres:5432/migration_test
     USAGE_TEST_DATABASE_URL: postgres://futo_notes:ci@postgres:5432/usage_test
+    # Garage for the S3 runs of the blob tests. Throwaway values: this
+    # Garage lives only as long as the job.
+    BLOBS_TEST_S3_ENDPOINT: http://127.0.0.1:3900
+    BLOBS_TEST_S3_BUCKET: futo-notes-test
+    BLOBS_TEST_S3_ACCESS_KEY_ID: GK000000000000000000000001
+    BLOBS_TEST_S3_SECRET_ACCESS_KEY: "0000000000000000000000000000000000000000000000000000000000000001"
+    GARAGE_CONFIG_FILE: /tmp/garage/garage.toml
+    GARAGE_RPC_SECRET: "0000000000000000000000000000000000000000000000000000000000000002"
+    GARAGE_DEFAULT_ACCESS_KEY: $BLOBS_TEST_S3_ACCESS_KEY_ID
+    GARAGE_DEFAULT_SECRET_KEY: $BLOBS_TEST_S3_SECRET_ACCESS_KEY
+    GARAGE_DEFAULT_BUCKET: $BLOBS_TEST_S3_BUCKET
     GOMODCACHE: $CI_PROJECT_DIR/.go/mod
   cache:
     key:
@@ -63,6 +74,34 @@ test:go:
       for db in objects_test events_test jobs_test blobs_test server_test migration_test usage_test; do
         PGPASSWORD=ci createdb -h postgres -U futo_notes "$db"
       done
+    # Garage v2.4.1, the version hosted staging runs. It won't start without a
+    # config file, a service container can't be given one, and the image has
+    # no shell to write one, so the job runs the release binary itself. The
+    # hash is that of /garage in dxflrs/garage:v2.4.1.
+    - curl -sSfL -o /usr/local/bin/garage https://garagehq.deuxfleurs.fr/_releases/v2.4.1/x86_64-unknown-linux-musl/garage
+    - echo "ae49f8de4aaee6b5ca305f7cbdccc8cd8a29b2804aac074649f18bfb83d0a2b6  /usr/local/bin/garage" | sha256sum -c -
+    - chmod +x /usr/local/bin/garage
+    - mkdir -p /tmp/garage
+    - |
+      cat > "$GARAGE_CONFIG_FILE" <<'TOML'
+      metadata_dir = "/tmp/garage/meta"
+      data_dir = "/tmp/garage/data"
+      db_engine = "sqlite"
+      replication_factor = 1
+      rpc_bind_addr = "127.0.0.1:3901"
+      rpc_public_addr = "127.0.0.1:3901"
+
+      [s3_api]
+      s3_region = "us-east-1"
+      api_bind_addr = "127.0.0.1:3900"
+      TOML
+    - garage server --single-node --default-bucket > /tmp/garage/garage.log 2>&1 &
+    - |
+      for attempt in $(seq 1 30); do
+        curl -s -o /dev/null "$BLOBS_TEST_S3_ENDPOINT" && break
+        sleep 1
+      done
+      curl -s -o /dev/null "$BLOBS_TEST_S3_ENDPOINT" || { cat /tmp/garage/garage.log; exit 1; }
   script:
     - go test -race ./...
     - go vet ./...

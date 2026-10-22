@@ -65,7 +65,7 @@ func TestMigratePostgresToSQLitePreservesApplicationState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store := &blobs.Store{Dir: filepath.Join(t.TempDir(), "blobs")}
+	store := &blobs.FileStore{Dir: filepath.Join(t.TempDir(), "blobs")}
 	blobKey, err := blobs.Stage(ctx, source, store, user.ID, []byte("migration encrypted payload"))
 	if err != nil {
 		t.Fatal(err)
@@ -131,7 +131,7 @@ func TestMigratePostgresToSQLitePreservesApplicationState(t *testing.T) {
 	if err := target.QueryRowContext(ctx, `SELECT value FROM server_config WHERE key = $1`, configKey).Scan(&configValue); err != nil || configValue != "migration-value" {
 		t.Fatalf("server_config value = %q, %v", configValue, err)
 	}
-	file, err := store.Open(blobKey)
+	file, _, err := store.Open(ctx, blobKey)
 	if err != nil {
 		t.Fatalf("opening unchanged blob: %v", err)
 	}

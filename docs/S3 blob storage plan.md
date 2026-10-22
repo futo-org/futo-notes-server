@@ -1,6 +1,8 @@
 # S3 blob storage plan
 
-Status: ready to implement, 2026-10-21. Reviewed by Codex; its findings are folded in.
+Status: server side implemented 2026-10-22 on `hosted-server`; Garage manifest
+and cutover written, deploy pending (see Deploy). Reviewed by Codex; its
+findings are folded in.
 
 Goal: hosted staging runs on two hosts behind one load balancer, and every host
 can serve every blob. Today it can't. This is the "S3 blob store" that ADR 0004
@@ -156,8 +158,10 @@ instead of walking a directory that isn't used.
 
 - One backend contract test (put, open with size, open missing →
   `ErrNotFound`, remove, remove missing) run against both backends. The
-  S3 run needs `BLOBS_TEST_S3_ENDPOINT` and skips without it, the same way the
-  Postgres tests skip without `*_TEST_DATABASE_URL`.
+  S3 run needs `BLOBS_TEST_S3_ENDPOINT` (plus `_BUCKET`, `_ACCESS_KEY_ID` and
+  `_SECRET_ACCESS_KEY`) and skips without it, the same way the Postgres tests
+  skip without `*_TEST_DATABASE_URL`. `internal/blobs/blobstest` hands both
+  packages the list of backends.
 - The server route tests for download, batch fetch, `POST /api/blobs` and the
   blob-object create and update routes also run once on S3 when that variable
   is set.
@@ -165,13 +169,15 @@ instead of walking a directory that isn't used.
   `ContentLength`, a body shorter than its length, and a body that errors
   partway through all abort the batch stream. A `500` from S3 on download is a
   `500`, not a `404`. A stalled S3 fails within the timeout instead of hanging.
-- CI: `test:go` gets a Garage service container (`dxflrs/garage`, pinned to
-  the same version as staging) started with
+- CI: `test:go` runs Garage (v2.4.1, the same as staging) with
   `garage server --single-node --default-bucket`. That creates the layout, an
   access key and the bucket from `GARAGE_DEFAULT_ACCESS_KEY`,
-  `GARAGE_DEFAULT_SECRET_KEY` and `GARAGE_DEFAULT_BUCKET` (v2.3.0 or later).
-  The job waits for the S3 port before the tests start. Garage's quick-start
-  still shows a config file; check whether the flags make it optional.
+  `GARAGE_DEFAULT_SECRET_KEY` and `GARAGE_DEFAULT_BUCKET`. The flags don't
+  make the config file optional (checked 2026-10-21: without `/etc/garage.toml`
+  it exits with `Failed to read config file`), and a GitLab service container
+  can't be given a file, while the image is `FROM scratch` with no shell to
+  write one. So the job writes the config and starts Garage itself, then waits
+  for the S3 port before the tests start.
 - A two-host check, run by hand after deploy: write through
   `100.76.177.70:3011`, read through `100.127.246.105:3011`, and the reverse.
   Both must be `200`. That's the test that failed on 2026-10-21.
@@ -202,13 +208,25 @@ the same single point of failure as any one-box option, and fine for an
 internal alpha. Production runs three nodes on three separate hosts with factor
 3, which needs a third host.
 
-1. New `inventory/futo-notes/hosted-staging-s3.yml`: one Garage node on
-   manifest-staging, with a host volume (Garage wants its metadata on SSD) and
-   the S3 port (3900 by default; check it's free). It starts with
-   `garage server --single-node --default-bucket`, taking the access key, secret
-   and bucket name from new fields on the 1Password item
-   `Manifest/futo-notes-hosted-staging`. That creates the bucket itself, so no
-   hand step is needed.
+1. New `inventory/futo-notes-s3/garage-staging.yml` (done 2026-10-21, local
+   commit on manifest-inventory `master`): one Garage node on manifest-staging,
+   with a host volume and the S3 port 3900. Manifest maps a container port to
+   the same host port when no other project holds it (`sm_utils.py`
+   `assign_ports_to_pod`); no inventory file declares 3900. It starts with
+   `garage server --single-node --default-bucket`, taking the RPC secret,
+   access key and secret from new fields on the 1Password item
+   `Manifest/futo-notes-hosted-staging`, and the bucket name from a plain
+   variable. That creates the bucket itself, so no hand step is needed.
+   - Its own project folder, not `inventory/futo-notes`: adding a port to a
+     pod makes Manifest recreate the pod, which would restart Patroni and both
+     sync servers on manifest-staging.
+   - `garage.toml` goes in through the manifest's `files:`. It pins
+     `s3_region = "us-east-1"` to match the server's `S3_REGION` default;
+     Garage rejects a request signed for any other region (`400`, checked).
+   - Health checks use the exec form `["CMD", "/garage", "status"]`, because
+     the image has no shell and Manifest's plain-string checks run through
+     `/bin/sh -c`. Checked locally under podman 5.8.7: the startup check
+     passes and the container reports `healthy`.
 2. Both hosts use the direct tailnet address,
    `S3_ENDPOINT=http://100.76.177.70:3900` (decided 2026-10-21). That's fine
    for one node. Production's three nodes go behind a per-host HAProxy route,
@@ -216,7 +234,11 @@ internal alpha. Production runs three nodes on three separate hosts with factor
    deploying Garage, confirm port 3900 answers from manifest-staging2 before
    switching the server over.
 3. `hosted-staging.yml`: add the `S3_*` variables and secrets, and drop
-   `BLOB_DIR` and the `/data` volume.
+   `BLOB_DIR` and the `/data` volume. Done as a local commit on the
+   manifest-inventory branch `futo-notes-s3-cutover`, to merge only after a
+   server image that understands `S3_*` is on the `hosted-staging` tag;
+   without one, removing `BLOB_DIR` and the volume would put blobs on the
+   container's own disk.
 4. Push only when no full Manifest run is in progress: a manifest-inventory
    push cancels it.
 5. **Cut over before anyone has a vault on staging.** Today there are none
@@ -240,9 +262,10 @@ it runs MinIO.
 
 ## Open questions
 
-- **Can manifest-staging2 reach port 3900 on `100.76.177.70` over Tailscale,
-  or does a host firewall block it?** Ask devops; deploy step 2 checks it
-  either way.
+- ~~Can manifest-staging2 reach port 3900 on `100.76.177.70` over
+  Tailscale?~~ Yes by construction: Manifest's nftables rules accept all
+  input on `tailscale0` (`sm_utils.py` `firewall_change`). Deploy step 2
+  still checks it.
 - **The third host for production Garage.** Does it come from the
   dedicated-host item already on the pre-launch list?
 

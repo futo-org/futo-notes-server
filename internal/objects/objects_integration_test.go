@@ -58,7 +58,7 @@ func TestObjectMutationLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store := &blobs.Store{Dir: t.TempDir()}
+	store := &blobs.FileStore{Dir: t.TempDir()}
 	firstKey, err := blobs.Stage(ctx, database, store, userID, []byte("one"))
 	if err != nil {
 		t.Fatal(err)
@@ -263,7 +263,7 @@ func TestDeleteRetainsBlobForReclamation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store := &blobs.Store{Dir: t.TempDir()}
+	store := &blobs.FileStore{Dir: t.TempDir()}
 	key, err := blobs.Stage(ctx, database, store, userID, []byte("folder ciphertext"))
 	if err != nil {
 		t.Fatal(err)
@@ -298,7 +298,7 @@ func TestDeleteRetainsBlobForReclamation(t *testing.T) {
 	}
 
 	// Still readable: the tombstone's blob may be a merge ancestor.
-	file, err := store.Open(key)
+	file, _, err := store.Open(context.Background(), key)
 	if err != nil {
 		t.Fatalf("tombstone blob is not fetchable: %v", err)
 	}

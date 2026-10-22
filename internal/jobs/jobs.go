@@ -79,7 +79,9 @@ var errReconciliationCap = errors.New("storage reconciliation cap reached")
 
 // ReconcileStorage adopts files that have no authoritative blob_ledger row.
 // A missing storage directory is equivalent to an empty one on a fresh server.
-func ReconcileStorage(ctx context.Context, database *appdb.DB, store *blobs.Store) (ReconciliationResult, error) {
+// It is filesystem-only: an S3 bucket starts empty and holds nothing the
+// ledger did not record first (ADR 0001).
+func ReconcileStorage(ctx context.Context, database *appdb.DB, store *blobs.FileStore) (ReconciliationResult, error) {
 	var result ReconciliationResult
 	err := filepath.WalkDir(store.Dir, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -209,9 +211,10 @@ type BlobGCResult struct {
 	FilesRemoved int `json:"files_removed"`
 }
 
-// GarbageCollectBlobs deletes the authoritative row before its file. If the
-// file deletion fails, reconciliation will adopt it again for a later pass.
-func GarbageCollectBlobs(ctx context.Context, database *appdb.DB, store *blobs.Store) (BlobGCResult, error) {
+// GarbageCollectBlobs deletes the authoritative row before its bytes. If the
+// removal fails, the key is in the returned error: on disk, reconciliation
+// adopts the file again for a later pass; in S3 nothing does.
+func GarbageCollectBlobs(ctx context.Context, database *appdb.DB, store blobs.Store) (BlobGCResult, error) {
 	var result BlobGCResult
 	var removalErrors []error
 
@@ -236,18 +239,11 @@ func GarbageCollectBlobs(ctx context.Context, database *appdb.DB, store *blobs.S
 			purgedThisPass++
 			result.RowsPurged++
 
-			existed, err := blobFileExists(store, key)
-			if err != nil {
-				removalErrors = append(removalErrors, fmt.Errorf("stating blob %q: %w", key, err))
-				continue
-			}
-			if err := store.Remove(key); err != nil {
+			if err := store.Remove(ctx, key); err != nil {
 				removalErrors = append(removalErrors, fmt.Errorf("removing blob %q: %w", key, err))
 				continue
 			}
-			if existed {
-				result.FilesRemoved++
-			}
+			result.FilesRemoved++
 		}
 
 		// Every selected key may have been claimed or handled by another
@@ -324,18 +320,6 @@ func purgeBlobRow(ctx context.Context, database *appdb.DB, key string) (bool, er
 		return false, err
 	}
 	return true, nil
-}
-
-func blobFileExists(store *blobs.Store, key string) (bool, error) {
-	_, err := os.Stat(filepath.Join(store.Dir, filepath.FromSlash(key)))
-	switch {
-	case err == nil:
-		return true, nil
-	case errors.Is(err, os.ErrNotExist):
-		return false, nil
-	default:
-		return false, err
-	}
 }
 
 func validUUID(value string) bool {

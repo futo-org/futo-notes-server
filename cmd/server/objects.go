@@ -235,7 +235,7 @@ func readBlobBody(w http.ResponseWriter, r *http.Request, maxBytes int64) ([]byt
 	return body, true
 }
 
-func handleCreateBlobObject(database *db.DB, store *blobs.Store, publisher events.Publisher, quotaEnforced bool) http.HandlerFunc {
+func handleCreateBlobObject(database *db.DB, store blobs.Store, publisher events.Publisher, quotaEnforced bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		mID, ok := mutationID(r)
 		if !ok {
@@ -274,7 +274,7 @@ func handleCreateBlobObject(database *db.DB, store *blobs.Store, publisher event
 	}
 }
 
-func handleUpdateBlobObject(database *db.DB, store *blobs.Store, publisher events.Publisher, quotaEnforced bool) http.HandlerFunc {
+func handleUpdateBlobObject(database *db.DB, store blobs.Store, publisher events.Publisher, quotaEnforced bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		mID, ok := mutationID(r)
 		if !ok {
@@ -426,7 +426,7 @@ func parseBatch(body []byte) ([]batchEntry, string) {
 	return entries, ""
 }
 
-func handleBatchBlobObjects(database *db.DB, store *blobs.Store, publisher events.Publisher, quotaEnforced bool) http.HandlerFunc {
+func handleBatchBlobObjects(database *db.DB, store blobs.Store, publisher events.Publisher, quotaEnforced bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBatchBytes))
 		if err != nil {

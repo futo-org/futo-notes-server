@@ -29,7 +29,7 @@ type Config struct {
 	PasswordHash       string // FUTO_NOTES_PASSWORD_HASH, scrypt self-describing form
 	CookieSecure       bool   // COOKIE_SECURE, Secure cookie flag; on unless "false"
 	DevUI              bool   // DEV_UI, serves the dev test page at /dev when "true"
-	BlobDir            string // BLOB_DIR, root of on-disk blob storage
+	BlobDir            string // BLOB_DIR, root of on-disk blob storage; ignored in S3 mode
 	BlobGCEnabled      bool   // BLOB_GC_ENABLED, disables irreversible blob garbage collection when false
 	AllowFreshDatabase bool   // ALLOW_FRESH_DATABASE, overrides the SQLite/blob safety guard
 	DBPoolMax          int
@@ -53,6 +53,14 @@ type Config struct {
 	// variable is the launch flip, with no product-ID swap on the day.
 	// Optional, so a server without it sells at list price.
 	PolarDiscountID string
+
+	// S3 blob storage, on when S3_ENDPOINT is set; the other three are then
+	// required. Off by default, so self-hosters keep blobs in BLOB_DIR.
+	S3Endpoint        string // S3_ENDPOINT, e.g. http://100.76.177.70:3900
+	S3Bucket          string // S3_BUCKET, which the server does not create
+	S3AccessKeyID     string // S3_ACCESS_KEY_ID
+	S3SecretAccessKey string // S3_SECRET_ACCESS_KEY
+	S3Region          string // S3_REGION, default us-east-1; signing needs some value
 
 	// HOSTED_ALLOWED_EMAIL_DOMAINS, lowercased. Empty admits every identity
 	// the provider authenticates; otherwise sign-in is limited to these
@@ -119,6 +127,11 @@ func Load() (Config, error) {
 		PolarProductID:     os.Getenv("POLAR_PRODUCT_ID"),
 		PolarWebhookSecret: os.Getenv("POLAR_WEBHOOK_SECRET"),
 		PolarDiscountID:    os.Getenv("POLAR_DISCOUNT_ID"),
+		S3Endpoint:         os.Getenv("S3_ENDPOINT"),
+		S3Bucket:           os.Getenv("S3_BUCKET"),
+		S3AccessKeyID:      os.Getenv("S3_ACCESS_KEY_ID"),
+		S3SecretAccessKey:  os.Getenv("S3_SECRET_ACCESS_KEY"),
+		S3Region:           getDefault("S3_REGION", "us-east-1"),
 
 		HostedAllowedEmailDomains: emailDomains(os.Getenv("HOSTED_ALLOWED_EMAIL_DOMAINS")),
 
@@ -190,6 +203,22 @@ func Load() (Config, error) {
 		}
 		if !strings.HasSuffix(u.Path, OIDCCallbackPath) {
 			return Config{}, fmt.Errorf("OIDC_REDIRECT_URI path must end in %s, got %q", OIDCCallbackPath, cfg.OIDCRedirectURI)
+		}
+	}
+
+	if cfg.S3() {
+		var missing []string
+		for _, setting := range []struct{ name, value string }{
+			{"S3_BUCKET", cfg.S3Bucket},
+			{"S3_ACCESS_KEY_ID", cfg.S3AccessKeyID},
+			{"S3_SECRET_ACCESS_KEY", cfg.S3SecretAccessKey},
+		} {
+			if setting.value == "" {
+				missing = append(missing, setting.name)
+			}
+		}
+		if len(missing) > 0 {
+			return Config{}, fmt.Errorf("%s required when S3_ENDPOINT is set", strings.Join(missing, ", "))
 		}
 	}
 
@@ -284,6 +313,9 @@ func getDefault(key, fallback string) string {
 	}
 	return fallback
 }
+
+// S3 reports whether blobs live in an S3 bucket rather than BLOB_DIR.
+func (c Config) S3() bool { return c.S3Endpoint != "" }
 
 // Hosted reports whether this is the hosted service rather than a self-hosted
 // server. Hosted mode is AUTH_MODE=oidc plus Polar, and oidc mode will not

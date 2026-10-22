@@ -76,7 +76,12 @@ reading first in any review of `hosted.yml`.
 | `POLAR_DISCOUNT_ID` | unset | Applied to every checkout while set. The internal MVP points it at a **100% percentage discount whose duration is Forever**, so FUTO people go through the real product's checkout and pay nothing. Dropping the variable is the launch flip; there is no product swap on the day. |
 | `HOSTED_ALLOWED_EMAIL_DOMAINS` | unset | Comma-separated, compared case-insensitively. Unset admits every identity the provider authenticates. Set to `futo.org` for the internal MVP: anyone else is refused at the OIDC callback with `signup_not_open` and no account is created. |
 | `PORT` | `3005` | `3011` here, because the pod's 3000 belongs to the internal sync server. |
-| `BLOB_DIR` | `./blobs` | `/data/blobs`, on the `/futo-notes-hosted-data/` host volume. |
+| `S3_ENDPOINT` | unset | `http://100.76.177.70:3900`, the Garage node on manifest-staging (`inventory/futo-notes-s3/garage-staging.yml` in manifest-inventory). Setting it moves blobs from `BLOB_DIR` to the bucket, so both hosts behind the loadbalancer serve every blob; it then requires the three below. At boot the server runs `HeadBucket` with a 10 s timeout and exits if the bucket is unreachable or missing. It does not create the bucket. See [S3 blob storage plan](./S3%20blob%20storage%20plan.md). |
+| `S3_BUCKET` | unset | `futo-notes-hosted-staging-blobs`. |
+| `S3_ACCESS_KEY_ID` | unset | Garage key id, `GK` plus 24 hex characters. |
+| `S3_SECRET_ACCESS_KEY` | unset | Its secret. |
+| `S3_REGION` | `us-east-1` | Must match Garage's `s3_region`, which the manifest also sets to `us-east-1`; Garage rejects requests signed for any other region. |
+| `BLOB_DIR` | `./blobs` | Ignored when `S3_ENDPOINT` is set. Before the S3 cutover: `/data/blobs`, on the `/futo-notes-hosted-data/` host volume. |
 | `COOKIE_SECURE` | `true` | Leave on. The instance is behind the loadbalancer's TLS. |
 | `DEV_UI` | `false` | Leave off. It serves `/dev`, which can sign Polar deliveries with the configured webhook secret. |
 | `STANDIN_MODE` | `false` | **Never set this.** It replaces Zitadel and Polar with in-process fakes: anyone who opens the login URL is signed in, and opening a checkout URL entitles the account for free. It refuses to boot alongside any `OIDC_*`, `POLAR_*`, or `HOSTED_ALLOWED_EMAIL_DOMAINS` value, so it cannot start on this instance's configuration at all — and if it somehow did, it binds loopback only and the loadbalancer would find nothing answering. It exists for automated test suites; see [ADR 0009](./adr/0009-stand-in-test-mode.md). |

@@ -1,10 +1,12 @@
-// Package blobs owns the blob_ledger table and on-disk blob storage.
+// Package blobs owns the blob_ledger table and the storage behind it: a
+// directory on disk by default, or an S3 bucket when S3_ENDPOINT is set.
 package blobs
 
 import (
 	"context"
 	"database/sql"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,14 +16,30 @@ import (
 	"futo-notes-server/internal/db"
 )
 
-// Store writes blobs under Dir using the storage key as a relative path,
+// ErrNotFound is the one error that means the blob is not there. Anything
+// else a Store returns is a failure to find out, which callers must not
+// report as absence: "storage is down" never reads as "your note is gone".
+var ErrNotFound = errors.New("blob not found")
+
+// Store holds blob bytes by storage key.
+type Store interface {
+	Put(ctx context.Context, key string, data []byte) error
+	// Open returns the blob and its size. The reader is an *os.File for a
+	// FileStore, which the download route uses to serve ranges.
+	Open(ctx context.Context, key string) (io.ReadCloser, int64, error)
+	// Remove succeeds when the blob is already gone, so callers can treat
+	// deletion as idempotent.
+	Remove(ctx context.Context, key string) error
+}
+
+// FileStore writes blobs under Dir using the storage key as a relative path,
 // so a key like {userId}/{blobId} becomes a subdirectory plus file. This
 // matches the layout the TypeScript server's FsBlobStore left on disk.
-type Store struct {
+type FileStore struct {
 	Dir string
 }
 
-func (s *Store) Put(key string, data []byte) error {
+func (s *FileStore) Put(_ context.Context, key string, data []byte) error {
 	full := filepath.Join(s.Dir, filepath.FromSlash(key))
 	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 		return err
@@ -29,35 +47,45 @@ func (s *Store) Put(key string, data []byte) error {
 	return os.WriteFile(full, data, 0o644)
 }
 
+func (s *FileStore) Open(_ context.Context, key string) (io.ReadCloser, int64, error) {
+	file, err := os.Open(filepath.Join(s.Dir, filepath.FromSlash(key)))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, 0, ErrNotFound
+	}
+	if err != nil {
+		return nil, 0, err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return nil, 0, err
+	}
+	return file, info.Size(), nil
+}
+
+func (s *FileStore) Remove(_ context.Context, key string) error {
+	err := os.Remove(filepath.Join(s.Dir, filepath.FromSlash(key)))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
 // Stage mints a storage key scoped to the user, records it in blob_ledger as
 // staged, and writes the bytes. The ledger row goes first: if the file write
 // fails, the row is a staged entry with no bytes behind it, and garbage
 // collection removes it after 24 hours.
-func Stage(ctx context.Context, database *db.DB, store *Store, userID string, data []byte) (string, error) {
+func Stage(ctx context.Context, database *db.DB, store Store, userID string, data []byte) (string, error) {
 	key := userID + "/" + uuid.NewV7().String()
 	if _, err := database.ExecContext(ctx,
 		`INSERT INTO blob_ledger (blob_key, user_id, size_bytes, state, created_at, state_changed_at)
 		 VALUES ($1, $2, $3, 'staged', $4, $4)`, key, userID, len(data), db.Timestamp(time.Now())); err != nil {
 		return "", err
 	}
-	if err := store.Put(key, data); err != nil {
+	if err := store.Put(ctx, key, data); err != nil {
 		return "", err
 	}
 	return key, nil
-}
-
-func (s *Store) Open(key string) (*os.File, error) {
-	return os.Open(filepath.Join(s.Dir, filepath.FromSlash(key)))
-}
-
-// Remove reports success when the file is already gone, so callers can treat
-// deletion as idempotent.
-func (s *Store) Remove(key string) error {
-	err := os.Remove(filepath.Join(s.Dir, filepath.FromSlash(key)))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	return err
 }
 
 // Delete removes a blob that is still staged, along with its ledger row. It
@@ -67,9 +95,11 @@ func (s *Store) Remove(key string) error {
 // ledger row is a legacy or reconciled file and is deleted outright. A key
 // outside the caller's namespace is refused before any file is touched.
 //
-// The row goes first. If the file removal then fails, storage reconciliation
-// re-adopts the file as staged and garbage collection purges it later.
-func Delete(ctx context.Context, database *db.DB, store *Store, userID, key string) (bool, error) {
+// The row goes first. If the removal then fails, the bytes are orphaned: on
+// disk, storage reconciliation re-adopts the file as staged and garbage
+// collection purges it later; in S3 nothing does, and the logged key is the
+// only record of it.
+func Delete(ctx context.Context, database *db.DB, store Store, userID, key string) (bool, error) {
 	if !strings.HasPrefix(key, userID+"/") {
 		return false, nil
 	}
@@ -100,5 +130,5 @@ func Delete(ctx context.Context, database *db.DB, store *Store, userID, key stri
 	if err := tx.Commit(); err != nil {
 		return false, err
 	}
-	return true, store.Remove(key)
+	return true, store.Remove(ctx, key)
 }

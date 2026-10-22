@@ -54,7 +54,7 @@ func TestStandinRoutesAreAbsentWithoutTheFlag(t *testing.T) {
 				t.Fatal(err)
 			}
 			hub := events.NewHub()
-			server := httptest.NewServer(routes(cfg, database, &blobs.Store{Dir: cfg.BlobDir}, hub,
+			server := httptest.NewServer(routes(cfg, database, &blobs.FileStore{Dir: cfg.BlobDir}, hub,
 				events.NewPublisher(database.Dialect(), hub), nil))
 			defer server.Close()
 			client := serverClient(server)
@@ -107,7 +107,7 @@ func newStandinServer(t *testing.T) *httptest.Server {
 		t.Fatalf("discovering the stand-in issuer: %v", err)
 	}
 	hub := events.NewHub()
-	server := httptest.NewUnstartedServer(routes(cfg, database, &blobs.Store{Dir: cfg.BlobDir}, hub,
+	server := httptest.NewUnstartedServer(routes(cfg, database, &blobs.FileStore{Dir: cfg.BlobDir}, hub,
 		events.NewPublisher(database.Dialect(), hub), provider))
 	_ = server.Listener.Close()
 	server.Listener = listener

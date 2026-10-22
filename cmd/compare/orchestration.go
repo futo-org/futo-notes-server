@@ -146,6 +146,9 @@ func startEnvironment(ctx context.Context, opts options, cfg runConfig) (*enviro
 		"AUTH_MODE": cfg.authMode, "COOKIE_SECURE": "false", "BLOB_GC_ENABLED": "false",
 		"LOG_LEVEL": "warn", "DEV_UI": "false", "FUTO_NOTES_PASSWORD": cfg.password,
 		"FUTO_NOTES_PASSWORD_HASH": cfg.passwordHash,
+		// Both servers keep blobs in their BLOB_DIR even when the shell
+		// running the comparison has S3 configured.
+		"S3_ENDPOINT": "",
 	}
 	tsEnv := cloneMap(common)
 	env.tsDatabaseURL = databaseURL(opts.adminURL, env.dbTS)

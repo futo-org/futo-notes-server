@@ -23,7 +23,7 @@ import (
 func TestSQLiteApplicationLifecycle(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	store := &blobs.Store{Dir: filepath.Join(root, "blobs")}
+	store := &blobs.FileStore{Dir: filepath.Join(root, "blobs")}
 	database, err := db.Open(config.Config{
 		DatabaseURL: "sqlite:" + filepath.Join(root, "db", "notes.db"),
 		BlobDir:     store.Dir,

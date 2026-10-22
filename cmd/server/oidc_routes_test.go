@@ -100,7 +100,7 @@ func TestOIDCRoutesEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	hub := events.NewHub()
-	server := httptest.NewServer(routes(cfg, database, &blobs.Store{Dir: cfg.BlobDir}, hub,
+	server := httptest.NewServer(routes(cfg, database, &blobs.FileStore{Dir: cfg.BlobDir}, hub,
 		events.NewPublisher(database.Dialect(), hub), provider))
 	defer server.Close()
 	client := serverClient(server)

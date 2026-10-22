@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 	"unicode/utf8"
 
 	"futo-notes-server/internal/blobs"
@@ -36,7 +38,7 @@ const (
 	frameOverhead = 7 // u16 key length + u8 status + u32 blob length
 )
 
-func handleUploadBlob(database *db.DB, store *blobs.Store, quotaEnforced bool) http.HandlerFunc {
+func handleUploadBlob(database *db.DB, store blobs.Store, quotaEnforced bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Staged bytes do not count against the quota until an object claims
 		// them, so this refuses the upload whose claim would not fit.
@@ -62,36 +64,53 @@ func blobKeyFrom(r *http.Request) (string, bool) {
 	return key, objects.ValidBlobKey(userID, key)
 }
 
-func handleDownloadBlob(store *blobs.Store) http.HandlerFunc {
+func handleDownloadBlob(store blobs.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		key, ok := blobKeyFrom(r)
 		if !ok {
 			writeError(w, http.StatusNotFound, "not found")
 			return
 		}
-		// Disk is what the client can actually read: the ledger state decides
-		// when bytes may be reclaimed, not whether an owner may fetch them.
-		file, err := store.Open(key)
+		// Storage is what the client can actually read: the ledger state
+		// decides when bytes may be reclaimed, not whether an owner may fetch
+		// them.
+		body, size, err := store.Open(r.Context(), key)
+		if errors.Is(err, blobs.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not found")
+			return
+		}
 		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				writeError(w, http.StatusNotFound, "not found")
-				return
-			}
 			serverError(w, r, "opening blob", err)
 			return
 		}
-		defer file.Close()
-		info, err := file.Stat()
-		if err != nil {
-			serverError(w, r, "stating blob", err)
+		defer body.Close()
+		w.Header().Set("Content-Type", "application/octet-stream")
+		// A file can seek, so the filesystem keeps Range, Last-Modified and
+		// conditional requests. S3 sends the bytes whole: the client never
+		// asks for those, and the spec promises only the bytes.
+		if file, ok := body.(*os.File); ok {
+			info, err := file.Stat()
+			if err != nil {
+				serverError(w, r, "stating blob", err)
+				return
+			}
+			http.ServeContent(w, r, "", info.ModTime(), file)
 			return
 		}
-		w.Header().Set("Content-Type", "application/octet-stream")
-		http.ServeContent(w, r, "", info.ModTime(), file)
+		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+		if r.Method == http.MethodHead {
+			return
+		}
+		if copied, err := io.Copy(w, body); err != nil || copied != size {
+			slog.Error("streaming blob", "err", err, "sent", copied, "size", size, "method", r.Method, "path", r.URL.Path)
+			// The status line and length are already out. Dropping the
+			// connection is the only way left to tell the client.
+			panic(http.ErrAbortHandler)
+		}
 	}
 }
 
-func handleDeleteBlob(database *db.DB, store *blobs.Store) http.HandlerFunc {
+func handleDeleteBlob(database *db.DB, store blobs.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		key, ok := blobKeyFrom(r)
 		if !ok {
@@ -111,7 +130,7 @@ func handleDeleteBlob(database *db.DB, store *blobs.Store) http.HandlerFunc {
 	}
 }
 
-func handleBatchFetchBlobs(store *blobs.Store) http.HandlerFunc {
+func handleBatchFetchBlobs(store blobs.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBatchFetchBody))
 		if err != nil {
@@ -155,7 +174,7 @@ func handleBatchFetchBlobs(store *blobs.Store) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.WriteHeader(http.StatusOK)
-		if err := streamBlobBatch(w, store, sessionFrom(r).User.ID, keys); err != nil {
+		if err := streamBlobBatch(r.Context(), w, store, sessionFrom(r).User.ID, keys); err != nil {
 			slog.Error("streaming blob batch", "err", err, "method", r.Method, "path", r.URL.Path)
 			// The status line is already out, so there is no error frame to
 			// send. Drop the connection and let the client retry a transfer it
@@ -169,26 +188,21 @@ func handleBatchFetchBlobs(store *blobs.Store) http.HandlerFunc {
 // payload from growing past maxBatchBytes. The first blob available always
 // ships, so a client whose next blob is larger than the whole cap still makes
 // progress.
-func streamBlobBatch(w io.Writer, store *blobs.Store, userID string, keys []string) error {
+func streamBlobBatch(ctx context.Context, w io.Writer, store blobs.Store, userID string, keys []string) error {
 	written, shipped := 0, false
 	for _, key := range keys {
 		var size int64
-		var file *os.File
+		var file io.ReadCloser
 		if objects.ValidBlobKey(userID, key) {
-			opened, err := store.Open(key)
-			if err != nil && !errors.Is(err, os.ErrNotExist) {
+			opened, openedSize, err := store.Open(ctx, key)
+			if err != nil && !errors.Is(err, blobs.ErrNotFound) {
 				return err
 			}
 			if err == nil {
-				info, err := opened.Stat()
-				if err != nil {
-					opened.Close()
-					return err
-				}
-				// A file too large for one upload cannot be described by the
+				// A blob too large for one upload cannot be described by the
 				// frame's u32 length, so it is reported as absent.
-				if info.Size() <= maxBlobBytes {
-					size, file = info.Size(), opened
+				if openedSize <= maxBlobBytes {
+					size, file = openedSize, opened
 				} else {
 					opened.Close()
 				}

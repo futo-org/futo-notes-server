@@ -41,7 +41,7 @@ func TestBlobDeleteLifecycle(t *testing.T) {
 	}
 	defer database.ExecContext(ctx, `DELETE FROM users WHERE id = $1`, userID)
 
-	store := &blobs.Store{Dir: t.TempDir()}
+	store := &blobs.FileStore{Dir: t.TempDir()}
 	onDisk := func(key string) bool {
 		_, err := os.Stat(filepath.Join(store.Dir, filepath.FromSlash(key)))
 		return err == nil
@@ -78,7 +78,7 @@ func TestBlobDeleteLifecycle(t *testing.T) {
 
 	// A file with no ledger row is a legacy or reconciled upload; it goes.
 	legacy := userID + "/" + uuid.NewV7().String()
-	if err := store.Put(legacy, []byte("legacy")); err != nil {
+	if err := store.Put(context.Background(), legacy, []byte("legacy")); err != nil {
 		t.Fatal(err)
 	}
 	if deleted, err := blobs.Delete(ctx, database, store, userID, legacy); err != nil || !deleted {
@@ -110,7 +110,7 @@ func TestBlobDeleteLifecycle(t *testing.T) {
 	// lowest user id it saw, which need not be the user whose namespace the
 	// key lives in. The row still has to block the delete.
 	shared := userID + "/" + uuid.NewV7().String()
-	if err := store.Put(shared, []byte("shared")); err != nil {
+	if err := store.Put(context.Background(), shared, []byte("shared")); err != nil {
 		t.Fatal(err)
 	}
 	foreignOwner := uuid.NewV7().String()

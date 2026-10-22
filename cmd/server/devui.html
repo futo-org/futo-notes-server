@@ -43,6 +43,7 @@
   #session-pill.in { color: var(--ok); border-color: var(--ok); }
   #session-pill.out { color: var(--muted); }
   #database-pill { color: var(--muted); margin-left: auto; }
+  #storage-pill { color: var(--muted); }
   main {
     max-width: 760px;
     margin: 0 auto;
@@ -120,6 +121,7 @@
   <h1>futo-notes dev</h1>
   <span id="session-pill">checking…</span>
   <span id="database-pill">{{DATABASE_INFO}}</span>
+  <span id="storage-pill">{{BLOB_STORAGE_INFO}}</span>
 </header>
 <main id="cards"></main>
 
@@ -263,7 +265,7 @@ const cards = document.getElementById('cards');
 
 const jobEndpoints = [
   { method: 'POST', path: '/dev/jobs/sessions', name: 'session reaper', desc: 'delete expired sessions' },
-  { method: 'POST', path: '/dev/jobs/reconciliation', name: 'storage reconciliation', desc: 'adopt up to 500 untracked files from BLOB_DIR' },
+  { method: 'POST', path: '/dev/jobs/reconciliation', name: 'storage reconciliation', desc: 'adopt up to 500 untracked files from BLOB_DIR (filesystem storage only)' },
   { method: 'POST', path: '/dev/jobs/mutation-results', name: 'mutation-results expiry', desc: 'expire old pending, failed, update, and delete outcomes' },
   { method: 'POST', path: '/dev/jobs/blob-gc', name: 'blob garbage collection', desc: 'purge eligible staged, retained, and purgeable blobs' },
   { method: 'POST', path: '/dev/jobs/login-handoffs', name: 'login hand-off reaper', desc: 'delete Login Hand-off tickets past their window' },

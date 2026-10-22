@@ -222,6 +222,9 @@ func startServer(databaseURL, origin, issuerOrigin, polarOrigin string) (*server
 		"DATABASE_URL="+databaseURL,
 		"PORT="+strconv.Itoa(port),
 		"BLOB_DIR="+filepath.Join(workDir, "blobs"),
+		// Blobs stay in BLOB_DIR even when this shell has S3 configured.
+		// Later entries win, so this overrides an inherited S3_ENDPOINT.
+		"S3_ENDPOINT=",
 		"AUTH_MODE=oidc",
 		// Served over plain http on loopback, so Secure cookies would never
 		// come back. The deployed instance is behind TLS and leaves this on.

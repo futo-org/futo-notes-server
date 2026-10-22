@@ -121,18 +121,18 @@ func TestRecurringJobs(t *testing.T) {
 	})
 
 	t.Run("storage reconciliation", func(t *testing.T) {
-		store := &blobs.Store{Dir: t.TempDir()}
+		store := &blobs.FileStore{Dir: t.TempDir()}
 		orphanKey := userID + "/" + uuid.NewV7().String()
-		if err := store.Put(orphanKey, []byte("orphan")); err != nil {
+		if err := store.Put(context.Background(), orphanKey, []byte("orphan")); err != nil {
 			t.Fatal(err)
 		}
 		bogusOwner := uuid.NewV7().String()
 		bogusKey := bogusOwner + "/" + uuid.NewV7().String()
-		if err := store.Put(bogusKey, []byte("junk")); err != nil {
+		if err := store.Put(context.Background(), bogusKey, []byte("junk")); err != nil {
 			t.Fatal(err)
 		}
 		existingKey := userID + "/" + uuid.NewV7().String()
-		if err := store.Put(existingKey, []byte("existing file")); err != nil {
+		if err := store.Put(context.Background(), existingKey, []byte("existing file")); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := database.ExecContext(ctx, `INSERT INTO blob_ledger
@@ -167,10 +167,10 @@ func TestRecurringJobs(t *testing.T) {
 	})
 
 	t.Run("storage reconciliation cap", func(t *testing.T) {
-		store := &blobs.Store{Dir: t.TempDir()}
+		store := &blobs.FileStore{Dir: t.TempDir()}
 		for i := range 501 {
 			key := userID + "/cap-" + fmt.Sprintf("%03d", i)
-			if err := store.Put(key, []byte{byte(i)}); err != nil {
+			if err := store.Put(context.Background(), key, []byte{byte(i)}); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -260,7 +260,7 @@ func TestRecurringJobs(t *testing.T) {
 	})
 
 	t.Run("blob garbage collection", func(t *testing.T) {
-		store := &blobs.Store{Dir: t.TempDir()}
+		store := &blobs.FileStore{Dir: t.TempDir()}
 		if _, err := jobs.GarbageCollectBlobs(ctx, database, store); err != nil {
 			t.Fatal(err)
 		}
@@ -285,7 +285,7 @@ func TestRecurringJobs(t *testing.T) {
 		for _, row := range rows {
 			key := userID + "/gc-" + row.name
 			if row.withFile {
-				if err := store.Put(key, []byte(row.name)); err != nil {
+				if err := store.Put(context.Background(), key, []byte(row.name)); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -300,7 +300,9 @@ func TestRecurringJobs(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if result.RowsPurged != 4 || result.FilesRemoved != 3 {
+		// FilesRemoved counts successful removals, and removing a file that
+		// is already gone succeeds, so missing-file counts too.
+		if result.RowsPurged != 4 || result.FilesRemoved != 4 {
 			t.Fatalf("unexpected GC result: %#v", result)
 		}
 		for _, row := range rows {
@@ -321,7 +323,7 @@ func TestRecurringJobs(t *testing.T) {
 	})
 
 	t.Run("blob garbage collection loops batches", func(t *testing.T) {
-		store := &blobs.Store{Dir: t.TempDir()}
+		store := &blobs.FileStore{Dir: t.TempDir()}
 		if _, err := database.ExecContext(ctx, `INSERT INTO blob_ledger
 			(blob_key, user_id, size_bytes, state)
 			SELECT $1::text || '/gc-batch-' || n, $1::uuid, 0, 'purgeable'
@@ -332,7 +334,7 @@ func TestRecurringJobs(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if result.RowsPurged != 501 || result.FilesRemoved != 0 {
+		if result.RowsPurged != 501 || result.FilesRemoved != 501 {
 			t.Fatalf("unexpected batched GC result: %#v", result)
 		}
 		assertRowCount(t, database, `SELECT count(*) FROM blob_ledger
