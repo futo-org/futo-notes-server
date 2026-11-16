@@ -17,6 +17,7 @@ import (
 	"futo-notes-server/internal/blobs"
 	"futo-notes-server/internal/config"
 	"futo-notes-server/internal/db"
+	"futo-notes-server/internal/dbtest"
 	"futo-notes-server/internal/events"
 )
 
@@ -33,21 +34,12 @@ type mutationTestServer struct {
 // blobDir, logs a dev user in, and claims that user's collection.
 func startMutationTestServer(t *testing.T, blobDir string) mutationTestServer {
 	t.Helper()
-	root := t.TempDir()
 	cfg := config.Config{
-		DatabaseURL:  "sqlite:" + filepath.Join(root, "notes.db"),
 		AuthMode:     "dev",
 		CookieSecure: false,
 		BlobDir:      blobDir,
 	}
-	database, err := db.Open(cfg.DatabaseURL, db.Options{BlobDir: cfg.BlobDir})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { database.Close() })
-	if _, err := db.Migrate(context.Background(), database); err != nil {
-		t.Fatal(err)
-	}
+	database := dbtest.SQLite(t)
 	hub := events.NewHub()
 	server := httptest.NewServer(routes(cfg, database, &blobs.Store{Dir: cfg.BlobDir}, hub,
 		events.NewPublisher(database.Dialect(), hub)))

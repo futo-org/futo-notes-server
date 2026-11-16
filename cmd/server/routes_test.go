@@ -1,43 +1,22 @@
 package main
 
 import (
-	"context"
-	"database/sql"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 
 	"futo-notes-server/internal/blobs"
 	"futo-notes-server/internal/config"
-	"futo-notes-server/internal/db"
+	"futo-notes-server/internal/dbtest"
 	"futo-notes-server/internal/events"
 	"uuid"
-
-	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 func TestRoutesComposePublicAuthAndRecoveryMiddleware(t *testing.T) {
-	databaseURL := os.Getenv("SERVER_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("SERVER_TEST_DATABASE_URL is not set")
-	}
-	rawDatabase, err := sql.Open("pgx", databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dialect, err := db.ParseDialect(databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	database := db.Wrap(rawDatabase, dialect)
-	defer database.Close()
-	if _, err := db.Migrate(context.Background(), database); err != nil {
-		t.Fatal(err)
-	}
+	database := dbtest.Postgres(t, "SERVER_TEST_DATABASE_URL")
 
 	cfg := config.Config{
 		AuthMode:     "dev",
@@ -115,23 +94,7 @@ func TestRoutesComposePublicAuthAndRecoveryMiddleware(t *testing.T) {
 }
 
 func TestRoutesComposePasswordLoginRateLimit(t *testing.T) {
-	databaseURL := os.Getenv("SERVER_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("SERVER_TEST_DATABASE_URL is not set")
-	}
-	rawDatabase, err := sql.Open("pgx", databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dialect, err := db.ParseDialect(databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	database := db.Wrap(rawDatabase, dialect)
-	defer database.Close()
-	if _, err := db.Migrate(context.Background(), database); err != nil {
-		t.Fatal(err)
-	}
+	database := dbtest.Postgres(t, "SERVER_TEST_DATABASE_URL")
 
 	cfg := config.Config{
 		AuthMode:     "password",

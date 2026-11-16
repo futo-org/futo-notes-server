@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -14,6 +13,7 @@ import (
 	"futo-notes-server/internal/blobs"
 	"futo-notes-server/internal/collections"
 	"futo-notes-server/internal/db"
+	"futo-notes-server/internal/dbtest"
 	"futo-notes-server/internal/events"
 	"futo-notes-server/internal/jobs"
 	"futo-notes-server/internal/objects"
@@ -21,19 +21,9 @@ import (
 )
 
 func TestMigratePostgresToSQLitePreservesApplicationState(t *testing.T) {
-	sourceURL := os.Getenv("MIGRATION_TEST_DATABASE_URL")
-	if sourceURL == "" {
-		t.Skip("MIGRATION_TEST_DATABASE_URL is not set")
-	}
+	sourceURL := dbtest.PostgresURL(t, "MIGRATION_TEST_DATABASE_URL")
+	source := dbtest.Postgres(t, "MIGRATION_TEST_DATABASE_URL")
 	ctx := context.Background()
-	source, err := db.Open(sourceURL, db.Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer source.Close()
-	if _, err := db.Migrate(ctx, source); err != nil {
-		t.Fatal(err)
-	}
 
 	runID := uuid.NewV7().String()
 	user, err := auth.UpsertUserByEmail(ctx, source, "migration-"+runID+"@example.invalid", "Migration Fixture")
@@ -41,10 +31,8 @@ func TestMigratePostgresToSQLitePreservesApplicationState(t *testing.T) {
 		t.Fatal(err)
 	}
 	configKey := "migration-test-" + runID
-	defer func() {
-		_, _ = source.ExecContext(context.Background(), `DELETE FROM server_config WHERE key = $1`, configKey)
-		_, _ = source.ExecContext(context.Background(), `DELETE FROM users WHERE id = $1`, user.ID)
-	}()
+	dbtest.CleanupExec(t, source, `DELETE FROM users WHERE id = $1`, user.ID)
+	dbtest.CleanupExec(t, source, `DELETE FROM server_config WHERE key = $1`, configKey)
 
 	collection, created, err := collections.Claim(ctx, source, user.ID)
 	if err != nil || !created {

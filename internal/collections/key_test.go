@@ -2,7 +2,6 @@ package collections_test
 
 import (
 	"context"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -10,19 +9,13 @@ import (
 	"futo-notes-server/internal/auth"
 	"futo-notes-server/internal/collections"
 	"futo-notes-server/internal/db"
+	"futo-notes-server/internal/dbtest"
 )
 
 func keyTestCollection(t *testing.T) (context.Context, *db.DB, string, string) {
 	t.Helper()
 	ctx := context.Background()
-	database, err := db.Open("sqlite:"+filepath.Join(t.TempDir(), "notes.db"), db.Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { database.Close() })
-	if _, err := db.Migrate(ctx, database); err != nil {
-		t.Fatal(err)
-	}
+	database := dbtest.SQLite(t)
 	user, err := auth.UpsertUserByEmail(ctx, database, "key@example.invalid", "Key")
 	if err != nil {
 		t.Fatal(err)

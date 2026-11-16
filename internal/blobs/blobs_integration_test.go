@@ -2,43 +2,23 @@ package blobs_test
 
 import (
 	"context"
-	"database/sql"
-	"os"
 	"testing"
 
 	"futo-notes-server/internal/blobs"
-	"futo-notes-server/internal/db"
+	"futo-notes-server/internal/dbtest"
 	"uuid"
-
-	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 func TestBlobDeleteLifecycle(t *testing.T) {
-	databaseURL := os.Getenv("BLOBS_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("BLOBS_TEST_DATABASE_URL is not set")
-	}
-	rawDatabase, err := sql.Open("pgx", databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dialect, err := db.ParseDialect(databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	database := db.Wrap(rawDatabase, dialect)
-	defer database.Close()
+	database := dbtest.Postgres(t, "BLOBS_TEST_DATABASE_URL")
 	ctx := context.Background()
-	if _, err := db.Migrate(ctx, database); err != nil {
-		t.Fatal(err)
-	}
 
 	userID := uuid.NewV7().String()
 	if _, err := database.ExecContext(ctx, `INSERT INTO users (id, sub, name, email)
 		VALUES ($1, $2, 'blobs test', $3)`, userID, "blobs-test-"+userID, userID+"@example.invalid"); err != nil {
 		t.Fatal(err)
 	}
-	defer database.ExecContext(ctx, `DELETE FROM users WHERE id = $1`, userID)
+	dbtest.CleanupExec(t, database, `DELETE FROM users WHERE id = $1`, userID)
 
 	store := &blobs.Store{Dir: t.TempDir()}
 	onDisk := func(key string) bool {
@@ -121,7 +101,7 @@ func TestBlobDeleteLifecycle(t *testing.T) {
 		foreignOwner+"@example.invalid"); err != nil {
 		t.Fatal(err)
 	}
-	defer database.ExecContext(ctx, `DELETE FROM users WHERE id = $1`, foreignOwner)
+	dbtest.CleanupExec(t, database, `DELETE FROM users WHERE id = $1`, foreignOwner)
 	if _, err := database.ExecContext(ctx, `INSERT INTO blob_ledger
 		(blob_key, user_id, size_bytes, state) VALUES ($1, $2, 6, 'legacy_shared')`,
 		shared, foreignOwner); err != nil {
@@ -141,7 +121,7 @@ func TestBlobDeleteLifecycle(t *testing.T) {
 		VALUES ($1, $2, 'blobs test other', $3)`, otherID, "blobs-test-"+otherID, otherID+"@example.invalid"); err != nil {
 		t.Fatal(err)
 	}
-	defer database.ExecContext(ctx, `DELETE FROM users WHERE id = $1`, otherID)
+	dbtest.CleanupExec(t, database, `DELETE FROM users WHERE id = $1`, otherID)
 	otherKey, err := blobs.Stage(ctx, database, store, otherID, []byte("theirs"))
 	if err != nil {
 		t.Fatal(err)

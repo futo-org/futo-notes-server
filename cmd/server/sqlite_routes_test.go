@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -12,26 +11,17 @@ import (
 
 	"futo-notes-server/internal/blobs"
 	"futo-notes-server/internal/config"
-	"futo-notes-server/internal/db"
+	"futo-notes-server/internal/dbtest"
 	"futo-notes-server/internal/events"
 )
 
 func TestSQLiteRoutesEndToEnd(t *testing.T) {
-	root := t.TempDir()
 	cfg := config.Config{
-		DatabaseURL:  "sqlite:" + filepath.Join(root, "notes.db"),
 		AuthMode:     "dev",
 		CookieSecure: false,
-		BlobDir:      filepath.Join(root, "blobs"),
+		BlobDir:      filepath.Join(t.TempDir(), "blobs"),
 	}
-	database, err := db.Open(cfg.DatabaseURL, db.Options{BlobDir: cfg.BlobDir})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer database.Close()
-	if _, err := db.Migrate(context.Background(), database); err != nil {
-		t.Fatal(err)
-	}
+	database := dbtest.SQLite(t)
 	hub := events.NewHub()
 	server := httptest.NewServer(routes(cfg, database, &blobs.Store{Dir: cfg.BlobDir}, hub,
 		events.NewPublisher(database.Dialect(), hub)))

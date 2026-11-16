@@ -5,40 +5,23 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"os"
 	"testing"
 	"time"
 
 	"futo-notes-server/internal/blobs"
-	"futo-notes-server/internal/db"
+	"futo-notes-server/internal/dbtest"
 	"futo-notes-server/internal/events"
 	"futo-notes-server/internal/objects"
 	"uuid"
 
 	"github.com/jackc/pgx/v5"
-	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 func TestObjectMutationLifecycle(t *testing.T) {
-	databaseURL := os.Getenv("OBJECTS_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("OBJECTS_TEST_DATABASE_URL is not set")
-	}
-	rawDatabase, err := sql.Open("pgx", databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dialect, err := db.ParseDialect(databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	database := db.Wrap(rawDatabase, dialect)
-	defer database.Close()
+	databaseURL := dbtest.PostgresURL(t, "OBJECTS_TEST_DATABASE_URL")
+	database := dbtest.Postgres(t, "OBJECTS_TEST_DATABASE_URL")
 	ctx := context.Background()
 	publisher := events.PostgresPublisher{}
-	if _, err := db.Migrate(ctx, database); err != nil {
-		t.Fatal(err)
-	}
 	listener, err := pgx.Connect(ctx, databaseURL)
 	if err != nil {
 		t.Fatal(err)
@@ -53,7 +36,7 @@ func TestObjectMutationLifecycle(t *testing.T) {
 		VALUES ($1, $2, 'objects test', $3)`, userID, "objects-test-"+userID, userID+"@example.invalid"); err != nil {
 		t.Fatal(err)
 	}
-	defer database.ExecContext(ctx, `DELETE FROM users WHERE id = $1`, userID)
+	dbtest.CleanupExec(t, database, `DELETE FROM users WHERE id = $1`, userID)
 	if _, err := database.ExecContext(ctx, `INSERT INTO collections (id, user_id) VALUES ($1, $2)`, collectionID, userID); err != nil {
 		t.Fatal(err)
 	}
@@ -233,32 +216,16 @@ func assertNoObjectNotification(t *testing.T, listener *pgx.Conn, userID, collec
 // ciphertext on disk forever. Retained keeps it fetchable as a merge ancestor
 // while putting it on the same 365-day clock an update's old blob gets.
 func TestDeleteRetainsBlobForReclamation(t *testing.T) {
-	databaseURL := os.Getenv("OBJECTS_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("OBJECTS_TEST_DATABASE_URL is not set")
-	}
-	rawDatabase, err := sql.Open("pgx", databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dialect, err := db.ParseDialect(databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	database := db.Wrap(rawDatabase, dialect)
-	defer database.Close()
+	database := dbtest.Postgres(t, "OBJECTS_TEST_DATABASE_URL")
 	ctx := context.Background()
 	publisher := events.PostgresPublisher{}
-	if _, err := db.Migrate(ctx, database); err != nil {
-		t.Fatal(err)
-	}
 
 	userID, collectionID := uuid.NewV7().String(), uuid.NewV7().String()
 	if _, err := database.ExecContext(ctx, `INSERT INTO users (id, sub, name, email)
 		VALUES ($1, $2, 'delete blob test', $3)`, userID, "delete-blob-"+userID, userID+"@example.invalid"); err != nil {
 		t.Fatal(err)
 	}
-	defer database.ExecContext(ctx, `DELETE FROM users WHERE id = $1`, userID)
+	dbtest.CleanupExec(t, database, `DELETE FROM users WHERE id = $1`, userID)
 	if _, err := database.ExecContext(ctx, `INSERT INTO collections (id, user_id) VALUES ($1, $2)`, collectionID, userID); err != nil {
 		t.Fatal(err)
 	}
