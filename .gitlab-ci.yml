@@ -57,6 +57,12 @@ test:image:
   script:
     - docker build --build-arg VERSION="$CI_COMMIT_SHORT_SHA" -t futo-notes-server:ci .
     - docker image inspect futo-notes-server:ci --format '{{.Architecture}} {{.Size}}'
+    # publish:image needs this job, so no image with a fixable HIGH or CRITICAL
+    # vulnerability ships: Debian packages and the Go modules in the binary.
+    # Unfixed ones are skipped; the Dockerfile's apt-get upgrade picks up a Debian
+    # fix on the next build, so re-running the pipeline is the remedy. The socket
+    # mount resolves on the dind daemon, which is where the image was built.
+    - docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.76.2@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 futo-notes-server:ci
 
 # This is the cutover gate, not a unit approximation. It creates databases with
 # the current and historical TypeScript servers, drives them with the native
