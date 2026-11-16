@@ -141,7 +141,7 @@ func serverClient(server *httptest.Server) *http.Client {
 
 func doRequest(t *testing.T, client *http.Client, method, url, body, bearer string, cookie *http.Cookie) routeTestResponse {
 	t.Helper()
-	request, err := http.NewRequest(method, url, strings.NewReader(body))
+	request, err := http.NewRequestWithContext(t.Context(), method, url, strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}

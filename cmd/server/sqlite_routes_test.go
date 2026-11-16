@@ -53,7 +53,7 @@ func TestSQLiteRoutesEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	uploadRequest, err := http.NewRequest(http.MethodPost, server.URL+"/api/blobs", strings.NewReader("ciphertext"))
+	uploadRequest, err := http.NewRequestWithContext(t.Context(), http.MethodPost, server.URL+"/api/blobs", strings.NewReader("ciphertext"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +75,7 @@ func TestSQLiteRoutesEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	createRequest, err := http.NewRequest(http.MethodPost,
+	createRequest, err := http.NewRequestWithContext(t.Context(), http.MethodPost,
 		server.URL+"/api/collections/"+claimBody.Collection.ID+"/objects",
 		strings.NewReader(`{"blob_key":"`+uploaded.Key+`","size_bytes":10}`))
 	if err != nil {
