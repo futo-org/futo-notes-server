@@ -4,7 +4,10 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"maps"
 	"net/http"
 	"strconv"
 	"strings"
@@ -14,7 +17,7 @@ import (
 
 type sseCollector struct {
 	cancel context.CancelFunc
-	body   interface{ Close() error }
+	body   io.Closer
 	target *target
 	mu     sync.Mutex
 	state  map[string]int64
@@ -52,11 +55,11 @@ func openSSE(parent context.Context, target *target, token string) (*sseCollecto
 		return collector, nil
 	case <-time.After(3 * time.Second):
 		collector.close()
-		return nil, fmt.Errorf("timed out waiting for ready event")
+		return nil, errors.New("timed out waiting for ready event")
 	}
 }
 
-func (c *sseCollector) read(body interface{ Read([]byte) (int, error) }, ready chan<- error) {
+func (c *sseCollector) read(body io.Reader, ready chan<- error) {
 	scanner := bufio.NewScanner(body)
 	event := ""
 	data := ""
@@ -122,10 +125,7 @@ func (c *sseCollector) waitState(timeout time.Duration) (map[string]int64, error
 	defer timer.Stop()
 	for {
 		c.mu.Lock()
-		state := make(map[string]int64, len(c.state))
-		for key, value := range c.state {
-			state[key] = value
-		}
+		state := maps.Clone(c.state)
 		err := c.err
 		c.mu.Unlock()
 		if len(state) != 0 || err != nil {
@@ -134,7 +134,7 @@ func (c *sseCollector) waitState(timeout time.Duration) (map[string]int64, error
 		select {
 		case <-c.wake:
 		case <-timer.C:
-			return state, fmt.Errorf("timed out waiting for change event")
+			return state, errors.New("timed out waiting for change event")
 		}
 	}
 }

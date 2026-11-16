@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
 	"net/http"
+	"slices"
 	"strconv"
 	"time"
 
@@ -39,32 +42,32 @@ func (r *runner) run(ctx context.Context, cfg runConfig) error {
 		return err
 	}
 	if r.opts.scenarios["concurrency"] && (!r.opts.engineParity || cfg.authMode != "dev") {
-		return fmt.Errorf("concurrency scenario requires -engine-parity -mode dev")
+		return errors.New("concurrency scenario requires -engine-parity -mode dev")
 	}
 	if r.enabled("capability") {
 		r.scenarioCapability(ctx)
 	}
 	if cfg.authMode == "dev" {
 		if !r.scenarioAuthDev(ctx) {
-			return fmt.Errorf("dev login failed; dependent scenarios cannot run")
+			return errors.New("dev login failed; dependent scenarios cannot run")
 		}
 	} else {
 		if !r.scenarioAuthPassword(ctx) {
-			return fmt.Errorf("password login failed; dependent scenarios cannot run")
+			return errors.New("password login failed; dependent scenarios cannot run")
 		}
 	}
 	if !r.needsDataScenarios() {
 		return nil
 	}
 	if !r.setupCollection(ctx) {
-		return fmt.Errorf("collection setup failed; dependent scenarios cannot run")
+		return errors.New("collection setup failed; dependent scenarios cannot run")
 	}
 	if r.enabled("collections") {
 		r.scenarioCollections(ctx)
 	}
 	if r.enabled("blobs") || r.enabled("objects") || r.enabled("blob-objects") || r.enabled("ownership") || r.enabled("sse") {
 		if !r.setupPrimaryBlob(ctx) {
-			return fmt.Errorf("primary blob setup failed; dependent scenarios cannot run")
+			return errors.New("primary blob setup failed; dependent scenarios cannot run")
 		}
 	}
 	if r.enabled("blobs") {
@@ -114,12 +117,7 @@ func (r *runner) needsDataScenarios() bool {
 	if len(r.opts.scenarios) == 0 {
 		return true
 	}
-	for _, name := range []string{"collections", "blobs", "objects", "blob-objects", "ownership", "sse", "concurrency"} {
-		if r.enabled(name) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc([]string{"collections", "blobs", "objects", "blob-objects", "ownership", "sse", "concurrency"}, r.enabled)
 }
 
 func (r *runner) scenarioCapability(ctx context.Context) {
@@ -217,7 +215,7 @@ func (r *runner) scenarioBlobs(ctx context.Context) {
 	r.step(ctx, "blobs", "deleted blob absent", requestSpec{Method: http.MethodGet, Path: "/api/blobs/" + phBlobDelete, Auth: phTokenA, WantStatus: http.StatusNotFound})
 	if r.opts.large {
 		r.step(ctx, "blobs", "oversize upload", requestSpec{
-			Method: http.MethodPost, Path: "/api/blobs", Body: bytes.Repeat([]byte{'x'}, 104857601),
+			Method: http.MethodPost, Path: "/api/blobs", Body: bytes.Repeat([]byte{'x'}, 100<<20+1),
 			ContentType: "application/octet-stream", Auth: phTokenA, WantStatus: http.StatusRequestEntityTooLarge,
 		})
 	}
@@ -228,7 +226,7 @@ func (r *runner) scenarioObjects(ctx context.Context) error {
 		`{"blob_key":"`+phBlobOne+`","size_bytes":25}`, phTokenA, http.StatusCreated,
 		binding{Path: "object.id", Placeholder: phObjectOne}))
 	if !created.OK {
-		return fmt.Errorf("object creation diverged; dependent object scenarios cannot run")
+		return errors.New("object creation diverged; dependent object scenarios cannot run")
 	}
 	r.step(ctx, "objects", "list", requestSpec{Method: http.MethodGet, Path: "/api/collections/" + phCollectionA + "/objects", Auth: phTokenA, WantStatus: http.StatusOK})
 	if err := r.seedPullLimitFixtures(ctx); err != nil {
@@ -262,53 +260,57 @@ func (r *runner) seedPullLimitFixtures(ctx context.Context) error {
 		databaseURL string
 		blobDir     string
 	}{{r.ts, r.env.tsDatabaseURL, r.env.tsBlob}, {r.goTarget, r.env.goDatabaseURL, r.env.goBlob}} {
-		userID, userBound := fixture.target.identities[phUserA]
-		collectionID, collectionBound := fixture.target.identities[phCollectionA]
-		if !userBound || !collectionBound {
-			return fmt.Errorf("%s identities are not bound", fixture.target.name)
+		if err := seedPullLimitDatabase(ctx, fixture.target, fixture.databaseURL, fixture.blobDir, createdAt); err != nil {
+			return err
 		}
+	}
+	return nil
+}
 
-		database, err := db.Open(fixture.databaseURL, db.Options{BlobDir: fixture.blobDir})
-		if err != nil {
-			return fmt.Errorf("opening %s fixture database: %w", fixture.target.name, err)
+// seedPullLimitDatabase writes the pull-limit fixture rows for one target's
+// scratch database in a single transaction.
+func seedPullLimitDatabase(ctx context.Context, target *target, databaseURL, blobDir string, createdAt time.Time) (returnedErr error) {
+	userID, userBound := target.identities[phUserA]
+	collectionID, collectionBound := target.identities[phCollectionA]
+	if !userBound || !collectionBound {
+		return fmt.Errorf("%s identities are not bound", target.name)
+	}
+
+	database, err := db.Open(databaseURL, db.Options{BlobDir: blobDir})
+	if err != nil {
+		return fmt.Errorf("opening %s fixture database: %w", target.name, err)
+	}
+	defer func() {
+		if err := database.Close(); err != nil && returnedErr == nil {
+			returnedErr = fmt.Errorf("closing %s fixture database: %w", target.name, err)
 		}
-		tx, err := database.BeginTx(ctx, nil)
-		if err != nil {
-			database.Close()
-			return fmt.Errorf("beginning %s fixture transaction: %w", fixture.target.name, err)
+	}()
+	tx, err := database.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("beginning %s fixture transaction: %w", target.name, err)
+	}
+	defer tx.Discard()
+
+	createdValue := any(createdAt)
+	if database.Dialect().Engine() == db.SQLite {
+		createdValue = db.Timestamp(createdAt)
+	}
+	for sequence := 2; sequence <= 1001; sequence++ {
+		id := fmt.Sprintf("10000000-0000-0000-0000-%012x", sequence)
+		if _, err := tx.ExecContext(ctx, `INSERT INTO objects
+			(id, collection_id, user_id, version, deleted, blob_key, size_bytes, created_at, updated_at, change_seq)
+			VALUES ($1, $2, $3, 1, false, NULL, NULL, $4, $4, $5)`,
+			id, collectionID, userID, createdValue, sequence); err != nil {
+			return fmt.Errorf("writing %s fixtures: %w", target.name, err)
 		}
-		createdValue := any(createdAt)
-		if database.Dialect().Engine() == db.SQLite {
-			createdValue = db.Timestamp(createdAt)
-		}
-		var insertErr error
-		for sequence := 2; sequence <= 1001; sequence++ {
-			id := fmt.Sprintf("10000000-0000-0000-0000-%012x", sequence)
-			_, insertErr = tx.ExecContext(ctx, `INSERT INTO objects
-				(id, collection_id, user_id, version, deleted, blob_key, size_bytes, created_at, updated_at, change_seq)
-				VALUES ($1, $2, $3, 1, false, NULL, NULL, $4, $4, $5)`,
-				id, collectionID, userID, createdValue, sequence)
-			if insertErr != nil {
-				break
-			}
-		}
-		if insertErr == nil {
-			_, insertErr = tx.ExecContext(ctx,
-				`UPDATE collections SET current_version = 1001 WHERE id = $1 AND user_id = $2`,
-				collectionID, userID)
-		}
-		if insertErr != nil {
-			_ = tx.Rollback()
-			database.Close()
-			return fmt.Errorf("writing %s fixtures: %w", fixture.target.name, insertErr)
-		}
-		if err := tx.Commit(); err != nil {
-			database.Close()
-			return fmt.Errorf("committing %s fixtures: %w", fixture.target.name, err)
-		}
-		if err := database.Close(); err != nil {
-			return fmt.Errorf("closing %s fixture database: %w", fixture.target.name, err)
-		}
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE collections SET current_version = 1001 WHERE id = $1 AND user_id = $2`,
+		collectionID, userID); err != nil {
+		return fmt.Errorf("writing %s fixtures: %w", target.name, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing %s fixtures: %w", target.name, err)
 	}
 	return nil
 }
@@ -366,7 +368,7 @@ func (r *runner) scenarioBlobObjects(ctx context.Context) {
 		Method: http.MethodPost, Path: "/api/collections/" + phCollectionA + "/blob-objects/batch", Body: []byte{0, 0},
 		ContentType: "application/octet-stream", Auth: phTokenA, WantStatus: http.StatusBadRequest,
 	})
-	many := []byte{}
+	var many []byte
 	for index := range 201 {
 		many = append(many, batchEntryFrame(0, fmt.Sprintf("batch-%03d", index), 0, []byte{'x'})...)
 	}
@@ -377,7 +379,7 @@ func (r *runner) scenarioBlobObjects(ctx context.Context) {
 	if r.opts.large {
 		r.step(ctx, "blob-objects", "batch request exceeds 32 MiB cap", requestSpec{
 			Method: http.MethodPost, Path: "/api/collections/" + phCollectionA + "/blob-objects/batch",
-			Body: bytes.Repeat([]byte{'x'}, 33554433), ContentType: "application/octet-stream", Auth: phTokenA,
+			Body: bytes.Repeat([]byte{'x'}, 32<<20+1), ContentType: "application/octet-stream", Auth: phTokenA,
 			WantStatus: http.StatusRequestEntityTooLarge,
 		})
 	}
@@ -392,8 +394,8 @@ func (r *runner) scenarioBlobObjects(ctx context.Context) {
 }
 
 func (r *runner) scenarioBatchOmitted(ctx context.Context) {
-	largeA := bytes.Repeat([]byte{'a'}, 17*1024*1024)
-	largeB := bytes.Repeat([]byte{'b'}, 17*1024*1024)
+	largeA := bytes.Repeat([]byte{'a'}, 17<<20)
+	largeB := bytes.Repeat([]byte{'b'}, 17<<20)
 	r.step(ctx, "blobs", "stage batch-cap blob one", blobRequest(largeA, "{{blob_large_one}}"))
 	r.step(ctx, "blobs", "stage batch-cap blob two", blobRequest(largeB, "{{blob_large_two}}"))
 	r.step(ctx, "blob-objects", "batch download omitted at cap", jsonRequestFrames("/api/blobs/batch",
@@ -436,7 +438,7 @@ func (r *runner) scenarioSSE(ctx context.Context) {
 	goState, goErr := goCollector.waitState(5 * time.Second)
 	label := r.name + "/sse/coalesced checkpoint"
 	r.result.Steps++
-	if tsErr != nil || goErr != nil || !mapsEqual(tsState, goState) {
+	if !sseCheckpointsMatch(tsState, goState, tsErr, goErr) {
 		r.diverge(label, fmt.Sprintf("%s=%v err=%v %s=%v err=%v", r.ts.name, tsState, tsErr, r.goTarget.name, goState, goErr))
 	} else {
 		r.result.Matched++
@@ -510,14 +512,8 @@ func (r *runner) expectBytes(name string, pair responsePair, expected []byte) {
 	}
 }
 
-func mapsEqual(a, b map[string]int64) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for key, value := range a {
-		if b[key] != value {
-			return false
-		}
-	}
-	return true
+// sseCheckpointsMatch reports whether both subscribers settled without error
+// on exactly the same collection versions.
+func sseCheckpointsMatch(tsState, goState map[string]int64, tsErr, goErr error) bool {
+	return tsErr == nil && goErr == nil && maps.Equal(tsState, goState)
 }
