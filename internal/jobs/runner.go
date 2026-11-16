@@ -10,12 +10,15 @@ import (
 	"futo-notes-server/internal/db"
 )
 
+// Schedule sets when Run fires its two job groups: hourly session reaping and
+// the slower storage and mutation-result maintenance.
 type Schedule struct {
 	InitialDelay        time.Duration
 	SessionInterval     time.Duration
 	MaintenanceInterval time.Duration
 }
 
+// DefaultSchedule is the production schedule.
 var DefaultSchedule = Schedule{
 	InitialDelay:        time.Minute,
 	SessionInterval:     time.Hour,
@@ -39,6 +42,8 @@ func Run(ctx context.Context, database *db.DB, store *blobs.Store, schedule Sche
 	})
 }
 
+// maintenanceJobs lists the maintenance group, with blob GC only when
+// collectGarbage is set.
 func maintenanceJobs(database *db.DB, store *blobs.Store, collectGarbage bool) []scheduledJob {
 	maintenance := []scheduledJob{
 		{
@@ -68,16 +73,20 @@ func maintenanceJobs(database *db.DB, store *blobs.Store, collectGarbage bool) [
 	return maintenance
 }
 
+// scheduledJob is one named job. run returns a human-readable summary for the
+// log, even on error.
 type scheduledJob struct {
 	name string
 	run  func(context.Context) (string, error)
 }
 
+// scheduledJobs holds the two job groups Run fires on separate intervals.
 type scheduledJobs struct {
 	sessions    []scheduledJob
 	maintenance []scheduledJob
 }
 
+// run is Run with the jobs injectable for tests.
 func run(ctx context.Context, schedule Schedule, jobs scheduledJobs) {
 	sessionTicker := time.NewTicker(schedule.InitialDelay)
 	defer sessionTicker.Stop()
@@ -105,13 +114,15 @@ func run(ctx context.Context, schedule Schedule, jobs scheduledJobs) {
 	}
 }
 
+// runJobs runs jobs in order, logging each outcome and continuing past
+// failures.
 func runJobs(ctx context.Context, jobs []scheduledJob) {
 	for _, job := range jobs {
 		summary, err := job.run(ctx)
 		if err != nil {
-			slog.Error(job.name, "summary", summary, "err", err)
+			slog.Error("running job", "job", job.name, "summary", summary, "err", err)
 			continue
 		}
-		slog.Info(job.name, "summary", summary)
+		slog.Info("ran job", "job", job.name, "summary", summary)
 	}
 }

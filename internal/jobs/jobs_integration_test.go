@@ -1,7 +1,6 @@
 package jobs_test
 
 import (
-	"context"
 	"fmt"
 	"slices"
 	"testing"
@@ -16,7 +15,7 @@ import (
 
 func TestRecurringJobs(t *testing.T) {
 	database := dbtest.Postgres(t, "JOBS_TEST_DATABASE_URL")
-	ctx := context.Background()
+	ctx := t.Context()
 
 	userID := uuid.NewV7().String()
 	if _, err := database.ExecContext(ctx, `INSERT INTO users (id, sub, name, email)
@@ -275,7 +274,7 @@ func TestRecurringJobs(t *testing.T) {
 func assertRowCount(t *testing.T, database *db.DB, query string, want int, args ...any) {
 	t.Helper()
 	var got int
-	if err := database.QueryRowContext(context.Background(), query, args...).Scan(&got); err != nil {
+	if err := database.QueryRowContext(t.Context(), query, args...).Scan(&got); err != nil {
 		t.Fatal(err)
 	}
 	if got != want {

@@ -18,17 +18,33 @@ import (
 	"futo-notes-server/internal/ids"
 )
 
-const reconciliationLimit = 500
-const garbageCollectionBatchSize = 500
+const (
+	// reconciliationLimit caps how many files one reconciliation pass adopts.
+	reconciliationLimit = 500
+	// garbageCollectionBatchSize is how many blob keys one GC query selects.
+	garbageCollectionBatchSize = 500
 
+	// pendingMutationLifetime is how long a pending (status 102) mutation
+	// result is kept.
+	pendingMutationLifetime = 24 * time.Hour
+	// mutationResultLifetime is how long any other expirable mutation result
+	// is kept.
+	mutationResultLifetime = 30 * 24 * time.Hour
+	// stagedBlobLifetime is how long a blob stays staged before GC removes it.
+	stagedBlobLifetime = 24 * time.Hour
+	// retainedBlobLifetime is how long a blob stays retained before GC
+	// removes it.
+	retainedBlobLifetime = 365 * 24 * time.Hour
+)
+
+// SessionReapResult reports what ReapSessions deleted.
 type SessionReapResult struct {
 	Reaped int64 `json:"reaped"`
 }
 
-var clock = time.Now
-
+// ReapSessions deletes expired sessions.
 func ReapSessions(ctx context.Context, database *db.DB) (SessionReapResult, error) {
-	result, err := database.ExecContext(ctx, `DELETE FROM sessions WHERE expires_at < $1`, db.Timestamp(clock()))
+	result, err := database.ExecContext(ctx, `DELETE FROM sessions WHERE expires_at < $1`, db.Timestamp(time.Now()))
 	if err != nil {
 		return SessionReapResult{}, err
 	}
@@ -36,6 +52,8 @@ func ReapSessions(ctx context.Context, database *db.DB) (SessionReapResult, erro
 	return SessionReapResult{Reaped: reaped}, err
 }
 
+// ReconciliationResult reports what ReconcileStorage adopted and skipped.
+// CapHit is set when the pass stopped at its adoption limit.
 type ReconciliationResult struct {
 	Adopted int  `json:"adopted"`
 	Skipped int  `json:"skipped"`
@@ -96,16 +114,13 @@ func ReconcileStorage(ctx context.Context, database *db.DB, store *blobs.Store) 
 			return nil
 		}
 		var inserted int
-		now := db.Timestamp(clock())
+		now := db.Timestamp(time.Now())
 		err = tx.QueryRowContext(ctx, `INSERT INTO blob_ledger
 			(blob_key, user_id, size_bytes, state, created_at, state_changed_at)
 			VALUES ($1, $2, $3, 'staged', $4, $4)
 			ON CONFLICT (blob_key) DO NOTHING RETURNING 1`, key, owner, info.Size(), now).Scan(&inserted)
 		if errors.Is(err, sql.ErrNoRows) {
-			if err := tx.Commit(); err != nil {
-				return err
-			}
-			return nil
+			return tx.Commit()
 		}
 		if err != nil {
 			return err
@@ -131,18 +146,23 @@ func ReconcileStorage(ctx context.Context, database *db.DB, store *blobs.Store) 
 	return result, err
 }
 
+// MutationExpiryResult reports how many unfinished and finished mutation
+// results ExpireMutationResults deleted.
 type MutationExpiryResult struct {
 	PendingExpired int64 `json:"pending_expired"`
 	OtherExpired   int64 `json:"other_expired"`
 }
 
+// ExpireMutationResults deletes pending mutation results older than
+// pendingMutationLifetime and other results older than mutationResultLifetime.
+// Successful and ambiguous legacy create results are never expired.
 func ExpireMutationResults(ctx context.Context, database *db.DB) (MutationExpiryResult, error) {
 	var result MutationExpiryResult
-	now := clock().UTC()
+	now := time.Now()
 	pending, err := database.ExecContext(ctx, `
 		DELETE FROM mutation_results
 		WHERE created_at < $1
-		  AND result->>'status' IN ('102', 'pending')`, db.Timestamp(now.Add(-24*time.Hour)))
+		  AND result->>'status' IN ('102', 'pending')`, db.Timestamp(now.Add(-pendingMutationLifetime)))
 	if err != nil {
 		return result, err
 	}
@@ -163,7 +183,7 @@ func ExpireMutationResults(ctx context.Context, database *db.DB) (MutationExpiry
 				AND (result->>'error' IS NULL OR result->>'error' NOT IN
 					('not found', 'version conflict', 'blob is not staged',
 					 'Mutation-Id reused for different intent')))
-		  ))`, db.Timestamp(now.Add(-30*24*time.Hour)))
+		  ))`, db.Timestamp(now.Add(-mutationResultLifetime)))
 	if err != nil {
 		return result, err
 	}
@@ -171,6 +191,8 @@ func ExpireMutationResults(ctx context.Context, database *db.DB) (MutationExpiry
 	return result, err
 }
 
+// BlobGCResult reports how many ledger rows and files GarbageCollectBlobs
+// removed.
 type BlobGCResult struct {
 	RowsPurged   int `json:"rows_purged"`
 	FilesRemoved int `json:"files_removed"`
@@ -226,15 +248,17 @@ func GarbageCollectBlobs(ctx context.Context, database *db.DB, store *blobs.Stor
 	}
 }
 
+// eligibleBlobKeys returns up to garbageCollectionBatchSize keys whose ledger
+// rows may be purged.
 func eligibleBlobKeys(ctx context.Context, database *db.DB) ([]string, error) {
-	now := clock().UTC()
+	stagedBefore, retainedBefore := blobExpiryCutoffs(time.Now())
 	rows, err := database.QueryContext(ctx, `
 		SELECT blob_key FROM blob_ledger
 		WHERE (state = 'staged' AND state_changed_at < $2)
 		   OR (state = 'retained' AND state_changed_at < $3)
 		   OR state = 'purgeable'
 		ORDER BY blob_key
-		LIMIT $1`, garbageCollectionBatchSize, db.Timestamp(now.Add(-24*time.Hour)), db.Timestamp(now.Add(-365*24*time.Hour)))
+		LIMIT $1`, garbageCollectionBatchSize, stagedBefore, retainedBefore)
 	if err != nil {
 		return nil, err
 	}
@@ -251,6 +275,14 @@ func eligibleBlobKeys(ctx context.Context, database *db.DB) ([]string, error) {
 	return keys, rows.Err()
 }
 
+// blobExpiryCutoffs returns the timestamps before which staged and retained
+// blobs are eligible for garbage collection.
+func blobExpiryCutoffs(now time.Time) (stagedBefore, retainedBefore string) {
+	return db.Timestamp(now.Add(-stagedBlobLifetime)), db.Timestamp(now.Add(-retainedBlobLifetime))
+}
+
+// purgeBlobRow deletes key's ledger row if it is still eligible and not locked
+// by another server, and reports whether it did.
 func purgeBlobRow(ctx context.Context, database *db.DB, key string) (bool, error) {
 	tx, err := database.BeginTx(ctx, nil)
 	if err != nil {
@@ -259,7 +291,7 @@ func purgeBlobRow(ctx context.Context, database *db.DB, key string) (bool, error
 	defer tx.Discard()
 
 	var lockedKey string
-	now := clock().UTC()
+	stagedBefore, retainedBefore := blobExpiryCutoffs(time.Now())
 	err = tx.QueryRowContext(ctx, `
 		SELECT blob_key FROM blob_ledger
 		WHERE blob_key = $1 AND (
@@ -267,7 +299,7 @@ func purgeBlobRow(ctx context.Context, database *db.DB, key string) (bool, error
 			OR (state = 'retained' AND state_changed_at < $3)
 			OR state = 'purgeable'
 		)
-		`+database.Dialect().ForUpdateSkipLocked(), key, db.Timestamp(now.Add(-24*time.Hour)), db.Timestamp(now.Add(-365*24*time.Hour))).Scan(&lockedKey)
+		`+database.Dialect().ForUpdateSkipLocked(), key, stagedBefore, retainedBefore).Scan(&lockedKey)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -277,8 +309,5 @@ func purgeBlobRow(ctx context.Context, database *db.DB, key string) (bool, error
 	if _, err := tx.ExecContext(ctx, `DELETE FROM blob_ledger WHERE blob_key = $1`, lockedKey); err != nil {
 		return false, err
 	}
-	if err := tx.Commit(); err != nil {
-		return false, err
-	}
-	return true, nil
+	return true, tx.Commit()
 }

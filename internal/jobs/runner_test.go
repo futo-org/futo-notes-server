@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"futo-notes-server/internal/blobs"
@@ -13,7 +14,7 @@ import (
 
 func TestReconcileStorageMissingDirectoryIsEmpty(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "not-created")
-	result, err := ReconcileStorage(context.Background(), nil, &blobs.Store{Dir: dir})
+	result, err := ReconcileStorage(t.Context(), nil, &blobs.Store{Dir: dir})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,60 +46,67 @@ func TestBlobGCRegistrationCanBeDisabled(t *testing.T) {
 }
 
 func TestRunnerRepeatsAndContinuesAfterJobErrors(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
 
-	var sessionRuns, failingMaintenanceRuns, laterMaintenanceRuns atomic.Int32
-	jobError := errors.New("injected job failure")
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		run(ctx, Schedule{
-			InitialDelay:        5 * time.Millisecond,
-			SessionInterval:     5 * time.Millisecond,
-			MaintenanceInterval: 5 * time.Millisecond,
-		}, scheduledJobs{
-			sessions: []scheduledJob{{name: "sessions", run: func(context.Context) (string, error) {
-				run := sessionRuns.Add(1)
-				if run == 1 {
-					return "first run", jobError
-				}
-				if run >= 3 && laterMaintenanceRuns.Load() >= 2 {
-					cancel()
-				}
-				return "later run", nil
-			}}},
-			maintenance: []scheduledJob{
-				{name: "failing maintenance", run: func(context.Context) (string, error) {
-					failingMaintenanceRuns.Add(1)
-					return "failed", jobError
-				}},
-				{name: "later maintenance", run: func(context.Context) (string, error) {
-					run := laterMaintenanceRuns.Add(1)
-					if run >= 2 && sessionRuns.Load() >= 3 {
-						cancel()
+		var sessionRuns, failingMaintenanceRuns, laterMaintenanceRuns atomic.Int32
+		jobError := errors.New("injected job failure")
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			run(ctx, Schedule{
+				InitialDelay:        time.Minute,
+				SessionInterval:     time.Hour,
+				MaintenanceInterval: 6 * time.Hour,
+			}, scheduledJobs{
+				sessions: []scheduledJob{{name: "sessions", run: func(context.Context) (string, error) {
+					if sessionRuns.Add(1) == 1 {
+						return "first run", jobError
 					}
-					return "ran", nil
-				}},
-			},
-		})
-	}()
+					return "later run", nil
+				}}},
+				maintenance: []scheduledJob{
+					{name: "failing maintenance", run: func(context.Context) (string, error) {
+						failingMaintenanceRuns.Add(1)
+						return "failed", jobError
+					}},
+					{name: "later maintenance", run: func(context.Context) (string, error) {
+						laterMaintenanceRuns.Add(1)
+						return "ran", nil
+					}},
+				},
+			})
+		}()
 
-	select {
-	case <-done:
-	case <-time.After(time.Second):
+		assertRuns := func(when string, sessions, maintenance int32) {
+			t.Helper()
+			synctest.Wait()
+			if got := sessionRuns.Load(); got != sessions {
+				t.Fatalf("%s: session runs = %d, want %d", when, got, sessions)
+			}
+			if got := failingMaintenanceRuns.Load(); got != maintenance {
+				t.Fatalf("%s: failing maintenance runs = %d, want %d", when, got, maintenance)
+			}
+			if got := laterMaintenanceRuns.Load(); got != maintenance {
+				t.Fatalf("%s: later maintenance runs = %d, want %d", when, got, maintenance)
+			}
+		}
+
+		assertRuns("at start", 0, 0)
+		time.Sleep(time.Minute)
+		assertRuns("after the initial delay", 1, 1)
+		time.Sleep(time.Hour)
+		assertRuns("after one session interval", 2, 1)
+		time.Sleep(5 * time.Hour)
+		assertRuns("after one maintenance interval", 7, 2)
+
 		cancel()
-		<-done
-		t.Fatal("runner did not repeat on the compressed schedule")
-	}
-
-	if got := sessionRuns.Load(); got < 3 {
-		t.Fatalf("session runs = %d, want at least 3", got)
-	}
-	if got := failingMaintenanceRuns.Load(); got < 2 {
-		t.Fatalf("failing maintenance runs = %d, want at least 2", got)
-	}
-	if got := laterMaintenanceRuns.Load(); got < 2 {
-		t.Fatalf("later maintenance runs = %d, want at least 2", got)
-	}
+		synctest.Wait()
+		select {
+		case <-done:
+		default:
+			t.Fatal("runner did not stop after cancellation")
+		}
+	})
 }
