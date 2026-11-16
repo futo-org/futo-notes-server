@@ -8,16 +8,18 @@ import "strings"
 // the authority. Compose files splice the raw POSTGRES_PASSWORD into
 // DATABASE_URL, so a password containing '@' must keep its host.
 //
-// The authority ends at the first '/', '?' or '#', as net/url read it. Every
-// '@' in it but the last is percent-encoded, and a path-less authority gets
-// the empty path it implied, so an '@' in the query is never read as one either.
+// The authority ends at the first '/' or '?'. Every '@' in it but the last is
+// percent-encoded, and a path-less authority gets the empty path it implied, so
+// an '@' in the query is never read as one either. '#' is data, as it is to
+// pgx 5.11+ and libpq: a raw password may contain one, and pgx 5.10 cutting the
+// URL there never made a working connection string.
 func NormalizeDatabaseURL(raw string) string {
 	for _, scheme := range []string{"postgres://", "postgresql://"} {
 		if !strings.HasPrefix(raw, scheme) {
 			continue
 		}
 		rest := raw[len(scheme):]
-		end := strings.IndexAny(rest, "/?#")
+		end := strings.IndexAny(rest, "/?")
 		if end < 0 {
 			end = len(rest)
 		}

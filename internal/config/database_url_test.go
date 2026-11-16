@@ -47,6 +47,23 @@ func TestPostgresURLWithAtInQueryKeepsItsCredentials(t *testing.T) {
 	}
 }
 
+// '#' is data, not a fragment: a raw password containing one keeps its host.
+func TestPostgresURLWithHashInPasswordKeepsItsHost(t *testing.T) {
+	for _, raw := range []string{
+		"postgres://u:pa#ss@postgres:5432/futo_notes",
+		"postgres://u:pa#s@s@postgres:5432/futo_notes",
+	} {
+		parsed, err := pgx.ParseConfig(NormalizeDatabaseURL(raw))
+		if err != nil {
+			t.Fatalf("%s: %v", raw, err)
+		}
+		want := strings.TrimPrefix(strings.SplitN(raw, "@postgres", 2)[0], "postgres://u:")
+		if parsed.Host != "postgres" || parsed.Password != want || parsed.Database != "futo_notes" {
+			t.Fatalf("%s: host=%q password=%q database=%q", raw, parsed.Host, parsed.Password, parsed.Database)
+		}
+	}
+}
+
 func TestNormalizeDatabaseURLLeavesOrdinaryURLsAlone(t *testing.T) {
 	for _, raw := range []string{
 		"sqlite:./data/notes.db",
