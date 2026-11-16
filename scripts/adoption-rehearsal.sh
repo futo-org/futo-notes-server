@@ -232,18 +232,26 @@ assert_blob() {
 run_rust_case() {
   local test_name=$1
   echo "running Rust client case: $test_name"
-  (
+  local output
+  # A renamed test matches nothing under --exact and cargo still exits 0, which
+  # once skipped every seed step silently. Demand that exactly one test ran.
+  output=$(
     cd "$client_repo"
     FUTO_TEST_SERVER="http://127.0.0.1:$port" \
       cargo test -q -p futo-notes-sync --test server_integration "$test_name" \
-        -- --ignored --exact --test-threads=1
-  )
+        -- --ignored --exact --test-threads=1 2>&1
+  ) || { echo "$output"; return 1; }
+  echo "$output"
+  if ! grep -q 'test result: ok. 1 passed' <<<"$output"; then
+    echo "Rust client case $test_name did not run exactly one test (renamed in the client?)" >&2
+    return 1
+  fi
 }
 
 seed_ts_traffic() {
-  run_rust_case single_note_round_trip_and_cursor_advance
-  run_rust_case update_propagates
-  run_rust_case delete_propagates_as_tombstone
+  run_rust_case round_trip::single_note_round_trip_and_cursor_advance
+  run_rust_case round_trip::update_propagates
+  run_rust_case round_trip::delete_propagates_as_tombstone
 
   json_request POST /api/auth/password/login 200 '' "{\"password\":\"$password\"}"
   ts_token=$(jq -er '.token' <<<"$RESPONSE")
@@ -338,7 +346,7 @@ verify_swap_continuity() {
   assert_eq "updated object in cursor delta" "$(jq -er --arg id "$object_a" '[.objects[] | select(.id == $id and .version == "2" and .deleted == false)] | length' <<<"$RESPONSE")" 1
   assert_eq "deleted object in cursor delta" "$(jq -er --arg id "$object_b" '[.objects[] | select(.id == $id and .deleted == true)] | length' <<<"$RESPONSE")" 1
   assert_blob "$ts_token" "$continuity_key" 'continuity blob bytes'
-  run_rust_case single_note_round_trip_and_cursor_advance
+  run_rust_case round_trip::single_note_round_trip_and_cursor_advance
 }
 
 audit_jobs() {
@@ -388,7 +396,7 @@ verify_rollback() {
   assert_eq "rollback cursor delta size" "$(jq -er '.objects | length' <<<"$RESPONSE")" 1
   assert_eq "Go tombstone visible to TS" "$(jq -er --arg id "$go_object" '[.objects[] | select(.id == $id and .version == "3" and .deleted == true)] | length' <<<"$RESPONSE")" 1
   assert_eq "rollback migration count" "$(scalar 'SELECT count(*) FROM kysely_migration')" 11
-  run_rust_case single_note_round_trip_and_cursor_advance
+  run_rust_case round_trip::single_note_round_trip_and_cursor_advance
 }
 
 prepare_old_source() {
