@@ -16,6 +16,8 @@ const (
 	singletonName  = "FUTO Notes"
 )
 
+// User is an account that owns collections. Its JSON form is the user object
+// returned by the login and current-user endpoints.
 type User struct {
 	ID    string `json:"id"`
 	Email string `json:"email"`

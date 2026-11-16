@@ -48,7 +48,7 @@ func TestSQLiteApplicationLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if session, err := auth.ValidateSession(ctx, database, token); err != nil || session == nil || session.User.ID != user.ID {
+	if session, err := auth.ValidateSession(ctx, database, token); err != nil || session.User.ID != user.ID {
 		t.Fatalf("ValidateSession() = %#v, %v", session, err)
 	}
 	if _, err := database.ExecContext(ctx, `UPDATE sessions SET expires_at = $1`, db.Timestamp(time.Now().Add(-time.Hour))); err != nil {

@@ -11,16 +11,20 @@ const (
 	loginRateWindow = time.Minute
 )
 
+// RateLimiter counts login attempts per key in fixed windows. It is safe for
+// concurrent use.
 type RateLimiter struct {
 	mu      sync.Mutex
 	windows map[string]*rateWindow
 }
 
+// rateWindow is one key's current window.
 type rateWindow struct {
 	start time.Time
 	count int
 }
 
+// NewRateLimiter returns a limiter enforcing the fixed login limit.
 func NewRateLimiter() *RateLimiter {
 	return &RateLimiter{windows: make(map[string]*rateWindow)}
 }

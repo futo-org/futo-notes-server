@@ -1,9 +1,12 @@
-// Package auth verifies login credentials.
+// Package auth owns login credentials, sessions and users: it verifies
+// passwords, rate-limits login attempts, issues and validates session tokens,
+// and creates the users that sessions belong to.
 package auth
 
 import (
 	"crypto/subtle"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -19,6 +22,8 @@ const (
 	scryptKeyLen = 64
 )
 
+// VerifyPlaintext reports whether password equals the configured plaintext
+// password, in constant time.
 func VerifyPlaintext(password, configured string) bool {
 	return subtle.ConstantTimeCompare([]byte(password), []byte(configured)) == 1
 }
@@ -28,7 +33,7 @@ func VerifyPlaintext(password, configured string) bool {
 func VerifyScrypt(password, stored string) (bool, error) {
 	parts := strings.Split(stored, ":")
 	if len(parts) != 4 || parts[0] != "scrypt" {
-		return false, fmt.Errorf("unrecognized password hash format")
+		return false, errors.New("unrecognized password hash format")
 	}
 	salt, err := hex.DecodeString(parts[2])
 	if err != nil {

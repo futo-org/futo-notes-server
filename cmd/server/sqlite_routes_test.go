@@ -17,7 +17,7 @@ import (
 
 func TestSQLiteRoutesEndToEnd(t *testing.T) {
 	cfg := config.Config{
-		AuthMode:     "dev",
+		AuthMode:     config.AuthModeDev,
 		CookieSecure: false,
 		BlobDir:      filepath.Join(t.TempDir(), "blobs"),
 	}

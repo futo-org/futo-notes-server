@@ -1,10 +1,30 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 )
+
+func TestLoadDotenvSkipsLinesWithoutKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(path, []byte("=orphan\nFUTO_DOTENV_TEST=value # comment\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FUTO_DOTENV_TEST", "")
+	if err := os.Unsetenv("FUTO_DOTENV_TEST"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := loadDotenv(path); err != nil {
+		t.Fatalf("loadDotenv() = %v", err)
+	}
+	if got := os.Getenv("FUTO_DOTENV_TEST"); got != "value" {
+		t.Fatalf("FUTO_DOTENV_TEST = %q, want value", got)
+	}
+}
 
 func TestBlobGCEnabled(t *testing.T) {
 	t.Chdir(t.TempDir())

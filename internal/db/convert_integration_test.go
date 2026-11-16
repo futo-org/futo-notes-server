@@ -75,7 +75,7 @@ func TestMigratePostgresToSQLitePreservesApplicationState(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer target.Close()
-	if session, err := auth.ValidateSession(ctx, target, token); err != nil || session == nil || session.User.ID != user.ID {
+	if session, err := auth.ValidateSession(ctx, target, token); err != nil || session.User.ID != user.ID {
 		t.Fatalf("ValidateSession() = %#v, %v", session, err)
 	}
 	key, claimed, err := collections.GetKey(ctx, target, user.ID, collection.ID)

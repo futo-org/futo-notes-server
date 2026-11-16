@@ -19,7 +19,7 @@ func TestRoutesComposePublicAuthAndRecoveryMiddleware(t *testing.T) {
 	database := dbtest.Postgres(t, "SERVER_TEST_DATABASE_URL")
 
 	cfg := config.Config{
-		AuthMode:     "dev",
+		AuthMode:     config.AuthModeDev,
 		CookieSecure: false,
 		DevUI:        true,
 		BlobDir:      t.TempDir(),
@@ -97,7 +97,7 @@ func TestRoutesComposePasswordLoginRateLimit(t *testing.T) {
 	database := dbtest.Postgres(t, "SERVER_TEST_DATABASE_URL")
 
 	cfg := config.Config{
-		AuthMode:     "password",
+		AuthMode:     config.AuthModePassword,
 		Password:     "correct password",
 		CookieSecure: false,
 		BlobDir:      t.TempDir(),

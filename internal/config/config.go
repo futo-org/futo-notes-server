@@ -2,6 +2,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -10,21 +11,40 @@ import (
 	"futo-notes-server/internal/db"
 )
 
+// AuthMode selects the login flow the server offers. Its value is the
+// AUTH_MODE environment value and is reported to clients in the capability
+// document.
+type AuthMode string
+
+// The supported AUTH_MODE values.
+const (
+	// AuthModeDev logs in any email address without a password, for
+	// development servers.
+	AuthModeDev AuthMode = "dev"
+	// AuthModePassword logs in the single local user with the configured
+	// password.
+	AuthModePassword AuthMode = "password"
+)
+
+// Config is the server configuration read from the environment and .env.
 type Config struct {
 	DatabaseURL        string
 	Port               int
-	AuthMode           string
-	Password           string // FUTO_NOTES_PASSWORD, plaintext
-	PasswordHash       string // FUTO_NOTES_PASSWORD_HASH, scrypt self-describing form
-	CookieSecure       bool   // COOKIE_SECURE, Secure cookie flag; on unless "false"
-	DevUI              bool   // DEV_UI, serves the dev test page at /dev when "true"
-	BlobDir            string // BLOB_DIR, root of on-disk blob storage
-	BlobGCEnabled      bool   // BLOB_GC_ENABLED, disables irreversible blob garbage collection when false
-	AllowFreshDatabase bool   // ALLOW_FRESH_DATABASE, overrides the SQLite/blob safety guard
-	DBPoolMax          int
-	DBPoolIdleTimeout  time.Duration
+	AuthMode           AuthMode
+	Password           string        // FUTO_NOTES_PASSWORD, plaintext
+	PasswordHash       string        // FUTO_NOTES_PASSWORD_HASH, scrypt self-describing form
+	CookieSecure       bool          // COOKIE_SECURE, Secure cookie flag; on unless "false"
+	DevUI              bool          // DEV_UI, serves the dev test page at /dev when "true"
+	BlobDir            string        // BLOB_DIR, root of on-disk blob storage
+	BlobGCEnabled      bool          // BLOB_GC_ENABLED, disables irreversible blob garbage collection when false
+	AllowFreshDatabase bool          // ALLOW_FRESH_DATABASE, overrides the SQLite/blob safety guard
+	DBPoolMax          int           // DB_POOL_MAX, Postgres only
+	DBPoolIdleTimeout  time.Duration // DB_POOL_IDLE_TIMEOUT_MS, Postgres only
 }
 
+// Load reads the server configuration, applying .env values that the
+// environment does not already set. In password mode exactly one of the
+// plaintext password and the scrypt hash is guaranteed to be set.
 func Load() (Config, error) {
 	if err := loadDotenv(".env"); err != nil {
 		return Config{}, fmt.Errorf("loading .env: %w", err)
@@ -32,7 +52,7 @@ func Load() (Config, error) {
 
 	cfg := Config{
 		DatabaseURL:        NormalizeDatabaseURL(getDefault("DATABASE_URL", db.DefaultSQLiteURL)),
-		AuthMode:           getDefault("AUTH_MODE", "password"),
+		AuthMode:           AuthMode(getDefault("AUTH_MODE", string(AuthModePassword))),
 		Password:           os.Getenv("FUTO_NOTES_PASSWORD"),
 		PasswordHash:       os.Getenv("FUTO_NOTES_PASSWORD_HASH"),
 		CookieSecure:       os.Getenv("COOKIE_SECURE") != "false",
@@ -41,15 +61,15 @@ func Load() (Config, error) {
 		BlobGCEnabled:      os.Getenv("BLOB_GC_ENABLED") != "false",
 		AllowFreshDatabase: os.Getenv("ALLOW_FRESH_DATABASE") == "true",
 	}
-	if cfg.AuthMode != "dev" && cfg.AuthMode != "password" {
+	if cfg.AuthMode != AuthModeDev && cfg.AuthMode != AuthModePassword {
 		return Config{}, fmt.Errorf("AUTH_MODE must be dev or password, got %q", cfg.AuthMode)
 	}
-	if cfg.AuthMode == "password" {
+	if cfg.AuthMode == AuthModePassword {
 		switch {
 		case cfg.Password != "" && cfg.PasswordHash != "":
-			return Config{}, fmt.Errorf("set only one of FUTO_NOTES_PASSWORD or FUTO_NOTES_PASSWORD_HASH when AUTH_MODE=password")
+			return Config{}, errors.New("set only one of FUTO_NOTES_PASSWORD or FUTO_NOTES_PASSWORD_HASH when AUTH_MODE=password")
 		case cfg.Password == "" && cfg.PasswordHash == "":
-			return Config{}, fmt.Errorf("FUTO_NOTES_PASSWORD or FUTO_NOTES_PASSWORD_HASH is required when AUTH_MODE=password")
+			return Config{}, errors.New("FUTO_NOTES_PASSWORD or FUTO_NOTES_PASSWORD_HASH is required when AUTH_MODE=password")
 		}
 	}
 
@@ -80,7 +100,7 @@ func LoadRequiredDatabaseURL() (string, error) {
 	}
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
-		return "", fmt.Errorf("DATABASE_URL is required")
+		return "", errors.New("DATABASE_URL is required")
 	}
 	return NormalizeDatabaseURL(databaseURL), nil
 }

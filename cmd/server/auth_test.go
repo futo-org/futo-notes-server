@@ -30,8 +30,12 @@ func TestDecodeDevLogin(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := httptest.NewRequest("POST", "/api/auth/dev/login", strings.NewReader(tt.body))
-			got, gotError := decodeDevLogin(r)
+			r := httptest.NewRequest(http.MethodPost, "/api/auth/dev/login", strings.NewReader(tt.body))
+			got, err := decodeDevLogin(r)
+			var gotError string
+			if err != nil {
+				gotError = err.Error()
+			}
 			if gotError != tt.wantError || got.Email != tt.wantEmail || got.Name != tt.wantName {
 				t.Fatalf("decodeDevLogin() = %#v, %q; want email=%q name=%q error=%q", got, gotError, tt.wantEmail, tt.wantName, tt.wantError)
 			}
@@ -130,7 +134,7 @@ func TestLoginPathAuthBoundary(t *testing.T) {
 	}{
 		{
 			mode: "dev",
-			cfg:  config.Config{AuthMode: "dev"},
+			cfg:  config.Config{AuthMode: config.AuthModeDev},
 			body: `{}`,
 			loginResult: wireResponse{
 				status:      http.StatusBadRequest,
@@ -142,7 +146,7 @@ func TestLoginPathAuthBoundary(t *testing.T) {
 		},
 		{
 			mode: "password",
-			cfg:  config.Config{AuthMode: "password", Password: "correct password"},
+			cfg:  config.Config{AuthMode: config.AuthModePassword, Password: "correct password"},
 			body: `{"password":"wrong password"}`,
 			loginResult: wireResponse{
 				status:      http.StatusUnauthorized,
