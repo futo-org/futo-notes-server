@@ -153,6 +153,12 @@ func (d *DB) PingContext(ctx context.Context) error { return d.db.PingContext(ct
 // Close closes the underlying connection pool.
 func (d *DB) Close() error { return d.db.Close() }
 
+// Scanner is the Scan method shared by *sql.Row and *sql.Rows, so one
+// function can read a row from either.
+type Scanner interface {
+	Scan(dest ...any) error
+}
+
 // Tx applies the same dialect to transaction queries and can defer callbacks
 // until after a successful commit. SQLite sync notifications use that hook.
 type Tx struct {

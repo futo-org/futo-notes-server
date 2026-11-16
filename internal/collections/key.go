@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"futo-notes-server/internal/db"
+	"futo-notes-server/internal/ids"
 )
 
 // KeyMaterial is the client-side vault key material. Every field is opaque to
@@ -49,7 +50,7 @@ const keyColumns = `key_salt, key_kdf, encrypted_vault_key, key_updated_at`
 // scanKeyMaterial reads the four key columns, returning nil when the
 // collection has no claimed key (the columns are set together, so
 // key_updated_at stands in for all four).
-func scanKeyMaterial(row scanner) (*KeyMaterial, error) {
+func scanKeyMaterial(row db.Scanner) (*KeyMaterial, error) {
 	var salt, evk sql.NullString
 	var kdf []byte
 	var updatedAt sql.Null[db.Time]
@@ -70,7 +71,7 @@ func scanKeyMaterial(row scanner) (*KeyMaterial, error) {
 // GetKey reports whether the collection exists for this user and, if so,
 // returns its key material — nil when no key has been claimed yet.
 func GetKey(ctx context.Context, database *db.DB, userID, id string) (bool, *KeyMaterial, error) {
-	if !isUUID(id) {
+	if !ids.IsUUID(id) {
 		return false, nil, nil
 	}
 	key, err := scanKeyMaterial(database.QueryRowContext(ctx,
@@ -110,7 +111,7 @@ func nextRevision(current *KeyMaterial) time.Time {
 // Rotation (prevToken set): replaces the material only when the token matches
 // the current revision.
 func PutKey(ctx context.Context, database *db.DB, userID, id string, in KeyInput, prevToken *string) (PutKeyOutcome, *KeyMaterial, error) {
-	if !isUUID(id) {
+	if !ids.IsUUID(id) {
 		return PutKeyNotFound, nil, nil
 	}
 

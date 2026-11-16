@@ -13,6 +13,7 @@ import (
 
 	"futo-notes-server/internal/db"
 	"futo-notes-server/internal/events"
+	"futo-notes-server/internal/ids"
 )
 
 const objectColumns = `id, collection_id, version, change_seq, deleted,
@@ -81,9 +82,7 @@ type DeleteOutcome struct {
 	Conflict Conflict
 }
 
-type scanner interface{ Scan(...any) error }
-
-func scanObject(row scanner) (Object, error) {
+func scanObject(row db.Scanner) (Object, error) {
 	var o Object
 	var version, changeSeq int64
 	var blobKey sql.NullString
@@ -109,31 +108,12 @@ func scanObject(row scanner) (Object, error) {
 
 func ValidMutationID(id string) bool { return mutationIDPattern.MatchString(id) }
 
-func ValidUUID(s string) bool {
-	if len(s) != 36 {
-		return false
-	}
-	for i, c := range []byte(s) {
-		switch i {
-		case 8, 13, 18, 23:
-			if c != '-' {
-				return false
-			}
-		default:
-			if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F') {
-				return false
-			}
-		}
-	}
-	return true
-}
-
 func ValidBlobKey(userID, key string) bool {
-	return len(userID) == 36 && len(key) == 73 && key[:36] == userID && key[36] == '/' && ValidUUID(key[37:])
+	return len(userID) == 36 && len(key) == 73 && key[:36] == userID && key[36] == '/' && ids.IsUUID(key[37:])
 }
 
 func Exists(ctx context.Context, database *db.DB, userID, collectionID string) (bool, error) {
-	if !ValidUUID(collectionID) {
+	if !ids.IsUUID(collectionID) {
 		return false, nil
 	}
 	var one int
@@ -183,7 +163,7 @@ func List(ctx context.Context, database *db.DB, userID, collectionID string, sin
 }
 
 func Get(ctx context.Context, database *db.DB, userID, collectionID, objectID string) (*Object, error) {
-	if !ValidUUID(collectionID) || !ValidUUID(objectID) {
+	if !ids.IsUUID(collectionID) || !ids.IsUUID(objectID) {
 		return nil, nil
 	}
 	o, err := scanObject(database.QueryRowContext(ctx, `SELECT `+objectColumns+` FROM objects
@@ -284,8 +264,8 @@ func replay(ctx context.Context, tx *db.Tx, userID, mutationID string, intent mu
 }
 
 func prepareMutation(ctx context.Context, database *db.DB, userID, mutationID string, intent mutationIntent) (bool, error) {
-	if mutationID == "" || !ValidUUID(intent.CollectionID) ||
-		(intent.ObjectID != nil && !ValidUUID(*intent.ObjectID)) {
+	if mutationID == "" || !ids.IsUUID(intent.CollectionID) ||
+		(intent.ObjectID != nil && !ids.IsUUID(*intent.ObjectID)) {
 		return false, nil
 	}
 	pendingBody, err := json.Marshal(map[string]string{"error": "mutation still in progress"})
@@ -317,8 +297,8 @@ func nullableIntEqual(got sql.NullInt64, want *int64) bool {
 }
 
 func saveResult(ctx context.Context, tx *db.Tx, userID, mutationID string, intent mutationIntent, status int, body any, resultingObjectID *string) error {
-	if mutationID == "" || !ValidUUID(intent.CollectionID) ||
-		(intent.ObjectID != nil && !ValidUUID(*intent.ObjectID)) {
+	if mutationID == "" || !ids.IsUUID(intent.CollectionID) ||
+		(intent.ObjectID != nil && !ids.IsUUID(*intent.ObjectID)) {
 		return nil
 	}
 	bodyJSON, err := json.Marshal(body)
@@ -343,7 +323,7 @@ func saveResult(ctx context.Context, tx *db.Tx, userID, mutationID string, inten
 }
 
 func lockCollection(ctx context.Context, tx *db.Tx, userID, collectionID string) (bool, error) {
-	if !ValidUUID(collectionID) {
+	if !ids.IsUUID(collectionID) {
 		return false, nil
 	}
 	var id string
@@ -429,7 +409,7 @@ func ReserveCreate(ctx context.Context, database *db.DB, userID, collectionID, m
 	if err != nil {
 		return Reservation{}, err
 	}
-	if prepared || mutationID == "" || !ValidUUID(collectionID) {
+	if prepared || mutationID == "" || !ids.IsUUID(collectionID) {
 		return Reservation{prepared: prepared}, nil
 	}
 	tx, err := database.BeginTx(ctx, nil)
@@ -613,7 +593,7 @@ func Update(ctx context.Context, database *db.DB, publisher events.Publisher, us
 	if !found {
 		return finishMutationNotFound(ctx, tx, userID, mutationID, intent)
 	}
-	if !ValidUUID(objectID) {
+	if !ids.IsUUID(objectID) {
 		return finishMutationNotFound(ctx, tx, userID, mutationID, intent)
 	}
 	current, err := scanObject(tx.QueryRowContext(ctx, `SELECT `+objectColumns+` FROM objects
@@ -746,7 +726,7 @@ func Delete(ctx context.Context, database *db.DB, publisher events.Publisher, us
 	if err != nil {
 		return DeleteOutcome{}, err
 	}
-	if !found || !ValidUUID(objectID) {
+	if !found || !ids.IsUUID(objectID) {
 		return finishDeleteNotFound(ctx, tx, userID, mutationID, intent)
 	}
 	current, err := scanObject(tx.QueryRowContext(ctx, `SELECT `+objectColumns+` FROM objects

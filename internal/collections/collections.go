@@ -10,6 +10,7 @@ import (
 	"uuid"
 
 	"futo-notes-server/internal/db"
+	"futo-notes-server/internal/ids"
 )
 
 type Collection struct {
@@ -26,11 +27,7 @@ const selectColumns = `id, user_id, current_version, created_at`
 const selectOldest = `SELECT ` + selectColumns + ` FROM collections
 	WHERE user_id = $1 ORDER BY created_at, id LIMIT 1`
 
-type scanner interface {
-	Scan(dest ...any) error
-}
-
-func scanCollection(row scanner) (Collection, error) {
+func scanCollection(row db.Scanner) (Collection, error) {
 	var c Collection
 	var version int64
 	var createdAt db.Time
@@ -98,7 +95,7 @@ func List(ctx context.Context, database *db.DB, userID string) ([]Collection, er
 // Get returns nil when the collection is absent or owned by another user, so
 // the caller answers 404 either way and existence doesn't leak.
 func Get(ctx context.Context, database *db.DB, userID, id string) (*Collection, error) {
-	if !isUUID(id) {
+	if !ids.IsUUID(id) {
 		return nil, nil
 	}
 	c, err := scanCollection(database.QueryRowContext(ctx,
@@ -118,7 +115,7 @@ func Get(ctx context.Context, database *db.DB, userID, id string) (*Collection, 
 // legacy_shared is never cleaned. Mutation results scoped to the collection
 // are deleted, because that sync namespace no longer exists.
 func Delete(ctx context.Context, database *db.DB, userID, id string) (bool, error) {
-	if !isUUID(id) {
+	if !ids.IsUUID(id) {
 		return false, nil
 	}
 
@@ -153,26 +150,4 @@ func Delete(ctx context.Context, database *db.DB, userID, id string) (bool, erro
 	}
 
 	return true, tx.Commit()
-}
-
-// isUUID reports whether s is in canonical 8-4-4-4-12 form, which is what
-// Postgres will accept as a uuid parameter without a cast error.
-func isUUID(s string) bool {
-	if len(s) != 36 {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch i {
-		case 8, 13, 18, 23:
-			if c != '-' {
-				return false
-			}
-		default:
-			if !('0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F') {
-				return false
-			}
-		}
-	}
-	return true
 }

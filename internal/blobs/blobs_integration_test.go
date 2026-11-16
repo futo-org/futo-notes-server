@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"os"
-	"path/filepath"
 	"testing"
 
 	"futo-notes-server/internal/blobs"
@@ -43,8 +42,11 @@ func TestBlobDeleteLifecycle(t *testing.T) {
 
 	store := &blobs.Store{Dir: t.TempDir()}
 	onDisk := func(key string) bool {
-		_, err := os.Stat(filepath.Join(store.Dir, filepath.FromSlash(key)))
-		return err == nil
+		exists, err := store.Exists(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return exists
 	}
 
 	staged, err := blobs.Stage(ctx, database, store, userID, []byte("staged"))

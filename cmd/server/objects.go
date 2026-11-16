@@ -13,6 +13,7 @@ import (
 	"futo-notes-server/internal/blobs"
 	"futo-notes-server/internal/db"
 	"futo-notes-server/internal/events"
+	"futo-notes-server/internal/ids"
 	"futo-notes-server/internal/objects"
 )
 
@@ -388,7 +389,7 @@ func parseBatch(body []byte) ([]batchEntry, string) {
 		if op == 0 && !objects.ValidMutationID(identifier) {
 			return nil, "invalid create mutation id"
 		}
-		if op == 1 && !objects.ValidUUID(identifier) {
+		if op == 1 && !ids.IsUUID(identifier) {
 			return nil, "invalid update object id"
 		}
 		if len(body)-offset < 4 {

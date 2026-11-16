@@ -15,6 +15,7 @@ import (
 
 	"futo-notes-server/internal/blobs"
 	"futo-notes-server/internal/db"
+	"futo-notes-server/internal/ids"
 )
 
 const reconciliationLimit = 500
@@ -71,7 +72,7 @@ func ReconcileStorage(ctx context.Context, database *db.DB, store *blobs.Store) 
 		}
 		key := filepath.ToSlash(relative)
 		owner, _, ok := strings.Cut(key, "/")
-		if !ok || !validUUID(owner) {
+		if !ok || !ids.IsUUID(owner) {
 			result.Skipped++
 			slog.Info("storage reconciliation: skipping file", "key", key, "reason", "invalid owner")
 			return nil
@@ -202,7 +203,7 @@ func GarbageCollectBlobs(ctx context.Context, database *db.DB, store *blobs.Stor
 			purgedThisPass++
 			result.RowsPurged++
 
-			existed, err := blobFileExists(store, key)
+			existed, err := store.Exists(key)
 			if err != nil {
 				removalErrors = append(removalErrors, fmt.Errorf("stating blob %q: %w", key, err))
 				continue
@@ -280,35 +281,4 @@ func purgeBlobRow(ctx context.Context, database *db.DB, key string) (bool, error
 		return false, err
 	}
 	return true, nil
-}
-
-func blobFileExists(store *blobs.Store, key string) (bool, error) {
-	_, err := os.Stat(filepath.Join(store.Dir, filepath.FromSlash(key)))
-	switch {
-	case err == nil:
-		return true, nil
-	case errors.Is(err, os.ErrNotExist):
-		return false, nil
-	default:
-		return false, err
-	}
-}
-
-func validUUID(value string) bool {
-	if len(value) != 36 {
-		return false
-	}
-	for i, char := range []byte(value) {
-		switch i {
-		case 8, 13, 18, 23:
-			if char != '-' {
-				return false
-			}
-		default:
-			if !(char >= '0' && char <= '9' || char >= 'a' && char <= 'f' || char >= 'A' && char <= 'F') {
-				return false
-			}
-		}
-	}
-	return true
 }

@@ -80,11 +80,7 @@ func TestSQLiteApplicationLifecycle(t *testing.T) {
 	}
 
 	reconciledKey := user.ID + "/00000000-0000-7000-8000-000000000099"
-	reconciledPath := filepath.Join(store.Dir, filepath.FromSlash(reconciledKey))
-	if err := os.MkdirAll(filepath.Dir(reconciledPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(reconciledPath, []byte("reconciled"), 0o600); err != nil {
+	if err := store.Put(reconciledKey, []byte("reconciled")); err != nil {
 		t.Fatal(err)
 	}
 	if result, err := jobs.ReconcileStorage(ctx, database, store); err != nil || result.Adopted != 1 {

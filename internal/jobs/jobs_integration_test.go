@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
-	"path/filepath"
 	"slices"
 	"testing"
 	"time"
@@ -259,12 +258,15 @@ func TestRecurringJobs(t *testing.T) {
 				wantRows = 0
 			}
 			assertRowCount(t, database, `SELECT count(*) FROM blob_ledger WHERE blob_key = $1`, wantRows, key)
-			_, statErr := os.Stat(filepath.Join(store.Dir, filepath.FromSlash(key)))
-			if row.purged && row.withFile && !os.IsNotExist(statErr) {
-				t.Fatalf("purged file %q still exists: %v", key, statErr)
+			exists, err := store.Exists(key)
+			if err != nil {
+				t.Fatal(err)
 			}
-			if !row.purged && row.withFile && statErr != nil {
-				t.Fatalf("protected file %q missing: %v", key, statErr)
+			if row.purged && row.withFile && exists {
+				t.Fatalf("purged file %q still exists", key)
+			}
+			if !row.purged && row.withFile && !exists {
+				t.Fatalf("protected file %q missing", key)
 			}
 		}
 	})
