@@ -64,15 +64,15 @@ func TestListenerTransactionalDeliveryAndReconnect(t *testing.T) {
 		t.Fatalf("change = %#v", change)
 	}
 
-	tx, err := database.Begin()
-	if err != nil {
-		t.Fatal(err)
-	}
 	dialect, err := db.ParseDialect(databaseURL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := (PostgresPublisher{}).Publish(context.Background(), db.WrapTx(tx, dialect), "events-user", "collection-1", 8); err != nil {
+	tx, err := db.Wrap(database, dialect).BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := (PostgresPublisher{}).Publish(context.Background(), tx, "events-user", "collection-1", 8); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Rollback(); err != nil {
@@ -158,16 +158,15 @@ func waitForListener(t *testing.T, database *sql.DB, appName string) {
 
 func publishAndCommit(t *testing.T, database *sql.DB, notification Notification) {
 	t.Helper()
-	tx, err := database.Begin()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer tx.Rollback()
 	dialect, err := db.ParseDialect(os.Getenv("EVENTS_TEST_DATABASE_URL"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	wrapped := db.WrapTx(tx, dialect)
+	wrapped, err := db.Wrap(database, dialect).BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer wrapped.Discard()
 	if err := (PostgresPublisher{}).Publish(context.Background(), wrapped, notification.UserID, notification.CollectionID, notification.CurrentVersion); err != nil {
 		t.Fatal(err)
 	}

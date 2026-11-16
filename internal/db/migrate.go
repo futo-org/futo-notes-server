@@ -5,7 +5,6 @@ import (
 	"embed"
 	"fmt"
 	"path"
-	"sort"
 	"strings"
 	"time"
 )
@@ -26,9 +25,6 @@ const (
 // against the same fresh database do not both try to create the schema.
 const advisoryLockKey int64 = 7376088471349216
 
-// kyselyTimestampFormat is the ISO-8601 millisecond form Kysely records.
-const kyselyTimestampFormat = "2006-01-02T15:04:05.000Z"
-
 type migration struct {
 	name string
 	sql  string
@@ -36,6 +32,8 @@ type migration struct {
 
 func loadMigrations(dialect Dialect) ([]migration, error) {
 	directory := path.Join("migrations", string(dialect.Engine()))
+	// ReadDir returns entries sorted by filename, and filenames are
+	// zero-padded, so this is migration order.
 	entries, err := migrationFS.ReadDir(directory)
 	if err != nil {
 		return nil, err
@@ -52,9 +50,6 @@ func loadMigrations(dialect Dialect) ([]migration, error) {
 			sql:  string(body),
 		})
 	}
-
-	// Filenames are zero-padded, so lexical order is migration order.
-	sort.Slice(migrations, func(i, j int) bool { return migrations[i].name < migrations[j].name })
 	return migrations, nil
 }
 
@@ -72,7 +67,7 @@ func Migrate(ctx context.Context, database *DB) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback()
+	defer tx.Discard()
 
 	if database.Dialect().Engine() == Postgres {
 		if _, err := tx.ExecContext(ctx, `select pg_advisory_xact_lock($1)`, advisoryLockKey); err != nil {
@@ -104,7 +99,7 @@ func Migrate(ctx context.Context, database *DB) ([]string, error) {
 		}
 		if _, err := tx.ExecContext(ctx,
 			`insert into `+migrationTable+` (name, "timestamp") values ($1, $2)`,
-			m.name, stamp.Add(time.Duration(i)*time.Millisecond).Format(kyselyTimestampFormat),
+			m.name, stamp.Add(time.Duration(i)*time.Millisecond).Format(TimestampFormat),
 		); err != nil {
 			return nil, fmt.Errorf("recording migration %s: %w", m.name, err)
 		}

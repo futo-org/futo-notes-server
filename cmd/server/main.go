@@ -159,7 +159,12 @@ func main() {
 		slog.Warn(warning)
 	}
 
-	database, err := db.Open(cfg)
+	database, err := db.Open(cfg.DatabaseURL, db.Options{
+		BlobDir:         cfg.BlobDir,
+		AllowFresh:      cfg.AllowFreshDatabase,
+		PoolMax:         cfg.DBPoolMax,
+		PoolIdleTimeout: cfg.DBPoolIdleTimeout,
+	})
 	if err != nil {
 		slog.Error("opening database", "err", err)
 		os.Exit(1)

@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"time"
 
-	"futo-notes-server/internal/config"
 	appdb "futo-notes-server/internal/db"
 )
 
@@ -269,10 +268,7 @@ func (r *runner) seedPullLimitFixtures(ctx context.Context) error {
 			return fmt.Errorf("%s identities are not bound", fixture.target.name)
 		}
 
-		database, err := appdb.Open(config.Config{
-			DatabaseURL: fixture.databaseURL,
-			BlobDir:     fixture.blobDir,
-		})
+		database, err := appdb.Open(fixture.databaseURL, appdb.Options{BlobDir: fixture.blobDir})
 		if err != nil {
 			return fmt.Errorf("opening %s fixture database: %w", fixture.target.name, err)
 		}

@@ -50,7 +50,7 @@ func Claim(ctx context.Context, database *db.DB, userID string) (Collection, boo
 	if err != nil {
 		return Collection{}, false, err
 	}
-	defer tx.Rollback()
+	defer tx.Discard()
 
 	var lockedID string
 	if err := tx.QueryRowContext(ctx,
@@ -126,7 +126,7 @@ func Delete(ctx context.Context, database *db.DB, userID, id string) (bool, erro
 	if err != nil {
 		return false, err
 	}
-	defer tx.Rollback()
+	defer tx.Discard()
 
 	var lockedID string
 	err = tx.QueryRowContext(ctx,

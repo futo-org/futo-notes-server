@@ -40,7 +40,7 @@ func startMutationTestServer(t *testing.T, blobDir string) mutationTestServer {
 		CookieSecure: false,
 		BlobDir:      blobDir,
 	}
-	database, err := db.Open(cfg)
+	database, err := db.Open(cfg.DatabaseURL, db.Options{BlobDir: cfg.BlobDir})
 	if err != nil {
 		t.Fatal(err)
 	}

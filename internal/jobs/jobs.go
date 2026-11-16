@@ -81,7 +81,7 @@ func ReconcileStorage(ctx context.Context, database *appdb.DB, store *blobs.Stor
 		if err != nil {
 			return err
 		}
-		defer tx.Rollback()
+		defer tx.Discard()
 		var ownerExists bool
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM users WHERE id = $1)`, owner).Scan(&ownerExists); err != nil {
 			return err
@@ -255,7 +255,7 @@ func purgeBlobRow(ctx context.Context, database *appdb.DB, key string) (bool, er
 	if err != nil {
 		return false, err
 	}
-	defer tx.Rollback()
+	defer tx.Discard()
 
 	var lockedKey string
 	now := clock().UTC()

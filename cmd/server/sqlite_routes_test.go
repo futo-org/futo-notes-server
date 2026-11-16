@@ -24,7 +24,7 @@ func TestSQLiteRoutesEndToEnd(t *testing.T) {
 		CookieSecure: false,
 		BlobDir:      filepath.Join(root, "blobs"),
 	}
-	database, err := db.Open(cfg)
+	database, err := db.Open(cfg.DatabaseURL, db.Options{BlobDir: cfg.BlobDir})
 	if err != nil {
 		t.Fatal(err)
 	}

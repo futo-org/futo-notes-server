@@ -52,7 +52,7 @@ const keyColumns = `key_salt, key_kdf, encrypted_vault_key, key_updated_at`
 func scanKeyMaterial(row scanner) (*KeyMaterial, error) {
 	var salt, evk sql.NullString
 	var kdf []byte
-	var updatedAt db.NullTime
+	var updatedAt sql.Null[db.Time]
 	if err := row.Scan(&salt, &kdf, &evk, &updatedAt); err != nil {
 		return nil, err
 	}
@@ -63,7 +63,7 @@ func scanKeyMaterial(row scanner) (*KeyMaterial, error) {
 		KeySalt:           salt.String,
 		KeyKDF:            json.RawMessage(kdf),
 		EncryptedVaultKey: evk.String,
-		KeyUpdatedAt:      updatedAt.Time.UTC(),
+		KeyUpdatedAt:      updatedAt.V.UTC(),
 	}, nil
 }
 
@@ -118,7 +118,7 @@ func PutKey(ctx context.Context, database *db.DB, userID, id string, in KeyInput
 	if err != nil {
 		return 0, nil, err
 	}
-	defer tx.Rollback()
+	defer tx.Discard()
 
 	current, err := scanKeyMaterial(tx.QueryRowContext(ctx,
 		`SELECT `+keyColumns+` FROM collections WHERE id = $1 AND user_id = $2`+database.Dialect().ForUpdate(), id, userID))

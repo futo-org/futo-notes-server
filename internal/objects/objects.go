@@ -436,7 +436,7 @@ func ReserveCreate(ctx context.Context, db *appdb.DB, userID, collectionID, muta
 	if err != nil {
 		return Reservation{}, err
 	}
-	defer tx.Rollback()
+	defer tx.Discard()
 	if err := lockMutation(ctx, tx, userID, mutationID); err != nil {
 		return Reservation{}, err
 	}
@@ -478,7 +478,7 @@ func CreateReserved(ctx context.Context, db *appdb.DB, publisher events.Publishe
 	if err != nil {
 		return MutationOutcome{}, err
 	}
-	defer tx.Rollback()
+	defer tx.Discard()
 	if err := lockMutation(ctx, tx, userID, mutationID); err != nil {
 		return MutationOutcome{}, err
 	}
@@ -582,7 +582,7 @@ func Update(ctx context.Context, db *appdb.DB, publisher events.Publisher, userI
 	if err != nil {
 		return MutationOutcome{}, err
 	}
-	defer tx.Rollback()
+	defer tx.Discard()
 	if err := lockMutation(ctx, tx, userID, mutationID); err != nil {
 		return MutationOutcome{}, err
 	}
@@ -702,7 +702,7 @@ func Delete(ctx context.Context, db *appdb.DB, publisher events.Publisher, userI
 	if err != nil {
 		return DeleteOutcome{}, err
 	}
-	defer tx.Rollback()
+	defer tx.Discard()
 	if err := lockMutation(ctx, tx, userID, mutationID); err != nil {
 		return DeleteOutcome{}, err
 	}

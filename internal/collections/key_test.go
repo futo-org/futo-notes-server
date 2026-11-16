@@ -9,14 +9,13 @@ import (
 
 	"futo-notes-server/internal/auth"
 	"futo-notes-server/internal/collections"
-	"futo-notes-server/internal/config"
 	"futo-notes-server/internal/db"
 )
 
 func keyTestCollection(t *testing.T) (context.Context, *db.DB, string, string) {
 	t.Helper()
 	ctx := context.Background()
-	database, err := db.Open(config.Config{DatabaseURL: "sqlite:" + filepath.Join(t.TempDir(), "notes.db")})
+	database, err := db.Open("sqlite:"+filepath.Join(t.TempDir(), "notes.db"), db.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}

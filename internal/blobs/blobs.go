@@ -77,7 +77,7 @@ func Delete(ctx context.Context, database *db.DB, store *Store, userID, key stri
 	if err != nil {
 		return false, err
 	}
-	defer tx.Rollback()
+	defer tx.Discard()
 
 	// Keyed on blob_key alone. The namespace prefix already establishes who
 	// owns the key, and a row recorded against a different user_id — which

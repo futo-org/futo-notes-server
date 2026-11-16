@@ -5,8 +5,9 @@ import (
 	"fmt"
 	"os"
 	"strconv"
-	"strings"
 	"time"
+
+	"futo-notes-server/internal/db"
 )
 
 type Config struct {
@@ -30,7 +31,7 @@ func Load() (Config, error) {
 	}
 
 	cfg := Config{
-		DatabaseURL:        NormalizeDatabaseURL(getDefault("DATABASE_URL", "sqlite:./data/notes.db")),
+		DatabaseURL:        NormalizeDatabaseURL(getDefault("DATABASE_URL", db.DefaultSQLiteURL)),
 		AuthMode:           getDefault("AUTH_MODE", "password"),
 		Password:           os.Getenv("FUTO_NOTES_PASSWORD"),
 		PasswordHash:       os.Getenv("FUTO_NOTES_PASSWORD_HASH"),
@@ -56,7 +57,7 @@ func Load() (Config, error) {
 	if cfg.Port, err = getInt("PORT", 3005); err != nil {
 		return Config{}, err
 	}
-	if strings.HasPrefix(cfg.DatabaseURL, "postgres://") || strings.HasPrefix(cfg.DatabaseURL, "postgresql://") {
+	if dialect, parseErr := db.ParseDialect(cfg.DatabaseURL); parseErr == nil && dialect.Engine() == db.Postgres {
 		if cfg.DBPoolMax, err = getInt("DB_POOL_MAX", 10); err != nil {
 			return Config{}, err
 		}

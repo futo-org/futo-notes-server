@@ -13,7 +13,6 @@ import (
 	"futo-notes-server/internal/auth"
 	"futo-notes-server/internal/blobs"
 	"futo-notes-server/internal/collections"
-	"futo-notes-server/internal/config"
 	"futo-notes-server/internal/db"
 	"futo-notes-server/internal/events"
 	"futo-notes-server/internal/jobs"
@@ -27,7 +26,7 @@ func TestMigratePostgresToSQLitePreservesApplicationState(t *testing.T) {
 		t.Skip("MIGRATION_TEST_DATABASE_URL is not set")
 	}
 	ctx := context.Background()
-	source, err := db.Open(config.Config{DatabaseURL: sourceURL})
+	source, err := db.Open(sourceURL, db.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,10 +82,7 @@ func TestMigratePostgresToSQLitePreservesApplicationState(t *testing.T) {
 		t.Fatalf("migration summary did not report verification:\n%s", summary.String())
 	}
 
-	target, err := db.Open(config.Config{
-		DatabaseURL: "sqlite:" + targetPath,
-		BlobDir:     store.Dir,
-	})
+	target, err := db.Open("sqlite:"+targetPath, db.Options{BlobDir: store.Dir})
 	if err != nil {
 		t.Fatal(err)
 	}

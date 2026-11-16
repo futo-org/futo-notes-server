@@ -292,7 +292,7 @@ func TestRecurringJobs(t *testing.T) {
 func assertRowCount(t *testing.T, database *databasepkg.DB, query string, want int, args ...any) {
 	t.Helper()
 	var got int
-	if err := database.QueryRow(query, args...).Scan(&got); err != nil {
+	if err := database.QueryRowContext(context.Background(), query, args...).Scan(&got); err != nil {
 		t.Fatal(err)
 	}
 	if got != want {

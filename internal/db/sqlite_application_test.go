@@ -11,7 +11,6 @@ import (
 	"futo-notes-server/internal/auth"
 	"futo-notes-server/internal/blobs"
 	"futo-notes-server/internal/collections"
-	"futo-notes-server/internal/config"
 	"futo-notes-server/internal/db"
 	"futo-notes-server/internal/events"
 	"futo-notes-server/internal/jobs"
@@ -22,10 +21,7 @@ func TestSQLiteApplicationLifecycle(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	store := &blobs.Store{Dir: filepath.Join(root, "blobs")}
-	database, err := db.Open(config.Config{
-		DatabaseURL: "sqlite:" + filepath.Join(root, "db", "notes.db"),
-		BlobDir:     store.Dir,
-	})
+	database, err := db.Open("sqlite:"+filepath.Join(root, "db", "notes.db"), db.Options{BlobDir: store.Dir})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,10 +168,7 @@ func TestSQLiteApplicationLifecycle(t *testing.T) {
 
 func TestSQLiteConcurrentMigration(t *testing.T) {
 	root := t.TempDir()
-	database, err := db.Open(config.Config{
-		DatabaseURL: "sqlite:" + filepath.Join(root, "notes.db"),
-		BlobDir:     filepath.Join(root, "blobs"),
-	})
+	database, err := db.Open("sqlite:"+filepath.Join(root, "notes.db"), db.Options{BlobDir: filepath.Join(root, "blobs")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,23 +204,23 @@ func TestSQLiteConcurrentMigration(t *testing.T) {
 func assertSQLitePragmas(t *testing.T, database *db.DB) {
 	t.Helper()
 	var journalMode string
-	if err := database.QueryRow(`PRAGMA journal_mode`).Scan(&journalMode); err != nil || journalMode != "wal" {
+	if err := database.QueryRowContext(t.Context(), `PRAGMA journal_mode`).Scan(&journalMode); err != nil || journalMode != "wal" {
 		t.Fatalf("journal_mode = %q, %v", journalMode, err)
 	}
 	var foreignKeys int
-	if err := database.QueryRow(`PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil || foreignKeys != 1 {
+	if err := database.QueryRowContext(t.Context(), `PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil || foreignKeys != 1 {
 		t.Fatalf("foreign_keys = %d, %v", foreignKeys, err)
 	}
 	var busyTimeout int
-	if err := database.QueryRow(`PRAGMA busy_timeout`).Scan(&busyTimeout); err != nil || busyTimeout != 10000 {
+	if err := database.QueryRowContext(t.Context(), `PRAGMA busy_timeout`).Scan(&busyTimeout); err != nil || busyTimeout != 10000 {
 		t.Fatalf("busy_timeout = %d, %v", busyTimeout, err)
 	}
 	var synchronous int
-	if err := database.QueryRow(`PRAGMA synchronous`).Scan(&synchronous); err != nil || synchronous != 1 {
+	if err := database.QueryRowContext(t.Context(), `PRAGMA synchronous`).Scan(&synchronous); err != nil || synchronous != 1 {
 		t.Fatalf("synchronous = %d, %v", synchronous, err)
 	}
 	var integrity string
-	if err := database.QueryRow(`PRAGMA integrity_check`).Scan(&integrity); err != nil || integrity != "ok" {
+	if err := database.QueryRowContext(t.Context(), `PRAGMA integrity_check`).Scan(&integrity); err != nil || integrity != "ok" {
 		t.Fatalf("integrity_check = %q, %v", integrity, err)
 	}
 }
@@ -238,7 +231,7 @@ func assertSQLiteImmediateTransactions(t *testing.T, database *db.DB, path strin
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer writer.Rollback()
+	defer writer.Discard()
 
 	competitor, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(1)&_txlock=immediate")
 	if err != nil {
@@ -247,7 +240,7 @@ func assertSQLiteImmediateTransactions(t *testing.T, database *db.DB, path strin
 	defer competitor.Close()
 	second, err := competitor.BeginTx(context.Background(), nil)
 	if err == nil {
-		second.Rollback()
+		_ = second.Rollback()
 		t.Fatal("second immediate transaction acquired the SQLite write lock")
 	}
 }
