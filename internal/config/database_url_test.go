@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -15,12 +16,33 @@ func TestPostgresURLWithAtInPasswordKeepsItsHost(t *testing.T) {
 		"postgres://futo_notes:part@two@postgres:5432/futo_notes",
 		"postgresql://futo_notes:part@two@postgres:5432/futo_notes",
 	} {
-		parsed, err := pgx.ParseConfig(normalizeDatabaseURL(raw))
+		parsed, err := pgx.ParseConfig(NormalizeDatabaseURL(raw))
 		if err != nil {
 			t.Fatalf("%s: %v", raw, err)
 		}
 		if parsed.Host != "postgres" || parsed.Password != "part@two" || parsed.User != "futo_notes" {
 			t.Fatalf("%s: host=%q user=%q password=%q", raw, parsed.Host, parsed.User, parsed.Password)
+		}
+	}
+}
+
+// An '@' in a path-less URL's query is not part of the credentials.
+func TestPostgresURLWithAtInQueryKeepsItsCredentials(t *testing.T) {
+	for _, raw := range []string{
+		"postgres://u:p@localhost?application_name=x@y",
+		"postgres://u:p@localhost/db?application_name=x@y",
+		"postgres://u:part@two@localhost?application_name=x@y",
+	} {
+		parsed, err := pgx.ParseConfig(NormalizeDatabaseURL(raw))
+		if err != nil {
+			t.Fatalf("%s: %v", raw, err)
+		}
+		wantPassword := "p"
+		if strings.Contains(raw, "part@two") {
+			wantPassword = "part@two"
+		}
+		if parsed.Host != "localhost" || parsed.Password != wantPassword || parsed.RuntimeParams["application_name"] != "x@y" {
+			t.Fatalf("%s: host=%q password=%q application_name=%q", raw, parsed.Host, parsed.Password, parsed.RuntimeParams["application_name"])
 		}
 	}
 }
@@ -32,8 +54,8 @@ func TestNormalizeDatabaseURLLeavesOrdinaryURLsAlone(t *testing.T) {
 		"postgres://postgres:5432/futo_notes",
 		"postgres://futo_notes:pa%40ss@postgres/futo_notes?sslmode=disable",
 	} {
-		if got := normalizeDatabaseURL(raw); got != raw {
-			t.Fatalf("normalizeDatabaseURL(%q) = %q", raw, got)
+		if got := NormalizeDatabaseURL(raw); got != raw {
+			t.Fatalf("NormalizeDatabaseURL(%q) = %q", raw, got)
 		}
 	}
 }

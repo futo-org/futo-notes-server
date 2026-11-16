@@ -30,7 +30,7 @@ func Load() (Config, error) {
 	}
 
 	cfg := Config{
-		DatabaseURL:        normalizeDatabaseURL(getDefault("DATABASE_URL", "sqlite:./data/notes.db")),
+		DatabaseURL:        NormalizeDatabaseURL(getDefault("DATABASE_URL", "sqlite:./data/notes.db")),
 		AuthMode:           getDefault("AUTH_MODE", "password"),
 		Password:           os.Getenv("FUTO_NOTES_PASSWORD"),
 		PasswordHash:       os.Getenv("FUTO_NOTES_PASSWORD_HASH"),
@@ -81,7 +81,7 @@ func LoadRequiredDatabaseURL() (string, error) {
 	if databaseURL == "" {
 		return "", fmt.Errorf("DATABASE_URL is required")
 	}
-	return normalizeDatabaseURL(databaseURL), nil
+	return NormalizeDatabaseURL(databaseURL), nil
 }
 
 // DroppedEnvWarnings reports legacy TypeScript-server settings that the Go
