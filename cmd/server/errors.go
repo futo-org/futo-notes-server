@@ -1,7 +1,7 @@
 package main
 
 import (
-	"fmt"
+	"errors"
 	"log/slog"
 	"net/http"
 	"runtime/debug"
@@ -10,10 +10,13 @@ import (
 // serverError logs an internal failure with request context and answers with
 // the generic 500 body. action says what the handler was doing.
 func serverError(w http.ResponseWriter, r *http.Request, action string, err error) {
-	slog.Error(action, "err", err, "method", r.Method, "path", r.URL.Path)
+	slog.Error("internal server error", "action", action, "err", err, "method", r.Method, "path", r.URL.Path)
 	writeError(w, http.StatusInternalServerError, "internal server error")
 }
 
+// recoverPanic turns a handler panic into a logged generic 500 that closes the
+// connection. http.ErrAbortHandler is re-panicked so the server aborts the
+// response as intended.
 func recoverPanic(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
@@ -21,11 +24,11 @@ func recoverPanic(next http.Handler) http.Handler {
 			if panicValue == nil {
 				return
 			}
-			if err, ok := panicValue.(error); ok && err == http.ErrAbortHandler {
+			if err, ok := panicValue.(error); ok && errors.Is(err, http.ErrAbortHandler) {
 				panic(panicValue)
 			}
 			slog.Error("panic",
-				"err", fmt.Sprintf("%v", panicValue),
+				"err", panicValue,
 				"method", r.Method,
 				"path", r.URL.Path,
 				"stack", string(debug.Stack()))
