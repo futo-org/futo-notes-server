@@ -2,9 +2,9 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"io"
 	"io/fs"
 	"net/http"
@@ -114,7 +114,7 @@ func (s mutationTestServer) blobFileCount(t *testing.T) int {
 		}
 		return nil
 	})
-	if err != nil && !os.IsNotExist(err) {
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		t.Fatal(err)
 	}
 	return count
@@ -123,7 +123,7 @@ func (s mutationTestServer) blobFileCount(t *testing.T) int {
 func (s mutationTestServer) stagedLedgerRows(t *testing.T) int {
 	t.Helper()
 	var count int
-	if err := s.database.QueryRowContext(context.Background(),
+	if err := s.database.QueryRowContext(t.Context(),
 		`SELECT count(*) FROM blob_ledger WHERE state = 'staged'`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}

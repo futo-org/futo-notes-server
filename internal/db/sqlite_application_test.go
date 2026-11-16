@@ -109,8 +109,10 @@ func TestSQLiteApplicationLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	createdObject, err := objects.Create(ctx, database, publisher, user.ID, collection.ID, "create-sqlite", firstBlob)
-	if err != nil || createdObject.Code != objects.OK {
+	objectStore := objects.New(database, publisher)
+	createdObject, err := objectStore.Create(ctx,
+		objects.Mutation{UserID: user.ID, CollectionID: collection.ID, MutationID: "create-sqlite"}, firstBlob)
+	if err != nil {
 		t.Fatalf("Create() = %#v, %v", createdObject, err)
 	}
 	select {
@@ -127,14 +129,14 @@ func TestSQLiteApplicationLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	updated, err := objects.Update(ctx, database, publisher, user.ID, collection.ID,
-		createdObject.Response.Object.ID, "update-sqlite", secondBlob, 2)
-	if err != nil || updated.Code != objects.OK {
+	updated, err := objectStore.Update(ctx, objects.Mutation{UserID: user.ID, CollectionID: collection.ID,
+		ObjectID: createdObject.Object.ID, MutationID: "update-sqlite"}, secondBlob, 2)
+	if err != nil {
 		t.Fatalf("Update() = %#v, %v", updated, err)
 	}
-	deleted, err := objects.Delete(ctx, database, publisher, user.ID, collection.ID,
-		createdObject.Response.Object.ID, "delete-sqlite", nil)
-	if err != nil || deleted.Code != objects.OK {
+	deleted, err := objectStore.Delete(ctx, objects.Mutation{UserID: user.ID, CollectionID: collection.ID,
+		ObjectID: createdObject.Object.ID, MutationID: "delete-sqlite"}, nil)
+	if err != nil {
 		t.Fatalf("Delete() = %#v, %v", deleted, err)
 	}
 

@@ -53,8 +53,9 @@ func TestMigratePostgresToSQLitePreservesApplicationState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	createdObject, err := objects.Create(ctx, source, events.PostgresPublisher{}, user.ID, collection.ID, "migration-create", blobKey)
-	if err != nil || createdObject.Code != objects.OK {
+	createdObject, err := objects.New(source, events.PostgresPublisher{}).Create(ctx,
+		objects.Mutation{UserID: user.ID, CollectionID: collection.ID, MutationID: "migration-create"}, blobKey)
+	if err != nil {
 		t.Fatalf("Create() = %#v, %v", createdObject, err)
 	}
 	if _, err := source.ExecContext(ctx, `INSERT INTO server_config (key, value) VALUES ($1, $2)`, configKey, "migration-value"); err != nil {
@@ -92,12 +93,12 @@ func TestMigratePostgresToSQLitePreservesApplicationState(t *testing.T) {
 	if !reflect.DeepEqual(gotKDFValue, wantKDFValue) {
 		t.Fatalf("key KDF = %s, want semantic JSON %s", key.KeyKDF, wantKDF)
 	}
-	gotObject, err := objects.Get(ctx, target, user.ID, collection.ID, createdObject.Response.Object.ID)
-	if err != nil || gotObject == nil || gotObject.BlobKey == nil || *gotObject.BlobKey != blobKey {
+	gotObject, err := objects.New(target, nil).Get(ctx, user.ID, collection.ID, createdObject.Object.ID)
+	if err != nil || gotObject.BlobKey == nil || *gotObject.BlobKey != blobKey {
 		t.Fatalf("Get() = %#v, %v", gotObject, err)
 	}
-	recovered, err := objects.RecoverCreate(ctx, target, user.ID, collection.ID, "migration-create")
-	if err != nil || recovered.Code != objects.OK || recovered.Response.Object.ID != createdObject.Response.Object.ID {
+	recovered, err := objects.New(target, nil).RecoverCreate(ctx, user.ID, collection.ID, "migration-create")
+	if err != nil || recovered.Object.ID != createdObject.Object.ID {
 		t.Fatalf("RecoverCreate() = %#v, %v", recovered, err)
 	}
 	var configValue string
@@ -112,7 +113,7 @@ func TestMigratePostgresToSQLitePreservesApplicationState(t *testing.T) {
 	if _, err := jobs.ExpireMutationResults(ctx, target); err != nil {
 		t.Fatalf("running retention after migration: %v", err)
 	}
-	if sourceObject, err := objects.Get(ctx, source, user.ID, collection.ID, createdObject.Response.Object.ID); err != nil || sourceObject == nil {
+	if sourceObject, err := objects.New(source, nil).Get(ctx, user.ID, collection.ID, createdObject.Object.ID); err != nil {
 		t.Fatalf("source was modified: object=%#v err=%v", sourceObject, err)
 	}
 }
