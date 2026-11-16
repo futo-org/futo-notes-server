@@ -14,7 +14,7 @@ func TestListenerTransactionalDeliveryAndReconnect(t *testing.T) {
 	database := dbtest.Postgres(t, "EVENTS_TEST_DATABASE_URL")
 
 	hub := NewHub()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	listenerDone := make(chan struct{})
 	appName := "futo-notes-events-integration"
 	go func() {
@@ -33,7 +33,7 @@ func TestListenerTransactionalDeliveryAndReconnect(t *testing.T) {
 
 	sub := hub.Subscribe("events-user")
 	defer hub.Unsubscribe(sub)
-	if _, err := database.ExecContext(context.Background(), `SELECT pg_notify($1, 'not-json')`, Channel); err != nil {
+	if _, err := database.ExecContext(t.Context(), `SELECT pg_notify($1, 'not-json')`, Channel); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -51,11 +51,11 @@ func TestListenerTransactionalDeliveryAndReconnect(t *testing.T) {
 		t.Fatalf("change = %#v", change)
 	}
 
-	tx, err := database.BeginTx(context.Background(), nil)
+	tx, err := database.BeginTx(t.Context(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := (PostgresPublisher{}).Publish(context.Background(), tx, "events-user", "collection-1", 8); err != nil {
+	if err := (PostgresPublisher{}).Publish(t.Context(), tx, "events-user", "collection-1", 8); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Rollback(); err != nil {
@@ -67,7 +67,7 @@ func TestListenerTransactionalDeliveryAndReconnect(t *testing.T) {
 	case <-time.After(200 * time.Millisecond):
 	}
 
-	if _, err := database.ExecContext(context.Background(), `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+	if _, err := database.ExecContext(t.Context(), `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
 		WHERE application_name = $1 AND pid <> pg_backend_pid()`, appName); err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func waitForListener(t *testing.T, database *db.DB, appName string) {
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		var ready bool
-		err := database.QueryRowContext(context.Background(), `SELECT EXISTS (
+		err := database.QueryRowContext(t.Context(), `SELECT EXISTS (
 			SELECT 1 FROM pg_stat_activity
 			WHERE application_name = $1 AND query = $2
 		)`, appName, "LISTEN "+Channel).Scan(&ready)
@@ -141,12 +141,12 @@ func waitForListener(t *testing.T, database *db.DB, appName string) {
 
 func publishAndCommit(t *testing.T, database *db.DB, notification Notification) {
 	t.Helper()
-	tx, err := database.BeginTx(context.Background(), nil)
+	tx, err := database.BeginTx(t.Context(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer tx.Discard()
-	if err := (PostgresPublisher{}).Publish(context.Background(), tx, notification.UserID, notification.CollectionID, notification.CurrentVersion); err != nil {
+	if err := (PostgresPublisher{}).Publish(t.Context(), tx, notification.UserID, notification.CollectionID, notification.CurrentVersion); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(); err != nil {
