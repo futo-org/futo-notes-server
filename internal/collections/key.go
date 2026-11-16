@@ -26,63 +26,64 @@ func (m KeyMaterial) revisionToken() string {
 	return m.KeyUpdatedAt.UTC().Format(time.RFC3339Nano)
 }
 
+// KeyInput is the key material a client submits to claim or rotate the key.
 type KeyInput struct {
 	KeySalt           string
 	KeyKDF            json.RawMessage
 	EncryptedVaultKey string
 }
 
-type PutKeyOutcome int
+// ErrNoCurrentKey reports a rotation token supplied when no key is stored,
+// which no legitimate client can produce.
+var ErrNoCurrentKey = errors.New("no existing key to rotate")
 
-const (
-	PutKeyOK PutKeyOutcome = iota
-	PutKeyNotFound
-	// PutKeyConflict is a stale rotation token; the returned material is the
-	// authoritative current key.
-	PutKeyConflict
-	// PutKeyNoCurrentKey is a rotation token supplied when nothing is stored,
-	// which no legitimate client can produce.
-	PutKeyNoCurrentKey
-)
+// KeyConflictError reports a rotation from a stale revision token. Current is
+// the authoritative key material the client should resync from.
+type KeyConflictError struct {
+	Current KeyMaterial
+}
+
+// Error implements error.
+func (e *KeyConflictError) Error() string {
+	return "key conflict: rotation token is stale"
+}
 
 const keyColumns = `key_salt, key_kdf, encrypted_vault_key, key_updated_at`
 
-// scanKeyMaterial reads the four key columns, returning nil when the
-// collection has no claimed key (the columns are set together, so
+// scanKeyMaterial reads the four key columns and reports whether the
+// collection has a claimed key (the columns are set together, so
 // key_updated_at stands in for all four).
-func scanKeyMaterial(row db.Scanner) (*KeyMaterial, error) {
+func scanKeyMaterial(row db.Scanner) (KeyMaterial, bool, error) {
 	var salt, evk sql.NullString
 	var kdf []byte
 	var updatedAt sql.Null[db.Time]
 	if err := row.Scan(&salt, &kdf, &evk, &updatedAt); err != nil {
-		return nil, err
+		return KeyMaterial{}, false, err
 	}
 	if !updatedAt.Valid {
-		return nil, nil
+		return KeyMaterial{}, false, nil
 	}
-	return &KeyMaterial{
+	return KeyMaterial{
 		KeySalt:           salt.String,
 		KeyKDF:            json.RawMessage(kdf),
 		EncryptedVaultKey: evk.String,
 		KeyUpdatedAt:      updatedAt.V.UTC(),
-	}, nil
+	}, true, nil
 }
 
-// GetKey reports whether the collection exists for this user and, if so,
-// returns its key material — nil when no key has been claimed yet.
-func GetKey(ctx context.Context, database *db.DB, userID, id string) (bool, *KeyMaterial, error) {
+// GetKey returns the collection's key material and reports whether a key has
+// been claimed yet. It returns ErrNotFound when the collection is absent or
+// owned by another user.
+func GetKey(ctx context.Context, database *db.DB, userID, id string) (KeyMaterial, bool, error) {
 	if !ids.IsUUID(id) {
-		return false, nil, nil
+		return KeyMaterial{}, false, ErrNotFound
 	}
-	key, err := scanKeyMaterial(database.QueryRowContext(ctx,
+	key, ok, err := scanKeyMaterial(database.QueryRowContext(ctx,
 		`SELECT `+keyColumns+` FROM collections WHERE id = $1 AND user_id = $2`, id, userID))
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil, nil
+		return KeyMaterial{}, false, ErrNotFound
 	}
-	if err != nil {
-		return false, nil, err
-	}
-	return true, key, nil
+	return key, ok, err
 }
 
 // nextRevision picks the key_updated_at to store. Timestamps are kept to the
@@ -91,9 +92,9 @@ func GetKey(ctx context.Context, database *db.DB, userID, id string) (bool, *Key
 // both pass the staleness check and the second would overwrite the first.
 // Stepping one millisecond past the stored revision keeps the token strictly
 // increasing without changing its shape.
-func nextRevision(current *KeyMaterial) time.Time {
+func nextRevision(current KeyMaterial, claimed bool) time.Time {
 	updatedAt := time.Now().UTC().Truncate(time.Millisecond)
-	if current == nil {
+	if !claimed {
 		return updatedAt
 	}
 	if earliest := current.KeyUpdatedAt.Truncate(time.Millisecond).Add(time.Millisecond); updatedAt.Before(earliest) {
@@ -102,54 +103,60 @@ func nextRevision(current *KeyMaterial) time.Time {
 	return updatedAt
 }
 
-// PutKey claims or rotates the collection's key material.
+// PutKey claims or rotates the collection's key material and returns what is
+// stored afterwards. It returns ErrNotFound when the collection is absent or
+// owned by another user.
 //
 // Claim (prevToken nil): stores the material if none exists; otherwise the
 // stored material wins and is returned unchanged, which also makes identical
 // resubmissions idempotent.
 //
 // Rotation (prevToken set): replaces the material only when the token matches
-// the current revision.
-func PutKey(ctx context.Context, database *db.DB, userID, id string, in KeyInput, prevToken *string) (PutKeyOutcome, *KeyMaterial, error) {
+// the current revision. A stale token yields a *KeyConflictError carrying the
+// current material; a token with nothing stored yields ErrNoCurrentKey.
+func PutKey(ctx context.Context, database *db.DB, userID, id string, in KeyInput, prevToken *string) (KeyMaterial, error) {
 	if !ids.IsUUID(id) {
-		return PutKeyNotFound, nil, nil
+		return KeyMaterial{}, ErrNotFound
 	}
 
 	tx, err := database.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, nil, err
+		return KeyMaterial{}, err
 	}
 	defer tx.Discard()
 
-	current, err := scanKeyMaterial(tx.QueryRowContext(ctx,
+	current, claimed, err := scanKeyMaterial(tx.QueryRowContext(ctx,
 		`SELECT `+keyColumns+` FROM collections WHERE id = $1 AND user_id = $2`+database.Dialect().ForUpdate(), id, userID))
 	if errors.Is(err, sql.ErrNoRows) {
-		return PutKeyNotFound, nil, nil
+		return KeyMaterial{}, ErrNotFound
 	}
 	if err != nil {
-		return 0, nil, err
+		return KeyMaterial{}, err
 	}
 
 	if prevToken == nil {
-		if current != nil {
-			return PutKeyOK, current, tx.Commit()
+		if claimed {
+			return current, tx.Commit()
 		}
 	} else {
-		if current == nil {
-			return PutKeyNoCurrentKey, nil, nil
+		if !claimed {
+			return KeyMaterial{}, ErrNoCurrentKey
 		}
 		if current.revisionToken() != *prevToken {
-			return PutKeyConflict, current, tx.Commit()
+			if err := tx.Commit(); err != nil {
+				return KeyMaterial{}, err
+			}
+			return KeyMaterial{}, &KeyConflictError{Current: current}
 		}
 	}
 
-	stored, err := scanKeyMaterial(tx.QueryRowContext(ctx,
+	stored, _, err := scanKeyMaterial(tx.QueryRowContext(ctx,
 		`UPDATE collections
 		 SET key_salt = $1, key_kdf = $2`+database.Dialect().JSONCast()+`, encrypted_vault_key = $3, key_updated_at = $5
 		 WHERE id = $4 RETURNING `+keyColumns,
-		in.KeySalt, string(in.KeyKDF), in.EncryptedVaultKey, id, db.Timestamp(nextRevision(current))))
+		in.KeySalt, string(in.KeyKDF), in.EncryptedVaultKey, id, db.Timestamp(nextRevision(current, claimed))))
 	if err != nil {
-		return 0, nil, err
+		return KeyMaterial{}, err
 	}
-	return PutKeyOK, stored, tx.Commit()
+	return stored, tx.Commit()
 }

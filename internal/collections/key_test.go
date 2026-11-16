@@ -2,6 +2,7 @@ package collections_test
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -14,7 +15,7 @@ import (
 
 func keyTestCollection(t *testing.T) (context.Context, *db.DB, string, string) {
 	t.Helper()
-	ctx := context.Background()
+	ctx := t.Context()
 	database := dbtest.SQLite(t)
 	user, err := auth.UpsertUserByEmail(ctx, database, "key@example.invalid", "Key")
 	if err != nil {
@@ -37,12 +38,33 @@ func keyInput(suffix string) collections.KeyInput {
 
 // token renders the revision token the way the wire does, so the test compares
 // what a client would actually send back in previous_key_updated_at.
-func token(t *testing.T, material *collections.KeyMaterial) string {
+func token(material collections.KeyMaterial) string {
+	return material.KeyUpdatedAt.UTC().Format(time.RFC3339Nano)
+}
+
+// getKey reads back the stored key material, failing the test when no key has
+// been claimed.
+func getKey(ctx context.Context, t *testing.T, database *db.DB, userID, id string) collections.KeyMaterial {
 	t.Helper()
-	if material == nil {
+	key, claimed, err := collections.GetKey(ctx, database, userID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !claimed {
 		t.Fatal("no key material")
 	}
-	return material.KeyUpdatedAt.UTC().Format(time.RFC3339Nano)
+	return key
+}
+
+// wantKeyConflict fails the test unless err is a key conflict, and returns the
+// current material it carries.
+func wantKeyConflict(t *testing.T, what string, err error) collections.KeyMaterial {
+	t.Helper()
+	conflict, ok := errors.AsType[*collections.KeyConflictError](err)
+	if !ok {
+		t.Fatalf("%s = %v, want a key conflict", what, err)
+	}
+	return conflict.Current
 }
 
 // A rotation that lands in the same millisecond as the write it replaces still
@@ -51,18 +73,18 @@ func token(t *testing.T, material *collections.KeyMaterial) string {
 func TestPutKeyRotationAdvancesRevisionToken(t *testing.T) {
 	ctx, database, userID, id := keyTestCollection(t)
 
-	outcome, claimed, err := collections.PutKey(ctx, database, userID, id, keyInput("one"), nil)
-	if err != nil || outcome != collections.PutKeyOK {
-		t.Fatalf("claim = %v, %v", outcome, err)
+	claimed, err := collections.PutKey(ctx, database, userID, id, keyInput("one"), nil)
+	if err != nil {
+		t.Fatalf("claim = %v", err)
 	}
-	previous := token(t, claimed)
+	previous := token(claimed)
 
-	for i := 0; i < 8; i++ {
-		outcome, rotated, err := collections.PutKey(ctx, database, userID, id, keyInput("two"), &previous)
-		if err != nil || outcome != collections.PutKeyOK {
-			t.Fatalf("rotation %d = %v, %v", i, outcome, err)
+	for i := range 8 {
+		rotated, err := collections.PutKey(ctx, database, userID, id, keyInput("two"), &previous)
+		if err != nil {
+			t.Fatalf("rotation %d = %v", i, err)
 		}
-		next := token(t, rotated)
+		next := token(rotated)
 		if next == previous {
 			t.Fatalf("rotation %d returned the previous revision token %q", i, next)
 		}
@@ -91,35 +113,27 @@ func TestPutKeyRotationAdvancesRevisionToken(t *testing.T) {
 func TestPutKeyRotationAdvancesPastAFutureRevision(t *testing.T) {
 	ctx, database, userID, id := keyTestCollection(t)
 
-	if _, _, err := collections.PutKey(ctx, database, userID, id, keyInput("one"), nil); err != nil {
+	if _, err := collections.PutKey(ctx, database, userID, id, keyInput("one"), nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := database.ExecContext(ctx, `UPDATE collections SET key_updated_at = $1 WHERE id = $2`,
 		db.Timestamp(time.Now().Add(time.Hour)), id); err != nil {
 		t.Fatal(err)
 	}
-	_, ahead, err := collections.GetKey(ctx, database, userID, id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	previous := token(t, ahead)
+	ahead := getKey(ctx, t, database, userID, id)
+	previous := token(ahead)
 
-	outcome, rotated, err := collections.PutKey(ctx, database, userID, id, keyInput("two"), &previous)
-	if err != nil || outcome != collections.PutKeyOK {
-		t.Fatalf("rotation = %v, %v", outcome, err)
+	rotated, err := collections.PutKey(ctx, database, userID, id, keyInput("two"), &previous)
+	if err != nil {
+		t.Fatalf("rotation = %v", err)
 	}
 	if !rotated.KeyUpdatedAt.After(ahead.KeyUpdatedAt) {
 		t.Fatalf("rotation key_updated_at %v did not advance past %v",
 			rotated.KeyUpdatedAt, ahead.KeyUpdatedAt)
 	}
 
-	outcome, _, err = collections.PutKey(ctx, database, userID, id, keyInput("three"), &previous)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if outcome != collections.PutKeyConflict {
-		t.Fatalf("rotation from the superseded token = %v, want PutKeyConflict", outcome)
-	}
+	_, err = collections.PutKey(ctx, database, userID, id, keyInput("three"), &previous)
+	wantKeyConflict(t, "rotation from the superseded token", err)
 }
 
 // Two clients holding the same revision token must not both rotate: the second
@@ -128,33 +142,24 @@ func TestPutKeyRotationAdvancesPastAFutureRevision(t *testing.T) {
 func TestPutKeyRejectsSecondRotationFromSameToken(t *testing.T) {
 	ctx, database, userID, id := keyTestCollection(t)
 
-	_, claimed, err := collections.PutKey(ctx, database, userID, id, keyInput("one"), nil)
+	claimed, err := collections.PutKey(ctx, database, userID, id, keyInput("one"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	stale := token(t, claimed)
+	stale := token(claimed)
 
-	outcome, winner, err := collections.PutKey(ctx, database, userID, id, keyInput("two"), &stale)
-	if err != nil || outcome != collections.PutKeyOK {
-		t.Fatalf("first rotation = %v, %v", outcome, err)
-	}
-	outcome, current, err := collections.PutKey(ctx, database, userID, id, keyInput("three"), &stale)
+	winner, err := collections.PutKey(ctx, database, userID, id, keyInput("two"), &stale)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("first rotation = %v", err)
 	}
-	if outcome != collections.PutKeyConflict {
-		t.Fatalf("second rotation from the same token = %v, want PutKeyConflict", outcome)
-	}
+	_, err = collections.PutKey(ctx, database, userID, id, keyInput("three"), &stale)
+	current := wantKeyConflict(t, "second rotation from the same token", err)
 	if current.EncryptedVaultKey != winner.EncryptedVaultKey {
 		t.Fatalf("conflict returned %q, want the first rotation's %q",
 			current.EncryptedVaultKey, winner.EncryptedVaultKey)
 	}
 
-	_, stored, err := collections.GetKey(ctx, database, userID, id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stored.EncryptedVaultKey != winner.EncryptedVaultKey {
+	if stored := getKey(ctx, t, database, userID, id); stored.EncryptedVaultKey != winner.EncryptedVaultKey {
 		t.Fatalf("stored key = %q, want the first rotation's %q",
 			stored.EncryptedVaultKey, winner.EncryptedVaultKey)
 	}
@@ -165,53 +170,43 @@ func TestPutKeyRejectsSecondRotationFromSameToken(t *testing.T) {
 func TestPutKeyConcurrentRotationsFromSameToken(t *testing.T) {
 	ctx, database, userID, id := keyTestCollection(t)
 
-	_, material, err := collections.PutKey(ctx, database, userID, id, keyInput("claim"), nil)
+	material, err := collections.PutKey(ctx, database, userID, id, keyInput("claim"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	for round := 0; round < 20; round++ {
-		stale := token(t, material)
-		outcomes := make([]collections.PutKeyOutcome, 2)
-		results := make([]*collections.KeyMaterial, 2)
+	for round := range 20 {
+		stale := token(material)
+		results := make([]collections.KeyMaterial, 2)
 		errs := make([]error, 2)
 		start := make(chan struct{})
 		var wg sync.WaitGroup
-		for i := range outcomes {
-			wg.Add(1)
-			go func(i int) {
-				defer wg.Done()
+		for i := range results {
+			wg.Go(func() {
 				<-start
-				outcomes[i], results[i], errs[i] = collections.PutKey(ctx, database, userID, id,
+				results[i], errs[i] = collections.PutKey(ctx, database, userID, id,
 					keyInput(string(rune('a'+i))), &stale)
-			}(i)
+			})
 		}
 		close(start)
 		wg.Wait()
 
 		var winners int
-		for i := range outcomes {
-			if errs[i] != nil {
-				t.Fatalf("round %d rotation %d: %v", round, i, errs[i])
-			}
-			switch outcomes[i] {
-			case collections.PutKeyOK:
+		for i := range results {
+			if errs[i] == nil {
 				winners++
 				material = results[i]
-			case collections.PutKeyConflict:
-			default:
-				t.Fatalf("round %d rotation %d = %v", round, i, outcomes[i])
+				continue
+			}
+			if _, ok := errors.AsType[*collections.KeyConflictError](errs[i]); !ok {
+				t.Fatalf("round %d rotation %d: %v", round, i, errs[i])
 			}
 		}
 		if winners != 1 {
 			t.Fatalf("round %d: %d of 2 rotations from revision %q succeeded, want 1",
 				round, winners, stale)
 		}
-		_, stored, err := collections.GetKey(ctx, database, userID, id)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if stored.EncryptedVaultKey != material.EncryptedVaultKey {
+		if stored := getKey(ctx, t, database, userID, id); stored.EncryptedVaultKey != material.EncryptedVaultKey {
 			t.Fatalf("round %d: stored key %q is not the winner's %q",
 				round, stored.EncryptedVaultKey, material.EncryptedVaultKey)
 		}
