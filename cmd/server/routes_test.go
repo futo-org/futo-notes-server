@@ -13,7 +13,7 @@ import (
 
 	"futo-notes-server/internal/blobs"
 	"futo-notes-server/internal/config"
-	databasepkg "futo-notes-server/internal/db"
+	"futo-notes-server/internal/db"
 	"futo-notes-server/internal/events"
 	"uuid"
 
@@ -29,13 +29,13 @@ func TestRoutesComposePublicAuthAndRecoveryMiddleware(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dialect, err := databasepkg.ParseDialect(databaseURL)
+	dialect, err := db.ParseDialect(databaseURL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	database := databasepkg.Wrap(rawDatabase, dialect)
+	database := db.Wrap(rawDatabase, dialect)
 	defer database.Close()
-	if _, err := databasepkg.Migrate(context.Background(), database); err != nil {
+	if _, err := db.Migrate(context.Background(), database); err != nil {
 		t.Fatal(err)
 	}
 
@@ -123,13 +123,13 @@ func TestRoutesComposePasswordLoginRateLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dialect, err := databasepkg.ParseDialect(databaseURL)
+	dialect, err := db.ParseDialect(databaseURL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	database := databasepkg.Wrap(rawDatabase, dialect)
+	database := db.Wrap(rawDatabase, dialect)
 	defer database.Close()
-	if _, err := databasepkg.Migrate(context.Background(), database); err != nil {
+	if _, err := db.Migrate(context.Background(), database); err != nil {
 		t.Fatal(err)
 	}
 

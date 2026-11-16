@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"futo-notes-server/internal/blobs"
-	databasepkg "futo-notes-server/internal/db"
+	"futo-notes-server/internal/db"
 	"uuid"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -23,14 +23,14 @@ func TestBlobDeleteLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dialect, err := databasepkg.ParseDialect(databaseURL)
+	dialect, err := db.ParseDialect(databaseURL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	database := databasepkg.Wrap(rawDatabase, dialect)
+	database := db.Wrap(rawDatabase, dialect)
 	defer database.Close()
 	ctx := context.Background()
-	if _, err := databasepkg.Migrate(ctx, database); err != nil {
+	if _, err := db.Migrate(ctx, database); err != nil {
 		t.Fatal(err)
 	}
 

@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"time"
 
-	appdb "futo-notes-server/internal/db"
+	"futo-notes-server/internal/db"
 )
 
 const (
@@ -268,7 +268,7 @@ func (r *runner) seedPullLimitFixtures(ctx context.Context) error {
 			return fmt.Errorf("%s identities are not bound", fixture.target.name)
 		}
 
-		database, err := appdb.Open(fixture.databaseURL, appdb.Options{BlobDir: fixture.blobDir})
+		database, err := db.Open(fixture.databaseURL, db.Options{BlobDir: fixture.blobDir})
 		if err != nil {
 			return fmt.Errorf("opening %s fixture database: %w", fixture.target.name, err)
 		}
@@ -278,8 +278,8 @@ func (r *runner) seedPullLimitFixtures(ctx context.Context) error {
 			return fmt.Errorf("beginning %s fixture transaction: %w", fixture.target.name, err)
 		}
 		createdValue := any(createdAt)
-		if database.Dialect().Engine() == appdb.SQLite {
-			createdValue = appdb.Timestamp(createdAt)
+		if database.Dialect().Engine() == db.SQLite {
+			createdValue = db.Timestamp(createdAt)
 		}
 		var insertErr error
 		for sequence := 2; sequence <= 1001; sequence++ {

@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"futo-notes-server/internal/blobs"
-	databasepkg "futo-notes-server/internal/db"
+	"futo-notes-server/internal/db"
 	"futo-notes-server/internal/events"
 	"futo-notes-server/internal/objects"
 	"uuid"
@@ -28,15 +28,15 @@ func TestObjectMutationLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dialect, err := databasepkg.ParseDialect(databaseURL)
+	dialect, err := db.ParseDialect(databaseURL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	database := databasepkg.Wrap(rawDatabase, dialect)
+	database := db.Wrap(rawDatabase, dialect)
 	defer database.Close()
 	ctx := context.Background()
 	publisher := events.PostgresPublisher{}
-	if _, err := databasepkg.Migrate(ctx, database); err != nil {
+	if _, err := db.Migrate(ctx, database); err != nil {
 		t.Fatal(err)
 	}
 	listener, err := pgx.Connect(ctx, databaseURL)
@@ -241,15 +241,15 @@ func TestDeleteRetainsBlobForReclamation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dialect, err := databasepkg.ParseDialect(databaseURL)
+	dialect, err := db.ParseDialect(databaseURL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	database := databasepkg.Wrap(rawDatabase, dialect)
+	database := db.Wrap(rawDatabase, dialect)
 	defer database.Close()
 	ctx := context.Background()
 	publisher := events.PostgresPublisher{}
-	if _, err := databasepkg.Migrate(ctx, database); err != nil {
+	if _, err := db.Migrate(ctx, database); err != nil {
 		t.Fatal(err)
 	}
 
