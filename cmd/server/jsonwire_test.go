@@ -29,10 +29,10 @@ var (
 	testCollection = collections.Collection{
 		ID:             "0195e2a1-0000-7000-8000-000000000002",
 		UserID:         testUser.ID,
-		CurrentVersion: "42",
+		CurrentVersion: 42,
 		CreatedAt:      wholeSecond,
 	}
-	testKey = &collections.KeyMaterial{
+	testKey = collections.KeyMaterial{
 		KeySalt:           "c2FsdA==",
 		KeyKDF:            json.RawMessage(`{ "name": "scrypt", "N": 16384 }`),
 		EncryptedVaultKey: "ZW5jcnlwdGVk",
@@ -46,9 +46,11 @@ func TestResponseWireFormat(t *testing.T) {
 		write func(w http.ResponseWriter)
 		want  string
 	}{{
-		name:  "capability",
-		write: func(w http.ResponseWriter) { handleCapability("password")(w, httptest.NewRequest("GET", "/", nil)) },
-		want:  `{"name":"futo-notes","version":"0.1.0","auth_mode":"password","signup":"closed","billing":false,"mutation_ids":{"supported":true,"required":false,"retention_days":30,"successful_create_outcomes":"durable"}}`,
+		name: "capability",
+		write: func(w http.ResponseWriter) {
+			handleCapability("password")(w, httptest.NewRequest(http.MethodGet, "/", nil))
+		},
+		want: `{"name":"futo-notes","version":"0.1.0","auth_mode":"password","signup":"closed","billing":false,"mutation_ids":{"supported":true,"required":false,"retention_days":30,"successful_create_outcomes":"durable"}}`,
 	}, {
 		name:  "health ok",
 		write: func(w http.ResponseWriter) { writeJSON(w, 200, healthStatus{Status: "ok", DB: "connected"}) },
@@ -81,24 +83,24 @@ func TestResponseWireFormat(t *testing.T) {
 		want: `{"token":"abababababababababababababababababababababababababababababababab","user":{"id":"0195e2a1-0000-7000-8000-000000000001","email":"local@futo-notes.local","name":"FUTO Notes"}}`,
 	}, {
 		name:  "collection",
-		write: func(w http.ResponseWriter) { writeJSON(w, 201, map[string]any{"collection": testCollection}) },
+		write: func(w http.ResponseWriter) { writeJSON(w, 201, collectionResponse{Collection: testCollection}) },
 		want:  `{"collection":{"id":"0195e2a1-0000-7000-8000-000000000002","user_id":"0195e2a1-0000-7000-8000-000000000001","current_version":"42","created_at":"2026-02-03T04:05:06Z"}}`,
 	}, {
 		name: "collections empty",
 		write: func(w http.ResponseWriter) {
-			writeJSON(w, 200, map[string]any{"collections": []collections.Collection{}})
+			writeJSON(w, 200, collectionsResponse{Collections: []collections.Collection{}})
 		},
 		want: `{"collections":[]}`,
 	}, {
 		name: "collections nil slice",
 		write: func(w http.ResponseWriter) {
-			writeJSON(w, 200, map[string]any{"collections": []collections.Collection(nil)})
+			writeJSON(w, 200, collectionsResponse{})
 		},
 		want: `{"collections":null}`,
 	}, {
 		name: "collections list",
 		write: func(w http.ResponseWriter) {
-			writeJSON(w, 200, map[string]any{"collections": []collections.Collection{testCollection}})
+			writeJSON(w, 200, collectionsResponse{Collections: []collections.Collection{testCollection}})
 		},
 		want: `{"collections":[{"id":"0195e2a1-0000-7000-8000-000000000002","user_id":"0195e2a1-0000-7000-8000-000000000001","current_version":"42","created_at":"2026-02-03T04:05:06Z"}]}`,
 	}, {
@@ -106,23 +108,23 @@ func TestResponseWireFormat(t *testing.T) {
 		// key_updated_at must render with nanoseconds because it is the
 		// rotation token the client echoes back.
 		name:  "key",
-		write: func(w http.ResponseWriter) { writeJSON(w, 200, map[string]any{"key": testKey}) },
+		write: func(w http.ResponseWriter) { writeJSON(w, 200, keyResponse{Key: &testKey}) },
 		want:  `{"key":{"key_salt":"c2FsdA==","key_kdf":{"name":"scrypt","N":16384},"encrypted_vault_key":"ZW5jcnlwdGVk","key_updated_at":"2026-02-03T04:05:06.123456789Z"}}`,
 	}, {
 		name:  "key unclaimed",
-		write: func(w http.ResponseWriter) { writeJSON(w, 200, map[string]any{"key": (*collections.KeyMaterial)(nil)}) },
+		write: func(w http.ResponseWriter) { writeJSON(w, 200, keyResponse{}) },
 		want:  `{"key":null}`,
 	}, {
 		name: "key conflict",
 		write: func(w http.ResponseWriter) {
-			writeJSON(w, 409, map[string]any{"error": "key conflict", "currentKey": testKey})
+			writeJSON(w, 409, keyConflictResponse{CurrentKey: testKey, Error: "key conflict"})
 		},
 		want: `{"currentKey":{"key_salt":"c2FsdA==","key_kdf":{"name":"scrypt","N":16384},"encrypted_vault_key":"ZW5jcnlwdGVk","key_updated_at":"2026-02-03T04:05:06.123456789Z"},"error":"key conflict"}`,
 	}, {
 		// v1 escapes <, > and & in strings and inside RawMessage.
 		name: "html escaping",
 		write: func(w http.ResponseWriter) {
-			writeJSON(w, 200, map[string]any{"key": &collections.KeyMaterial{
+			writeJSON(w, 200, keyResponse{Key: &collections.KeyMaterial{
 				KeySalt:           "a<b>c&d",
 				KeyKDF:            json.RawMessage(`{"note":"<x&y>"}`),
 				EncryptedVaultKey: "e",

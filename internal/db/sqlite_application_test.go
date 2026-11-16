@@ -69,14 +69,13 @@ func TestSQLiteApplicationLifecycle(t *testing.T) {
 	if len(storedCreatedAt) != len("2006-01-02T15:04:05.000Z") || storedCreatedAt[len(storedCreatedAt)-1] != 'Z' {
 		t.Fatalf("SQLite timestamp = %q, want fixed-width UTC milliseconds", storedCreatedAt)
 	}
-	key, _, err := collections.PutKey(ctx, database, user.ID, collection.ID, collections.KeyInput{
+	if _, err := collections.PutKey(ctx, database, user.ID, collection.ID, collections.KeyInput{
 		KeySalt: "salt", KeyKDF: []byte(`{"name":"scrypt"}`), EncryptedVaultKey: "wrapped",
-	}, nil)
-	if err != nil || key != collections.PutKeyOK {
-		t.Fatalf("PutKey() = %v, %v", key, err)
+	}, nil); err != nil {
+		t.Fatalf("PutKey() = %v", err)
 	}
-	if found, material, err := collections.GetKey(ctx, database, user.ID, collection.ID); err != nil || !found || material == nil || material.KeySalt != "salt" {
-		t.Fatalf("GetKey() = %t, %#v, %v", found, material, err)
+	if material, claimed, err := collections.GetKey(ctx, database, user.ID, collection.ID); err != nil || !claimed || material.KeySalt != "salt" {
+		t.Fatalf("GetKey() = %#v, %t, %v", material, claimed, err)
 	}
 
 	reconciledKey := user.ID + "/00000000-0000-7000-8000-000000000099"
@@ -142,8 +141,8 @@ func TestSQLiteApplicationLifecycle(t *testing.T) {
 	if result, err := jobs.ExpireMutationResults(ctx, database); err != nil {
 		t.Fatalf("ExpireMutationResults() = %#v, %v", result, err)
 	}
-	if removed, err := collections.Delete(ctx, database, user.ID, collection.ID); err != nil || !removed {
-		t.Fatalf("collections.Delete() = %t, %v", removed, err)
+	if err := collections.Delete(ctx, database, user.ID, collection.ID); err != nil {
+		t.Fatalf("collections.Delete() = %v", err)
 	}
 	var objectCount int
 	if err := database.QueryRowContext(ctx, `SELECT count(*) FROM objects WHERE collection_id = $1`, collection.ID).Scan(&objectCount); err != nil {
