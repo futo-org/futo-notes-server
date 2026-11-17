@@ -12,6 +12,10 @@ type Capability struct {
 	Signup      string      `json:"signup"`
 	Billing     bool        `json:"billing"`
 	MutationIDs MutationIDs `json:"mutation_ids"`
+	// BlobStorage is "regional" on the hosted API, whose blobs live in the
+	// regional storage services. Self-hosted omits it, so its document keeps
+	// its bytes.
+	BlobStorage string `json:"blob_storage,omitempty"`
 }
 
 // MutationIDs describes the server's Mutation-Id support in the capability

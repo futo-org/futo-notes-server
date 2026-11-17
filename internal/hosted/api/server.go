@@ -116,7 +116,9 @@ func (s *Server) router() chi.Router {
 		httputil.WriteError(w, r, http.StatusMethodNotAllowed, httputil.CodeMethodNotAllowed, "Method not allowed")
 	})
 
-	r.Get("/", syncapi.HandleCapability(syncapi.NewCapability(s.version, "oidc", "open")))
+	capability := syncapi.NewCapability(s.version, "oidc", "open")
+	capability.BlobStorage = "regional"
+	r.Get("/", syncapi.HandleCapability(capability))
 	r.Route("/api", func(api chi.Router) {
 		api.Get("/regions", s.handleRegions)
 		api.Get("/auth/oidc/start", s.handleOIDCStart)

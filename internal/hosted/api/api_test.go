@@ -60,7 +60,7 @@ func TestCapabilityAndRegions(t *testing.T) {
 	h := newHarness(t)
 	c := h.client()
 	res := c.expect(http.MethodGet, "/", nil, http.StatusOK)
-	want := `{"name":"futo-notes","version":"test","auth_mode":"oidc","signup":"open","billing":false,"mutation_ids":{"supported":true,"required":false,"retention_days":30,"successful_create_outcomes":"durable"}}` + "\n"
+	want := `{"name":"futo-notes","version":"test","auth_mode":"oidc","signup":"open","billing":false,"mutation_ids":{"supported":true,"required":false,"retention_days":30,"successful_create_outcomes":"durable"},"blob_storage":"regional"}` + "\n"
 	if res.body != want {
 		t.Fatalf("capability = %s, want %s", res.body, want)
 	}

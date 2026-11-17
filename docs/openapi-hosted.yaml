@@ -119,8 +119,10 @@ paths:
       security: []
       summary: Capability discovery
       description: |
-        Same document as self-hosted. The hosted values are fixed:
-        `auth_mode: "oidc"`, `signup: "open"`, `billing: false`.
+        Same document as self-hosted, plus `blob_storage`. The hosted values
+        are fixed: `auth_mode: "oidc"`, `signup: "open"`, `billing: false`,
+        `blob_storage: "regional"`. Choose the blob transport from
+        `blob_storage`, not from `auth_mode`.
       responses:
         "200":
           description: Server capabilities
@@ -1587,7 +1589,7 @@ components:
 
     Capability:
       type: object
-      required: [name, version, auth_mode, signup, billing, mutation_ids]
+      required: [name, version, auth_mode, signup, billing, mutation_ids, blob_storage]
       additionalProperties: false
       properties:
         name:
@@ -1608,6 +1610,13 @@ components:
           enum: [false]
         mutation_ids:
           $ref: "openapi.yaml#/components/schemas/Capability/properties/mutation_ids"
+        blob_storage:
+          type: string
+          enum: [regional]
+          description: |
+            Blobs are uploaded to and downloaded from the user's region's
+            storage service (`POST /api/storage/token`), never this API.
+            Absent on self-hosted, which serves blobs itself.
 
     Region:
       type: object
