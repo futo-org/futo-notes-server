@@ -1,0 +1,6 @@
+{{define "subject"}}Your FUTO Notes subscription has ended{{end -}}
+Your FUTO Notes subscription for {{.Email}} has ended. Your notes are safe and your devices can still read them, but they can no longer sync changes.
+
+Resubscribe before {{date .PurgeAt}} to keep your account. On that date, your account and everything stored in it will be permanently deleted.
+
+Your account: {{.DashboardURL}}

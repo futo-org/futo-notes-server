@@ -1,0 +1,6 @@
+{{define "subject"}}Your FUTO Notes account will be deleted on {{date .PurgeAt}}{{end -}}
+Your FUTO Notes subscription for {{.Email}} has ended, and on {{date .PurgeAt}} your account and everything stored in it will be permanently deleted.
+
+To keep your notes, resubscribe before then.
+
+Your account: {{.DashboardURL}}

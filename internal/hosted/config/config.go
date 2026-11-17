@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/mail"
 	"net/url"
 	"os"
 	"regexp"
@@ -21,6 +22,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"futo-notes-server/internal/hosted/account"
+	hostedmail "futo-notes-server/internal/hosted/mail"
 	"futo-notes-server/internal/hostedauth"
 	"futo-notes-server/internal/hostedenv"
 )
@@ -57,8 +59,11 @@ type Config struct {
 	// RefreshRotationKey derives each storage refresh token's successor
 	// (STORAGE_REFRESH_ROTATION_KEY).
 	RefreshRotationKey []byte
-	CookieSecure       bool
-	DevUI              bool
+	// Email is how the API sends email; without RESEND_API_KEY it logs and
+	// skips every send.
+	Email        hostedmail.Config
+	CookieSecure bool
+	DevUI        bool
 	// DrainDelay is how long readiness fails before the listener closes, and
 	// ShutdownTimeout how long in-flight requests may then take.
 	DrainDelay      time.Duration
@@ -147,6 +152,9 @@ func Load(getenv Getenv) (Config, error) {
 		return Config{}, fmt.Errorf("API_SIGNING_KEY: %w", err)
 	}
 	if cfg.RefreshRotationKey, err = rotationKey(getenv("STORAGE_REFRESH_ROTATION_KEY")); err != nil {
+		return Config{}, err
+	}
+	if cfg.Email, err = loadEmail(getenv); err != nil {
 		return Config{}, err
 	}
 	if cfg.CookieSecure, err = hostedenv.Bool(getenv, "COOKIE_SECURE", true); err != nil {
@@ -268,6 +276,35 @@ func loadOIDC(getenv Getenv) (OIDC, error) {
 		return OIDC{}, fmt.Errorf("OIDC_ISSUER must be an http(s) URL, got %q", o.Issuer)
 	}
 	return o, nil
+}
+
+// The email defaults. The From domain is a placeholder until the sending
+// domain is confirmed (docs/Hosted deployment.md).
+const (
+	defaultResendAPIURL = "https://api.resend.com"
+	defaultEmailFrom    = "FUTO Notes <noreply@notes.futo.cloud>"
+)
+
+func loadEmail(getenv Getenv) (hostedmail.Config, error) {
+	cfg := hostedmail.Config{
+		APIKey: strings.TrimSpace(getenv("RESEND_API_KEY")),
+		APIURL: getenv("RESEND_API_URL"),
+		From:   getenv("EMAIL_FROM_ADDRESS"),
+	}
+	if cfg.APIURL == "" {
+		cfg.APIURL = defaultResendAPIURL
+	}
+	if !hostedenv.IsHTTPURL(cfg.APIURL) {
+		return hostedmail.Config{}, fmt.Errorf("RESEND_API_URL must be an http(s) URL, got %q", cfg.APIURL)
+	}
+	cfg.APIURL = strings.TrimSuffix(cfg.APIURL, "/")
+	if cfg.From == "" {
+		cfg.From = defaultEmailFrom
+	}
+	if _, err := mail.ParseAddress(cfg.From); err != nil {
+		return hostedmail.Config{}, fmt.Errorf("EMAIL_FROM_ADDRESS must be an address such as %q: %w", defaultEmailFrom, err)
+	}
+	return cfg, nil
 }
 
 func publicURL(value string) (string, error) {
