@@ -3,3 +3,13 @@
 .env
 .env.local
 /blobs
+/dist/
+
+# Helm builds subchart snapshots on dependency build.
+charts/**/charts/
+charts/**/tmpcharts-*/
+charts/**/Chart.lock
+
+# Backstop so a real key can't be added by accident; dev fixtures are exempt.
+*.pem
+!/dev/hosted-keys/*.pem
