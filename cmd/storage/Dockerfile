@@ -9,10 +9,9 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd/storage/ ./cmd/storage/
-COPY internal/blobframe/ ./internal/blobframe/
-COPY internal/hostedauth/ ./internal/hostedauth/
-COPY internal/ids/ ./internal/ids/
-COPY internal/storagesvc/ ./internal/storagesvc/
+# All of internal/, like the API image: a hand-kept package list breaks the
+# build whenever an import moves.
+COPY internal/ ./internal/
 RUN CGO_ENABLED=0 go build -ldflags="-X main.version=${VERSION}" -o /storage ./cmd/storage
 
 FROM ${ALPINE_IMAGE}

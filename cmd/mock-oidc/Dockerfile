@@ -8,7 +8,9 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd/mock-oidc/ ./cmd/mock-oidc/
-COPY internal/mockoidc/ ./internal/mockoidc/
+# All of internal/, like the API image: a hand-kept package list breaks the
+# build whenever an import moves.
+COPY internal/ ./internal/
 RUN CGO_ENABLED=0 go build -o /mock-oidc ./cmd/mock-oidc
 
 FROM ${ALPINE_IMAGE}
