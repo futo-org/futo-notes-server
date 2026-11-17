@@ -4,8 +4,9 @@
 // checkout creates carries the same sub, which is how webhooks and refreshes
 // find the account. Nothing is matched by email.
 //
-// Checkout is embedded: the server opens a Checkout Session in
-// ui_mode=embedded_page and our own page mounts it with Stripe.js. Webhooks
+// Checkout is our own page: the server opens a Checkout Session in
+// ui_mode=elements, and the page mounts Stripe's Payment Element for the
+// card and confirms the session with Stripe.js. Webhooks
 // (customer.subscription.created, .updated, .deleted) only say which
 // subscription changed; its state is always fetched from Stripe.
 package stripe
@@ -25,6 +26,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"futo-notes-server/internal/hosted/billing"
@@ -78,9 +80,14 @@ type Provider struct {
 	cfg  Config
 	http *http.Client
 	now  func() time.Time
+
+	// plan caches the price once read: a Stripe price's amount, currency
+	// and recurrence can never change.
+	planMu sync.Mutex
+	plan   *billing.Plan
 }
 
-var _ billing.EmbeddedCheckout = (*Provider)(nil)
+var _ billing.CustomCheckout = (*Provider)(nil)
 
 // New returns the Stripe provider for cfg.
 func New(cfg Config) *Provider {
@@ -355,15 +362,46 @@ func (p *Provider) customer(ctx context.Context, c billing.Customer) (string, er
 	return id, nil
 }
 
-// CheckoutURL is not supported: Stripe checkout is embedded in our pages
+// CheckoutURL is not supported: Stripe checkout is a page of ours
 // (StartCheckout), never a page the browser is sent to.
 func (p *Provider) CheckoutURL(context.Context, billing.Customer) (string, error) {
 	return "", billing.ErrNotSupported
 }
 
-// StartCheckout opens an embedded Checkout Session selling the plan to c.
-// Stripe sends the browser to returnURL only for payment methods that must
-// leave the page; for the rest the page's onComplete runs.
+// Plan reads the plan's price.
+func (p *Provider) Plan(ctx context.Context) (billing.Plan, error) {
+	p.planMu.Lock()
+	defer p.planMu.Unlock()
+	if p.plan != nil {
+		return *p.plan, nil
+	}
+	var price struct {
+		UnitAmount *int64 `json:"unit_amount"`
+		Currency   string `json:"currency"`
+		Recurring  *struct {
+			Interval      string `json:"interval"`
+			IntervalCount int    `json:"interval_count"`
+		} `json:"recurring"`
+	}
+	if err := p.call(ctx, http.MethodGet, "/prices/"+url.PathEscape(p.cfg.PriceID), nil, "", &price); err != nil {
+		return billing.Plan{}, err
+	}
+	if price.UnitAmount == nil || price.Currency == "" || price.Recurring == nil || price.Recurring.IntervalCount < 1 {
+		return billing.Plan{}, fmt.Errorf("stripe api: price %s is not a fixed recurring price", p.cfg.PriceID)
+	}
+	p.plan = &billing.Plan{
+		Amount: *price.UnitAmount, Currency: price.Currency,
+		Interval: price.Recurring.Interval, IntervalCount: price.Recurring.IntervalCount,
+	}
+	return *p.plan, nil
+}
+
+// StartCheckout opens a Checkout Session for our page's Payment Element,
+// selling the plan to c. Everything the page must not offer is switched off
+// on the session itself, never left to the account's dashboard settings: it
+// charges the price's own currency (no Adaptive Pricing) and takes cards
+// only (no Link, and wallets are hidden by the page). Stripe sends the
+// browser to returnURL only after a payment that had to leave the page.
 func (p *Provider) StartCheckout(ctx context.Context, c billing.Customer, returnURL string) (billing.Checkout, error) {
 	customer, err := p.customer(ctx, c)
 	if err != nil {
@@ -371,15 +409,17 @@ func (p *Provider) StartCheckout(ctx context.Context, c billing.Customer, return
 	}
 	form := url.Values{
 		"mode":                          {"subscription"},
-		"ui_mode":                       {"embedded_page"},
+		"ui_mode":                       {"elements"},
 		"line_items[0][price]":          {p.cfg.PriceID},
 		"line_items[0][quantity]":       {"1"},
 		"customer":                      {customer},
 		"client_reference_id":           {c.Subject},
 		"metadata[" + metadataSub + "]": {c.Subject},
 		"subscription_data[metadata][" + metadataSub + "]": {c.Subject},
-		"return_url":             {returnURL},
-		"redirect_on_completion": {"if_required"},
+		"return_url":                      {returnURL},
+		"adaptive_pricing[enabled]":       {"false"},
+		"allowed_payment_method_types[0]": {"card"},
+		"wallet_options[link][display]":   {"never"},
 	}
 	var session struct {
 		ID           string `json:"id"`

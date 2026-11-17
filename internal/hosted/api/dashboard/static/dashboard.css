@@ -282,10 +282,103 @@ ul.facts li { margin: 0 0 6px; }
 .sign-in p { color: var(--color-muted); }
 .sign-in .button { min-width: 160px; }
 
-/* Stripe sizes the checkout frame itself; this only keeps the panel from
-   collapsing while it loads. */
-.checkout { min-height: 12rem; margin-top: 12px; border-radius: 12px; overflow: hidden; }
-.checkout [data-checkout-status]:empty { display: none; }
+/* Checkout: the plan, the account, Stripe's card fields (styled to match
+   through its Appearance API) and our own button. */
+.checkout { margin-top: 12px; }
+.card > .checkout:first-child { margin-top: 0; }
+.plan {
+  margin: 0 0 18px;
+  padding: 14px 16px;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: var(--color-bg);
+}
+.plan-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 16px; margin: 0 0 10px; }
+.plan-name { margin: 0; font-size: 16px; font-weight: 600; }
+.plan-price { margin: 0; }
+.plan-price strong { font-size: 20px; font-weight: 600; }
+.plan-perks { margin: 0; padding: 0; list-style: none; }
+.plan-perks li { position: relative; margin: 0 0 6px; padding-left: 24px; font-size: 14px; }
+.plan-perks li:last-child { margin-bottom: 0; }
+.plan-perks li::before {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 5px;
+  width: 10px;
+  height: 5px;
+  border-left: 2px solid var(--color-primary);
+  border-bottom: 2px solid var(--color-primary);
+  transform: rotate(-45deg);
+}
+.field { margin: 0 0 14px; }
+.field-label { display: block; margin: 0 2px 6px; color: var(--color-muted); font-size: 13px; }
+/* The account's email is fixed: shown like a field, but not one. */
+.field-value {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: rgba(var(--ink-rgb), 0.03);
+  overflow-wrap: anywhere;
+}
+.payment { min-height: 0; }
+.checkout-loading { margin: 0; font-size: 14px; }
+.checkout .alert { margin: 0 0 12px; }
+.checkout-submit { width: 100%; min-height: 46px; margin: 4px 0 0; font-size: 15px; font-weight: 600; }
+.checkout-submit:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
+.checkout-submit:disabled:hover { background: var(--color-accent); border-color: var(--color-accent); }
+.checkout-submit[aria-busy="true"] { opacity: 0.8; cursor: progress; }
+.checkout-submit[aria-busy="true"]::before {
+  content: "";
+  width: 14px;
+  height: 14px;
+  margin-right: 8px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .checkout-submit[aria-busy="true"]::before { animation-duration: 2.4s; }
+}
+.legal { margin: 12px 4px 0; color: var(--color-muted); font-size: 12px; line-height: 1.45; text-align: center; }
+.checkout-cancel { margin: 8px 0 0; text-align: center; font-size: 14px; }
+
+/* A completed checkout: the app's success row, a primary tick. */
+.success {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin: 0 0 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--color-primary);
+  border-radius: 12px;
+  background: rgba(var(--primary-rgb), 0.08);
+}
+.success p { margin: 0; }
+.success .success-title { margin-bottom: 2px; font-size: 16px; font-weight: 600; }
+.success-mark {
+  flex: none;
+  position: relative;
+  width: 24px;
+  height: 24px;
+  margin-top: 1px;
+  border-radius: 50%;
+  background: var(--color-accent);
+}
+.success-mark::after {
+  content: "";
+  position: absolute;
+  left: 7px;
+  top: 7px;
+  width: 9px;
+  height: 5px;
+  border-left: 2px solid var(--color-on-accent);
+  border-bottom: 2px solid var(--color-on-accent);
+  transform: rotate(-45deg);
+}
 
 /* Buttons: one filled action per card, the rest bordered (settings-visual.md). */
 button, .button {

@@ -159,16 +159,18 @@ type dashboardView struct {
 	Billing *billing.State
 	// WebPayments reports that a web provider is configured.
 	WebPayments bool
-	// EmbeddedCheckout reports that the web provider's checkout mounts in
-	// our pages, so Subscribe opens it in place.
-	EmbeddedCheckout bool
-	// CheckoutHost makes the page able to mount embedded checkout: it
+	// CustomCheckout reports that the web provider's checkout is a page
+	// of ours, so Subscribe opens it in place.
+	CustomCheckout bool
+	// CheckoutHost makes the page able to mount custom checkout: it
 	// loads the provider's script and is served checkoutCSP.
 	CheckoutHost *checkoutHost
-	// Checkout is the embedded checkout panel to show.
+	// Checkout is the custom checkout panel to show.
 	Checkout *checkoutPanel
 	// Notice confirms what just happened.
 	Notice string
+	// Subscribed confirms a checkout that entitled the account.
+	Subscribed string
 	// PendingURL is reloaded every few seconds while a payment clears.
 	PendingURL string
 }
@@ -209,6 +211,7 @@ func (s *Server) dashboardRoutes(r chi.Router) {
 		d.Get(checkoutLinkPath+"/{token}", s.handleCheckoutLinkPage)
 		d.Post(checkoutLinkPath+"/{token}/session", s.handleCheckoutLinkSession)
 		d.Get(checkoutLinkReturnPath, s.handleCheckoutLinkReturn)
+		d.Get(checkoutLinkCancelledPath, handleCheckoutLinkCancelled)
 		d.Group(func(signed chi.Router) {
 			signed.Use(s.dashboardSession)
 			signed.Get(dashboardPath, s.handleDashboardOverview)
@@ -340,7 +343,7 @@ func view(r *http.Request, nav string) dashboardView {
 }
 
 // renderDashboard answers 200 with page: the whole document, or for htmx
-// just the part inside #page. A page that hosts embedded checkout is served
+// just the part inside #page. A page that hosts custom checkout is served
 // checkoutCSP instead of the strict policy.
 func renderDashboard(w http.ResponseWriter, r *http.Request, page string, v dashboardView) {
 	if v.CheckoutHost != nil {
@@ -438,8 +441,8 @@ func (s *Server) renderOverview(w http.ResponseWriter, r *http.Request, a accoun
 		}
 		v.Billing = &state
 		v.WebPayments = s.providers.Web != nil
-		if s.embedded() != nil && !state.Entitled {
-			v.EmbeddedCheckout = true
+		if s.custom() != nil && !state.Entitled {
+			v.CustomCheckout = true
 			hostCheckout(&v)
 		}
 	}
@@ -449,12 +452,12 @@ func (s *Server) renderOverview(w http.ResponseWriter, r *http.Request, a accoun
 	renderDashboard(w, r, "overview", v)
 }
 
-// handleDashboardCheckout is the dashboard's POST /api/billing/checkout. An
-// embedded checkout's panel calls it for the session it mounts; otherwise it
+// handleDashboardCheckout is the dashboard's POST /api/billing/checkout. A
+// custom checkout's panel calls it for the session it mounts; otherwise it
 // sends the browser to the web checkout.
 func (s *Server) handleDashboardCheckout(w http.ResponseWriter, r *http.Request) {
 	userID := principalFrom(r).Session.User.ID
-	if s.embedded() != nil {
+	if s.custom() != nil {
 		s.writeCheckoutSession(w, r, userID, s.cfg.PublicURL+checkoutReturnPath+"?session_id="+checkoutSessionID)
 		return
 	}

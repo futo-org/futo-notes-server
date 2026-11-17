@@ -88,8 +88,9 @@ info:
     manual test page at `/dev` with its `/dev/jobs/*`, `/dev/email/*` and
     `/dev/billing/*` triggers and its `/dev/signup` status, and the mock web payment provider's checkout
     and portal pages under `/dev/billing`. With Stripe as the web provider,
-    the dashboard mounts its embedded checkout in place, and
-    `/billing/checkout/{token}` is the page an app's checkout link opens.
+    the dashboard opens its checkout (our page, with Stripe's card fields)
+    in place, and `/billing/checkout/{token}` is the page an app's checkout
+    link opens.
     Those are
     pages and test tooling, not API: clients must not
     depend on them, so they are listed in `x-internal-routes` rather than
@@ -108,6 +109,7 @@ x-internal-routes:
   - GET /dashboard/billing/return
   - GET /dashboard/billing/subscribe
   - GET /billing/checkout/return
+  - GET /billing/checkout/cancelled
   - GET /billing/checkout/{token}
   - POST /billing/checkout/{token}/session
   - GET /dev
@@ -995,8 +997,8 @@ paths:
       description: |
         The checkout page for this account. Open it in the system browser;
         it needs no dashboard session. With Stripe, the web provider, it is
-        `<origin>/billing/checkout/<token>`, a page of this server that
-        mounts Stripe's embedded checkout: the token names the account,
+        `<origin>/billing/checkout/<token>`, this server's checkout page,
+        whose card fields are Stripe's Payment Element: the token names the account,
         expires after 15 minutes, and opens one checkout. When the payment
         completes, the page confirms it with Stripe and the account is
         entitled at once; `GET /api/billing` then reports the subscription.

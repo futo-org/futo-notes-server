@@ -252,18 +252,23 @@ func TestCheckoutParameters(t *testing.T) {
 		t.Fatalf("StartCheckout = %+v, %v", checkout, err)
 	}
 	form := f.calls(http.MethodPost, "/v1/checkout/sessions")[0].Form
-	for key, want := range map[string]string{
-		"mode": "subscription", "ui_mode": "embedded_page", "line_items[0][price]": priceID, "line_items[0][quantity]": "1",
+	// Our page's Payment Element, charging the price as set (no Adaptive
+	// Pricing), by card alone (no Link): all per session, never left to
+	// the Stripe account's dashboard settings.
+	want := map[string]string{
+		"mode": "subscription", "ui_mode": "elements", "line_items[0][price]": priceID, "line_items[0][quantity]": "1",
 		"client_reference_id": subject, "metadata[sub]": subject, "subscription_data[metadata][sub]": subject,
-		"return_url": returnURL, "redirect_on_completion": "if_required",
-	} {
-		if got := form.Get(key); got != want {
-			t.Errorf("checkout %s = %q, want %q", key, got, want)
+		"return_url": returnURL, "adaptive_pricing[enabled]": "false", "allowed_payment_method_types[0]": "card",
+		"wallet_options[link][display]": "never",
+	}
+	for key, value := range want {
+		if got := form.Get(key); got != value {
+			t.Errorf("checkout %s = %q, want %q", key, got, value)
 		}
 	}
 	for key := range form {
-		if strings.Contains(key, "email") || key == "success_url" || key == "cancel_url" {
-			t.Errorf("checkout sends %s", key)
+		if _, ok := want[key]; !ok && key != "customer" {
+			t.Errorf("checkout sends %s=%q", key, form.Get(key))
 		}
 	}
 	if !strings.HasPrefix(form.Get("customer"), "cus_") {
@@ -273,7 +278,27 @@ func TestCheckoutParameters(t *testing.T) {
 		t.Errorf("PublishableKey = %q", p.PublishableKey())
 	}
 	if _, err := p.CheckoutURL(t.Context(), billing.Customer{Subject: subject}); !errors.Is(err, billing.ErrNotSupported) {
-		t.Errorf("CheckoutURL = %v, want ErrNotSupported (checkout is embedded)", err)
+		t.Errorf("CheckoutURL = %v, want ErrNotSupported (checkout is a page of ours)", err)
+	}
+}
+
+func TestPlanFromThePrice(t *testing.T) {
+	f := newFakeStripe(t)
+	p := f.provider()
+	for range 2 {
+		plan, err := p.Plan(t.Context())
+		if err != nil || plan != (billing.Plan{Amount: 700, Currency: "usd", Interval: "year", IntervalCount: 1}) {
+			t.Fatalf("Plan = %+v, %v", plan, err)
+		}
+	}
+	// A price never changes, so it is read once.
+	if n := len(f.calls(http.MethodGet, "/v1/prices/"+priceID)); n != 1 {
+		t.Fatalf("Plan read the price %d times", n)
+	}
+
+	broken := stripe.New(stripe.Config{SecretKey: secretKey, PriceID: "price_missing", APIURL: f.srv.URL})
+	if _, err := broken.Plan(t.Context()); err == nil {
+		t.Fatal("Plan of an unknown price succeeded")
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -20,12 +21,15 @@ import (
 	"futo-notes-server/internal/httputil"
 )
 
-// Embedded checkout: a provider whose checkout mounts inside our own pages
-// (billing.EmbeddedCheckout, i.e. Stripe). The dashboard opens it in place;
-// the apps get a one-time link to a page of ours that needs no dashboard
-// session. When the checkout completes, the server fetches the session from
-// the provider and applies its subscription at once, so entitlement never
-// waits for the webhook, which stays the source of every later change.
+// Custom checkout: a provider whose checkout is a page of ours
+// (billing.CustomCheckout, i.e. Stripe). Our page shows the plan and the
+// account, the provider's own fields (Stripe's Payment Element, in its
+// frames) take the card, and our button confirms. The dashboard opens it in
+// place; the apps get a one-time link to a page of ours that needs no
+// dashboard session. When the checkout completes, the server fetches the
+// session from the provider and applies its subscription at once, so
+// entitlement never waits for the webhook, which stays the source of every
+// later change.
 const (
 	subscribePath = dashboardPath + "/billing/subscribe"
 	// checkoutReturnPath is where a dashboard checkout returns.
@@ -36,6 +40,9 @@ const (
 	// checkoutLinkReturnPath is where a checkout opened from a link
 	// returns.
 	checkoutLinkReturnPath = checkoutLinkPath + "/return"
+	// checkoutLinkCancelledPath is where a checkout opened from a link is
+	// abandoned.
+	checkoutLinkCancelledPath = checkoutLinkPath + "/cancelled"
 	// checkoutSessionID is the provider's placeholder for the session id in
 	// a return URL.
 	checkoutSessionID = "{CHECKOUT_SESSION_ID}"
@@ -47,15 +54,16 @@ const (
 	checkoutCompletionTTL = 24 * time.Hour
 
 	// checkoutCSP is dashboardCSP widened by what Stripe documents for
-	// Stripe.js and Checkout (docs.stripe.com/security/guide, "Content
-	// Security Policy"), for the pages that host embedded checkout and only
-	// them. Stripe.js must load from js.stripe.com; checkout runs in a
-	// checkout.stripe.com frame; 3D Secure uses hooks.stripe.com.
+	// Stripe.js (docs.stripe.com/security/guide, "Content Security
+	// Policy"), for the pages that mount checkout and only them. Stripe.js
+	// must load from js.stripe.com and talks to api.stripe.com; the Payment
+	// Element runs in js.stripe.com frames; 3D Secure uses hooks.stripe.com.
+	// Nothing else is needed: Link, wallets and the Address Element are off.
 	checkoutCSP = "default-src 'none'; " +
-		"script-src 'self' https://js.stripe.com https://*.js.stripe.com https://checkout.stripe.com; " +
-		"style-src 'self'; img-src 'self' https://*.stripe.com; font-src 'self'; " +
-		"connect-src 'self' https://api.stripe.com https://checkout.stripe.com; " +
-		"frame-src https://js.stripe.com https://*.js.stripe.com https://hooks.stripe.com https://checkout.stripe.com; " +
+		"script-src 'self' https://js.stripe.com https://*.js.stripe.com; " +
+		"style-src 'self'; img-src 'self'; font-src 'self'; " +
+		"connect-src 'self' https://api.stripe.com; " +
+		"frame-src https://js.stripe.com https://*.js.stripe.com https://hooks.stripe.com; " +
 		"form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
 )
 
@@ -67,10 +75,10 @@ const (
 	purposeComplete = "complete"
 )
 
-// embedded returns the web provider when its checkout is embedded.
-func (s *Server) embedded() billing.EmbeddedCheckout {
-	e, _ := s.providers.Web.(billing.EmbeddedCheckout)
-	return e
+// custom returns the web provider when its checkout is a page of ours.
+func (s *Server) custom() billing.CustomCheckout {
+	c, _ := s.providers.Web.(billing.CustomCheckout)
+	return c
 }
 
 // checkoutClaims are what a checkout token says, under the server's HMAC.
@@ -163,7 +171,7 @@ type checkoutSession struct {
 	ReturnURL    string `json:"return_url"`
 }
 
-// writeCheckoutSession opens an embedded checkout for userID returning to
+// writeCheckoutSession opens a custom checkout for userID returning to
 // returnURL (with checkoutSessionID in it) and answers with its session.
 func (s *Server) writeCheckoutSession(w http.ResponseWriter, r *http.Request, userID, returnURL string) {
 	err := s.checkoutAllowed(r.Context(), userID)
@@ -171,7 +179,7 @@ func (s *Server) writeCheckoutSession(w http.ResponseWriter, r *http.Request, us
 	if err == nil {
 		var customer billing.Customer
 		if customer, err = s.billing.Customer(r.Context(), userID); err == nil {
-			checkout, err = s.embedded().StartCheckout(r.Context(), customer, returnURL)
+			checkout, err = s.custom().StartCheckout(r.Context(), customer, returnURL)
 		}
 	}
 	if err != nil {
@@ -204,7 +212,7 @@ func (s *Server) completeCheckout(ctx context.Context, userID, checkoutID string
 	if err != nil {
 		return 0, err
 	}
-	ev, err := s.embedded().CompleteCheckout(ctx, customer, checkoutID)
+	ev, err := s.custom().CompleteCheckout(ctx, customer, checkoutID)
 	if errors.Is(err, billing.ErrCheckoutIncomplete) {
 		return checkoutOpen, nil
 	}
@@ -224,7 +232,7 @@ func (s *Server) completeCheckout(ctx context.Context, userID, checkoutID string
 	return checkoutEntitled, nil
 }
 
-// checkoutPanel is the embedded checkout as a page shows it.
+// checkoutPanel is the custom checkout as a page shows it.
 type checkoutPanel struct {
 	PublishableKey string
 	// SessionURL is POSTed for the checkoutSession to mount.
@@ -232,41 +240,94 @@ type checkoutPanel struct {
 	// PageURL is a page that hosts checkout, for a panel that landed in
 	// a document without checkoutCSP.
 	PageURL string
+	Plan    checkoutPlan
+	// Email is the account's, which the subscription's receipts go to.
+	Email string
+	// CancelURL leaves checkout; CancelHX loads it with htmx.
+	CancelURL string
+	CancelHX  bool
 }
 
-// checkoutHost is what a page that hosts embedded checkout loads.
+// checkoutPlan is a billing.Plan as the page words it.
+type checkoutPlan struct {
+	// Price is the amount charged each period, "$5.00".
+	Price string
+	// Period follows a slash: "month", or "3 months".
+	Period string
+	// Renews says how often: "monthly", or "every 3 months".
+	Renews string
+}
+
+func planView(p billing.Plan) checkoutPlan {
+	major, minor := p.Amount/100, p.Amount%100
+	price := fmt.Sprintf("%d.%02d %s", major, minor, strings.ToUpper(p.Currency))
+	if p.Currency == "usd" {
+		price = fmt.Sprintf("$%d.%02d", major, minor)
+	}
+	if p.IntervalCount > 1 {
+		period := fmt.Sprintf("%d %ss", p.IntervalCount, p.Interval)
+		return checkoutPlan{Price: price, Period: period, Renews: "every " + period}
+	}
+	renews := map[string]string{"day": "daily", "week": "weekly", "month": "monthly", "year": "yearly"}[p.Interval]
+	return checkoutPlan{Price: price, Period: p.Interval, Renews: renews}
+}
+
+// newCheckoutPanel is the panel for an account with email, its plan read
+// from the provider.
+func (s *Server) newCheckoutPanel(ctx context.Context, email, sessionURL, pageURL string) (*checkoutPanel, error) {
+	plan, err := s.custom().Plan(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &checkoutPanel{
+		PublishableKey: s.custom().PublishableKey(), SessionURL: sessionURL, PageURL: pageURL,
+		Plan: planView(plan), Email: email,
+	}, nil
+}
+
+// checkoutHost is what a page that hosts custom checkout loads.
 type checkoutHost struct {
 	ScriptURL string
 }
 
-// hostCheckout makes v a page that can mount embedded checkout.
+// hostCheckout makes v a page that can mount custom checkout.
 func hostCheckout(v *dashboardView) {
 	v.CheckoutHost = &checkoutHost{ScriptURL: stripe.JSURL}
 }
 
 // handleDashboardSubscribe shows the overview with the checkout panel open.
 func (s *Server) handleDashboardSubscribe(w http.ResponseWriter, r *http.Request) {
-	if s.embedded() == nil {
+	if s.custom() == nil {
 		redirectDashboard(w, r, dashboardPath)
+		return
+	}
+	panel, err := s.dashboardPanel(r)
+	if err != nil {
+		dashboardServerError(w, r, "reading plan", err)
 		return
 	}
 	s.overviewWith(w, r, func(v *dashboardView) {
 		if !v.Billing.Entitled {
-			v.Checkout = s.dashboardPanel()
+			v.Checkout = panel
 		}
 	})
 }
 
-func (s *Server) dashboardPanel() *checkoutPanel {
-	return &checkoutPanel{PublishableKey: s.embedded().PublishableKey(), SessionURL: dashboardPath + "/billing/checkout", PageURL: subscribePath}
+func (s *Server) dashboardPanel(r *http.Request) (*checkoutPanel, error) {
+	panel, err := s.newCheckoutPanel(r.Context(), principalFrom(r).Session.User.Email, dashboardPath+"/billing/checkout", subscribePath)
+	if err != nil {
+		return nil, err
+	}
+	panel.CancelURL, panel.CancelHX = dashboardPath, true
+	return panel, nil
 }
 
 // handleDashboardCheckoutReturn is where a dashboard checkout ends: Stripe
-// sends the browser here after a payment that left the page, and the
-// panel's onComplete swaps it in otherwise. It confirms the checkout and
-// shows the overview.
+// sends the browser here after a payment that left the page, and the panel
+// swaps it in once its confirmation succeeds otherwise. It confirms the
+// checkout and shows the overview.
 func (s *Server) handleDashboardCheckoutReturn(w http.ResponseWriter, r *http.Request) {
-	if s.embedded() == nil {
+	if s.custom() == nil {
 		redirectDashboard(w, r, dashboardPath)
 		return
 	}
@@ -279,17 +340,24 @@ func (s *Server) handleDashboardCheckoutReturn(w http.ResponseWriter, r *http.Re
 		dashboardServerError(w, r, "confirming checkout", err)
 		return
 	}
+	var panel *checkoutPanel
+	if outcome == checkoutOpen {
+		if panel, err = s.dashboardPanel(r); err != nil {
+			dashboardServerError(w, r, "reading plan", err)
+			return
+		}
+	}
 	s.overviewWith(w, r, func(v *dashboardView) {
 		switch outcome {
 		case checkoutEntitled:
-			v.Notice = "Thank you. Your subscription is active."
+			v.Subscribed = "Thank you. Your subscription is active, and your devices can sync."
 		case checkoutProcessing:
 			v.Notice = "Your payment is processing. This page updates when it clears."
 			v.PendingURL = r.URL.RequestURI()
 		case checkoutOpen:
 			v.Notice = "The payment did not go through. You can try again."
 			if !v.Billing.Entitled {
-				v.Checkout = s.dashboardPanel()
+				v.Checkout = panel
 			}
 		}
 	})
@@ -312,11 +380,11 @@ func renderCheckoutPage(w http.ResponseWriter, r *http.Request, status int, v da
 
 const checkoutLinkExpiredMessage = "This checkout link has expired or was already used. Start again from the app."
 
-// handleCheckoutLinkPage serves an app's checkout link: our page that
-// mounts the embedded checkout, without a dashboard session. Opening it does
+// handleCheckoutLinkPage serves an app's checkout link: our checkout page,
+// without a dashboard session. Opening it does
 // not use the link; mounting the checkout does.
 func (s *Server) handleCheckoutLinkPage(w http.ResponseWriter, r *http.Request) {
-	if s.embedded() == nil {
+	if s.custom() == nil {
 		renderCheckoutPage(w, r, http.StatusNotFound, dashboardView{Error: "Paying on the web is not available."})
 		return
 	}
@@ -343,19 +411,34 @@ func (s *Server) handleCheckoutLinkPage(w http.ResponseWriter, r *http.Request) 
 		dashboardServerError(w, r, "checking subscription", err)
 		return
 	}
-	v := checkoutPageView()
-	v.Checkout = &checkoutPanel{
-		PublishableKey: s.embedded().PublishableKey(),
-		SessionURL:     checkoutLinkPath + "/" + token + "/session",
-		PageURL:        checkoutLinkPath + "/" + token,
+	customer, err := s.billing.Customer(r.Context(), claims.UserID)
+	if errors.Is(err, sql.ErrNoRows) {
+		renderCheckoutPage(w, r, http.StatusGone, dashboardView{Error: checkoutLinkExpiredMessage})
+		return
 	}
+	if err != nil {
+		dashboardServerError(w, r, "reading checkout account", err)
+		return
+	}
+	v := checkoutPageView()
+	v.Checkout, err = s.newCheckoutPanel(r.Context(), customer.Email, checkoutLinkPath+"/"+token+"/session", checkoutLinkPath+"/"+token)
+	if err != nil {
+		dashboardServerError(w, r, "reading plan", err)
+		return
+	}
+	v.Checkout.CancelURL = checkoutLinkCancelledPath
 	renderCheckoutPage(w, r, http.StatusOK, v)
+}
+
+// handleCheckoutLinkCancelled is where an app's checkout is abandoned.
+func handleCheckoutLinkCancelled(w http.ResponseWriter, r *http.Request) {
+	renderCheckoutPage(w, r, http.StatusOK, dashboardView{Notice: "No payment was taken. You can close this page and return to the app."})
 }
 
 // handleCheckoutLinkSession uses an app's checkout link to open its one
 // checkout, answering with the session the page mounts.
 func (s *Server) handleCheckoutLinkSession(w http.ResponseWriter, r *http.Request) {
-	if s.embedded() == nil {
+	if s.custom() == nil {
 		httputil.WriteError(w, r, http.StatusNotFound, httputil.CodeNotFound, "Not found")
 		return
 	}
@@ -389,7 +472,7 @@ func (s *Server) handleCheckoutLinkSession(w http.ResponseWriter, r *http.Reques
 // handleCheckoutLinkReturn is where a checkout opened from a link ends. Its
 // completion token names the account the checkout must belong to.
 func (s *Server) handleCheckoutLinkReturn(w http.ResponseWriter, r *http.Request) {
-	if s.embedded() == nil {
+	if s.custom() == nil {
 		renderCheckoutPage(w, r, http.StatusNotFound, dashboardView{Error: "Paying on the web is not available."})
 		return
 	}
@@ -413,7 +496,7 @@ func (s *Server) handleCheckoutLinkReturn(w http.ResponseWriter, r *http.Request
 	v := dashboardView{}
 	switch outcome {
 	case checkoutEntitled:
-		v.Notice = "Thank you. Your subscription is active. You can return to the app."
+		v.Subscribed = "Thank you. Your subscription is active. Return to the FUTO Notes app to start syncing; you can close this page."
 	case checkoutProcessing:
 		v.Notice = "Your payment is processing. The app unlocks sync once it clears."
 		v.PendingURL = r.URL.RequestURI()
