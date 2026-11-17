@@ -33,7 +33,7 @@ type Server struct {
 // Handler returns the service's HTTP handler: the readiness probe in front of
 // the router.
 func (s *Server) Handler() http.Handler {
-	return s.Readiness.Wrap(s.routes())
+	return s.Wrap(s.routes())
 }
 
 func (s *Server) routes() chi.Router {

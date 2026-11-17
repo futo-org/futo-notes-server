@@ -92,7 +92,7 @@ func (s *Server) Accounts() *account.Store { return s.accounts }
 
 // Handler returns the server's HTTP handler.
 func (s *Server) Handler() http.Handler {
-	return s.Readiness.Wrap(s.router())
+	return s.Wrap(s.router())
 }
 
 func (s *Server) router() chi.Router {
