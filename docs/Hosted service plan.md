@@ -105,8 +105,7 @@ The dashboard uses the session cookie and CSRF tokens on state-changing requests
   - the `users.email` unique constraint is dropped: hosted users are keyed by `sub`, and the
     identity provider owns email
   - session device fields (created, last used, user agent)
-  - `storage_refresh_tokens` (hash, `session_id` with cascade delete, created, last-used and
-    rotated times)
+  - `storage_refresh_tokens` (hash, `session_id` with cascade delete, created and rotated times)
   - OIDC logins in flight and one-time app codes
   - `hosted_job_runs` (below)
 - Migrations run in an `api migrate` subcommand, as a Helm **pre**-install/pre-upgrade hook Job.

@@ -25,7 +25,6 @@ create table storage_refresh_tokens (
     token_hash bytea primary key,
     session_id uuid not null references sessions (id) on delete cascade,
     created_at timestamptz not null default now(),
-    last_used_at timestamptz,
     rotated_at timestamptz
 );
 

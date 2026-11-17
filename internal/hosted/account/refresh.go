@@ -104,8 +104,7 @@ func (s *Store) ExchangeRefreshToken(ctx context.Context, token string) (Exchang
 	}
 	exchange.RegionID = region.String
 
-	if _, err := tx.ExecContext(ctx, `UPDATE storage_refresh_tokens SET rotated_at = $2, last_used_at = $2
-		WHERE token_hash = $1`, hash, now); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE storage_refresh_tokens SET rotated_at = $2 WHERE token_hash = $1`, hash, now); err != nil {
 		return Exchange{}, err
 	}
 	if exchange.RefreshToken, err = s.issueRefreshToken(ctx, tx, sessionID); err != nil {
