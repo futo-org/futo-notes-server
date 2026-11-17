@@ -13,7 +13,7 @@ Status:
 | S2 | B1, B2, D | Done, in the MR stacked on !34 (`feat/hosted-vault-unlock-test-stack`) |
 | S3 | A6 | Done, in the MR stacked on S2 (`feat/hosted-batch-and-mail`). Storage batch upload is `POST /blobs/batch-upload`, next to batch fetch at `POST /blobs/batch` |
 | S4 | E | Done, in the same MR: the sender, templates, stamps and dev stack. Billing (S5) calls it. |
-| S5 | C | S5a, the billing core, done on `feat/hosted-billing`: the model, gating, endpoints, webhooks, the mock web provider, the lapse and purge jobs, the emails, the dashboard and `/dev`. S5b, the App Store and Play adapters, in parallel. The real web adapter waits for the provider choice. |
+| S5 | C | Done, in the MR stacked on S3/S4 (`feat/hosted-billing`): the model, gating, endpoints, webhooks, the mock web provider, the lapse and purge jobs, the emails, the dashboard, `/dev`, and the App Store and Play providers. The real web adapter waits for the provider choice. |
 
 ## Decisions (2026-11-17)
 
