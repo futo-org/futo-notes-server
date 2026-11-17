@@ -29,43 +29,43 @@ const (
 type stagedBlobs struct{}
 
 // ReadCreate decodes {"blob_key", "size_bytes"}.
-func (stagedBlobs) ReadCreate(r *http.Request) (objects.Blob, error) {
+func (stagedBlobs) ReadCreate(r *http.Request) (syncapi.BlobClaim, error) {
 	var body struct {
 		BlobKey   *string `json:"blob_key"`
 		SizeBytes *int64  `json:"size_bytes"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		return objects.Blob{}, errors.New("invalid json")
+		return syncapi.BlobClaim{}, errors.New("invalid json")
 	}
 	if body.BlobKey == nil || !objects.ValidBlobKey(syncapi.SessionFrom(r).User.ID, *body.BlobKey) {
-		return objects.Blob{}, errors.New("invalid blob_key")
+		return syncapi.BlobClaim{}, errors.New("invalid blob_key")
 	}
 	if body.SizeBytes == nil || *body.SizeBytes < 0 {
-		return objects.Blob{}, errors.New("invalid size_bytes")
+		return syncapi.BlobClaim{}, errors.New("invalid size_bytes")
 	}
-	return objects.StagedBlob(*body.BlobKey), nil
+	return syncapi.ReadyClaim(objects.StagedBlob(*body.BlobKey)), nil
 }
 
 // ReadUpdate decodes {"version", "blob_key", "size_bytes"}.
-func (stagedBlobs) ReadUpdate(r *http.Request) (int64, objects.Blob, error) {
+func (stagedBlobs) ReadUpdate(r *http.Request) (int64, syncapi.BlobClaim, error) {
 	var body struct {
 		Version   *int64  `json:"version"`
 		BlobKey   *string `json:"blob_key"`
 		SizeBytes *int64  `json:"size_bytes"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		return 0, objects.Blob{}, errors.New("invalid json")
+		return 0, syncapi.BlobClaim{}, errors.New("invalid json")
 	}
 	if body.Version == nil || *body.Version < 1 {
-		return 0, objects.Blob{}, errors.New("invalid version")
+		return 0, syncapi.BlobClaim{}, errors.New("invalid version")
 	}
 	if body.BlobKey == nil || !objects.ValidBlobKey(syncapi.SessionFrom(r).User.ID, *body.BlobKey) {
-		return 0, objects.Blob{}, errors.New("invalid blob_key")
+		return 0, syncapi.BlobClaim{}, errors.New("invalid blob_key")
 	}
 	if body.SizeBytes == nil || *body.SizeBytes < 0 {
-		return 0, objects.Blob{}, errors.New("invalid size_bytes")
+		return 0, syncapi.BlobClaim{}, errors.New("invalid size_bytes")
 	}
-	return *body.Version, objects.StagedBlob(*body.BlobKey), nil
+	return *body.Version, syncapi.ReadyClaim(objects.StagedBlob(*body.BlobKey)), nil
 }
 
 func readBlobBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {

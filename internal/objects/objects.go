@@ -653,6 +653,48 @@ func (s *Store) ReserveCreate(ctx context.Context, m Mutation) (Reservation, err
 	return Reservation{Replay: &response, mutation: in.Mutation}, nil
 }
 
+// ReplayCreate returns the outcome a create Mutation ID already carries,
+// without claiming the ID: a completed create as the response with replayed
+// set, a failed one as its error. replayed is false when the ID carries no
+// result, so a create would run. A caller whose blob still needs checking
+// asks first, so a retry gets its original answer whatever the blob now is.
+func (s *Store) ReplayCreate(ctx context.Context, m Mutation) (response MutationResponse, replayed bool, err error) {
+	stored, found, err := s.storedResult(ctx, createIntent(m))
+	if err != nil || !found {
+		return MutationResponse{}, false, err
+	}
+	response, err = stored.mutationResponse(true)
+	return response, true, err
+}
+
+// ReplayUpdate is ReplayCreate for an update to version.
+func (s *Store) ReplayUpdate(ctx context.Context, m Mutation, version int64) (response MutationResponse, replayed bool, err error) {
+	stored, found, err := s.storedResult(ctx, intent{Mutation: m, kind: kindUpdate, requestedVersion: &version})
+	if err != nil || !found {
+		return MutationResponse{}, false, err
+	}
+	response, err = stored.mutationResponse(false)
+	return response, true, err
+}
+
+// storedResult returns the result the intent's Mutation ID carries, and
+// whether it carries one. A pending result counts: the request that claimed
+// the ID is still running.
+func (s *Store) storedResult(ctx context.Context, in intent) (storedResult, bool, error) {
+	if in.MutationID == "" {
+		return storedResult{}, false, nil
+	}
+	tx, stored, err := s.begin(ctx, in, false)
+	if err != nil {
+		return storedResult{}, false, err
+	}
+	if tx != nil {
+		tx.Discard()
+		return storedResult{}, false, nil
+	}
+	return *stored, true, nil
+}
+
 // Create records a new object for blob.
 func (s *Store) Create(ctx context.Context, m Mutation, blob Blob) (MutationResponse, error) {
 	reservation, err := s.ReserveCreate(ctx, m)

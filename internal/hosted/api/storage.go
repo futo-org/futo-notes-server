@@ -102,31 +102,32 @@ type receiptBlobs struct {
 	metrics  *Metrics
 }
 
-// ReadCreate decodes {"receipt": "<jwt>"}.
-func (b receiptBlobs) ReadCreate(r *http.Request) (objects.Blob, error) {
+// ReadCreate decodes {"receipt": "<jwt>"}. The receipt is verified only if
+// the create runs, not when it replays a stored result.
+func (b receiptBlobs) ReadCreate(r *http.Request) (syncapi.BlobClaim, error) {
 	var body struct {
 		Receipt *string `json:"receipt"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		return objects.Blob{}, errors.New("invalid json")
+		return syncapi.BlobClaim{}, errors.New("invalid json")
 	}
-	return b.verify(r, body.Receipt)
+	return syncapi.DeferredClaim(func() (objects.Blob, error) { return b.verify(r, body.Receipt) }), nil
 }
 
-// ReadUpdate decodes {"version": n, "receipt": "<jwt>"}.
-func (b receiptBlobs) ReadUpdate(r *http.Request) (int64, objects.Blob, error) {
+// ReadUpdate decodes {"version": n, "receipt": "<jwt>"}. The receipt is
+// verified only if the update runs, not when it replays a stored result.
+func (b receiptBlobs) ReadUpdate(r *http.Request) (int64, syncapi.BlobClaim, error) {
 	var body struct {
 		Version *int64  `json:"version"`
 		Receipt *string `json:"receipt"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		return 0, objects.Blob{}, errors.New("invalid json")
+		return 0, syncapi.BlobClaim{}, errors.New("invalid json")
 	}
 	if body.Version == nil || *body.Version < 1 {
-		return 0, objects.Blob{}, errors.New("invalid version")
+		return 0, syncapi.BlobClaim{}, errors.New("invalid version")
 	}
-	blob, err := b.verify(r, body.Receipt)
-	return *body.Version, blob, err
+	return *body.Version, syncapi.DeferredClaim(func() (objects.Blob, error) { return b.verify(r, body.Receipt) }), nil
 }
 
 var errInvalidReceipt = errors.New("invalid receipt")

@@ -18,8 +18,34 @@ const maxPullLimit = 1000
 // a storage receipt on the hosted API. The text of a returned error is the
 // 400 message. Readers find the caller with SessionFrom.
 type BlobReader interface {
-	ReadCreate(r *http.Request) (objects.Blob, error)
-	ReadUpdate(r *http.Request) (version int64, blob objects.Blob, err error)
+	ReadCreate(r *http.Request) (BlobClaim, error)
+	ReadUpdate(r *http.Request) (version int64, claim BlobClaim, err error)
+}
+
+// BlobClaim is the blob a decoded create or update names.
+type BlobClaim struct {
+	blob   objects.Blob
+	verify func() (objects.Blob, error)
+}
+
+// ReadyClaim is a claim the reader has already checked in full.
+func ReadyClaim(blob objects.Blob) BlobClaim { return BlobClaim{blob: blob} }
+
+// DeferredClaim is a claim verify checks, returning the blob or, as its
+// error, the 400 message. Handlers call verify only when the mutation will
+// run: a retry under a Mutation-Id that already carries a result is answered
+// with that result whatever the claim now says, so a receipt that expired
+// since the first attempt cannot turn a replay into a 400.
+func DeferredClaim(verify func() (objects.Blob, error)) BlobClaim {
+	return BlobClaim{verify: verify}
+}
+
+// resolve returns the claim's blob, verifying a deferred claim.
+func (c BlobClaim) resolve() (objects.Blob, error) {
+	if c.verify == nil {
+		return c.blob, nil
+	}
+	return c.verify()
 }
 
 // MutationID returns the request's Mutation-Id header, "" when absent, and
@@ -160,12 +186,28 @@ func HandleCreateObject(database *db.DB, publisher events.Publisher, blobs BlobR
 			WriteError(w, http.StatusBadRequest, "invalid Mutation-Id")
 			return
 		}
-		blob, err := blobs.ReadCreate(r)
+		claim, err := blobs.ReadCreate(r)
 		if err != nil {
 			WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		m := objects.Mutation{UserID: SessionFrom(r).User.ID, CollectionID: r.PathValue("id"), MutationID: mID}
+		if claim.verify != nil {
+			response, replayed, err := store.ReplayCreate(r.Context(), m)
+			if err != nil {
+				WriteObjectError(w, r, "creating object", err)
+				return
+			}
+			if replayed {
+				WriteJSON(w, http.StatusCreated, response)
+				return
+			}
+		}
+		blob, err := claim.resolve()
+		if err != nil {
+			WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		response, err := store.Create(r.Context(), m, blob)
 		if err != nil {
 			WriteObjectError(w, r, "creating object", err)
@@ -185,12 +227,28 @@ func HandleUpdateObject(database *db.DB, publisher events.Publisher, blobs BlobR
 			WriteError(w, http.StatusBadRequest, "invalid Mutation-Id")
 			return
 		}
-		version, blob, err := blobs.ReadUpdate(r)
+		version, claim, err := blobs.ReadUpdate(r)
 		if err != nil {
 			WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		m := objects.Mutation{UserID: SessionFrom(r).User.ID, CollectionID: r.PathValue("id"), ObjectID: r.PathValue("objectId"), MutationID: mID}
+		if claim.verify != nil {
+			response, replayed, err := store.ReplayUpdate(r.Context(), m, version)
+			if err != nil {
+				WriteObjectError(w, r, "updating object", err)
+				return
+			}
+			if replayed {
+				WriteJSON(w, http.StatusOK, response)
+				return
+			}
+		}
+		blob, err := claim.resolve()
+		if err != nil {
+			WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		response, err := store.Update(r.Context(), m, blob, version)
 		if err != nil {
 			WriteObjectError(w, r, "updating object", err)
