@@ -7,26 +7,29 @@ import (
 	"time"
 	"uuid"
 
+	"futo-notes-server/internal/blobframe"
 	"futo-notes-server/internal/hostedauth"
 )
 
 type endpoint struct {
 	method, path, body string
+	contentType        string
 }
 
 func blobEndpoints() []endpoint {
 	return []endpoint{
-		{http.MethodPost, "/blobs", "x"},
-		{http.MethodPost, "/blobs/batch", `{"keys":["k"]}`},
-		{http.MethodGet, "/blobs/" + userA + "/" + uuid.NewV7().String(), ""},
+		{http.MethodPost, "/blobs", "x", ""},
+		{http.MethodPost, "/blobs/batch", `{"keys":["k"]}`, ""},
+		{http.MethodPost, "/blobs/batch", string(blobframe.AppendUpload(nil, "f", []byte("x"))), "application/octet-stream"},
+		{http.MethodGet, "/blobs/" + userA + "/" + uuid.NewV7().String(), "", ""},
 	}
 }
 
 func adminEndpoints() []endpoint {
 	return []endpoint{
-		{http.MethodDelete, "/internal/blobs", `{"keys":["` + userA + "/" + uuid.NewV7().String() + `"]}`},
-		{http.MethodGet, "/internal/blobs", ""},
-		{http.MethodDelete, "/internal/users/" + userA, ""},
+		{http.MethodDelete, "/internal/blobs", `{"keys":["` + userA + "/" + uuid.NewV7().String() + `"]}`, ""},
+		{http.MethodGet, "/internal/blobs", "", ""},
+		{http.MethodDelete, "/internal/users/" + userA, "", ""},
 	}
 }
 
@@ -35,6 +38,9 @@ func (e *env) call(ep endpoint, authorization string) response {
 	header := map[string]string{}
 	if authorization != "" {
 		header["Authorization"] = authorization
+	}
+	if ep.contentType != "" {
+		header["Content-Type"] = ep.contentType
 	}
 	return e.do(ep.method, ep.path, "", strings.NewReader(ep.body), header)
 }

@@ -30,6 +30,8 @@ type memStorage struct {
 	listErr error
 	// discardPuts stores uploads as synthetic objects of their size.
 	discardPuts bool
+	// putFailBody fails every PutObject whose body is this, when set.
+	putFailBody string
 }
 
 // memObject holds its bytes, or only a size when synthetic, in which case
@@ -95,6 +97,9 @@ func (m *memStorage) PutObject(_ context.Context, key string, body io.Reader, si
 		obj.data = make([]byte, size)
 		if _, err := io.ReadFull(body, obj.data); err != nil {
 			return fmt.Errorf("%w: %w", storage.ErrBody, err)
+		}
+		if m.putFailBody != "" && string(obj.data) == m.putFailBody {
+			return errors.New("s3 down")
 		}
 	}
 	m.mu.Lock()
