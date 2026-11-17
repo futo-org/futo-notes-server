@@ -7,6 +7,13 @@
 // Two ways to get a code: GET /authorize shows a small HTML form for manual
 // browser use, and GET /test/authorize issues a code for the given sub with no
 // UI, for tests and scripts. Never expose it beyond local development.
+//
+// Like Zitadel it remembers when each subject last authenticated, its SSO
+// session, and puts that in the ID token's auth_time. Submitting the form
+// always authenticates afresh. /test/authorize reuses the remembered time,
+// unless the request's max_age says it is too old (max_age=0 always
+// re-authenticates); its auth_time parameter (Unix seconds) overrides the
+// claim, to play a provider that ignores max_age.
 package mockoidc
 
 import (
@@ -20,6 +27,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -64,6 +72,8 @@ type Provider struct {
 	mu     sync.Mutex
 	codes  map[string]authCode
 	tokens map[string]accessToken
+	// authTimes is when each subject last authenticated.
+	authTimes map[string]time.Time
 }
 
 type authCode struct {
@@ -105,6 +115,7 @@ func New(cfg Config) (*Provider, error) {
 		keyID:      randomString(8),
 		codes:      map[string]authCode{},
 		tokens:     map[string]accessToken{},
+		authTimes:  map[string]time.Time{},
 	}, nil
 }
 
@@ -146,6 +157,9 @@ type authRequest struct {
 	nonce         string
 	codeChallenge string
 	scopes        []string
+	// maxAge is the oldest authentication the client accepts; nil when it
+	// set no max_age.
+	maxAge *time.Duration
 }
 
 func (p *Provider) parseAuthRequest(q url.Values) (authRequest, error) {
@@ -170,13 +184,21 @@ func (p *Provider) parseAuthRequest(q url.Values) (authRequest, error) {
 	if decoded, err := base64.RawURLEncoding.DecodeString(challenge); err != nil || len(decoded) != sha256.Size {
 		return authRequest{}, errors.New("code_challenge must be a base64url SHA-256 digest")
 	}
-	return authRequest{
+	req := authRequest{
 		redirectURI:   redirectURI,
 		state:         q.Get("state"),
 		nonce:         q.Get("nonce"),
 		codeChallenge: challenge,
 		scopes:        scopes,
-	}, nil
+	}
+	if value := q.Get("max_age"); value != "" {
+		seconds, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || seconds < 0 {
+			return authRequest{}, fmt.Errorf("max_age must be a non-negative integer, got %q", value)
+		}
+		req.maxAge = new(time.Duration(seconds) * time.Second)
+	}
+	return req, nil
 }
 
 func identityFrom(q url.Values) (Identity, error) {
@@ -215,14 +237,16 @@ func (p *Provider) authorizeSubmit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	p.issueCode(w, r, r.PostForm)
+	p.issueCode(w, r, r.PostForm, true)
 }
 
 func (p *Provider) testAuthorize(w http.ResponseWriter, r *http.Request) {
-	p.issueCode(w, r, r.URL.Query())
+	p.issueCode(w, r, r.URL.Query(), false)
 }
 
-func (p *Provider) issueCode(w http.ResponseWriter, r *http.Request, params url.Values) {
+// issueCode redirects back with a code for params' subject. interactive is
+// a submitted login form, which authenticates the user afresh.
+func (p *Provider) issueCode(w http.ResponseWriter, r *http.Request, params url.Values, interactive bool) {
 	req, err := p.parseAuthRequest(params)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -233,16 +257,33 @@ func (p *Provider) issueCode(w http.ResponseWriter, r *http.Request, params url.
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	var forcedAuthTime *time.Time
+	if value := params.Get("auth_time"); value != "" && !interactive {
+		seconds, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("auth_time must be Unix seconds, got %q", value), http.StatusBadRequest)
+			return
+		}
+		forcedAuthTime = new(time.Unix(seconds, 0))
+	}
 	now := time.Now()
 	code := randomString(32)
 	p.mu.Lock()
+	authTime, known := p.authTimes[id.Subject]
+	if interactive || !known || (req.maxAge != nil && now.Sub(authTime) > *req.maxAge) {
+		authTime = now
+		p.authTimes[id.Subject] = now
+	}
+	if forcedAuthTime != nil {
+		authTime = *forcedAuthTime
+	}
 	p.codes[code] = authCode{
 		identity:      id,
 		redirectURI:   req.redirectURI,
 		codeChallenge: req.codeChallenge,
 		nonce:         req.nonce,
 		scopes:        req.scopes,
-		authTime:      now,
+		authTime:      authTime,
 		expiresAt:     now.Add(codeTTL),
 	}
 	p.mu.Unlock()

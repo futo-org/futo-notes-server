@@ -145,6 +145,9 @@ directly.
   | Local | `http://localhost:3005/api/auth/oidc/callback`, only when pointing local dev at a real Zitadel application instead of mock-oidc. That application needs Dev mode on, because the URI is plain `http`. |
 - No post-logout redirect URI: signing out ends only the Notes session.
 - Scopes requested: `openid profile email`.
+- Reauthentication: before deleting an account the API sends `max_age=0`
+  and requires the ID token's `auth_time` to be under 10 minutes old. Zitadel
+  honours `max_age` and sets `auth_time`, so there is nothing to configure.
 - Token settings: enable **User Info inside ID Token**. The API reads `email`,
   `name` and `preferred_username` from the ID token only and never calls
   userinfo.

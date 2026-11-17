@@ -94,6 +94,9 @@ const (
 	loginInvalidState  = "invalid_state"
 	loginProviderError = "provider_error"
 	loginDenied        = "denied"
+	// loginNotReauthenticated is a reauthentication the provider answered
+	// with a stale auth_time.
+	loginNotReauthenticated = "not_reauthenticated"
 )
 
 func (m *Metrics) login(ctx context.Context, app bool, outcome string) {

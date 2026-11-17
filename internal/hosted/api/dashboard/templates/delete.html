@@ -12,12 +12,17 @@
 <li>After {{.GraceDays}} days, your account and all of its collections, notes and attachments are permanently deleted.</li>
 <li>Until then you can sign in here and cancel the deletion. After that it cannot be undone.</li>
 </ul>
+{{if .Reauthenticate -}}
+<p>To delete your account, first sign in again to confirm it is you. You will come back here.</p>
+<p><a class="button" href="{{.ReauthPath}}">Sign in again</a></p>
+{{- else -}}
 <form class="stack" method="post" action="/dashboard/delete" hx-post="/dashboard/delete">
 {{template "csrf-field" .}}
 <label for="confirm">To confirm, type <kbd>{{.ConfirmPhrase}}</kbd></label>
 <input type="text" id="confirm" name="confirm" required autocomplete="off" autocapitalize="characters" spellcheck="false">
 <div><button type="submit" class="danger">Delete my account</button></div>
 </form>
+{{- end}}
 </section>
 {{- end}}
 {{- end}}

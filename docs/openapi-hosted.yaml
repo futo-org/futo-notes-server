@@ -39,9 +39,9 @@ info:
 
     - Operations of the sync contract (tag `sync`, plus `GET /`) keep its
       body, `{"error": "..."}`, and its two `401` bodies. Failures only the
-      hosted API has (a pending deletion, a rejected or spent receipt) add
-      the stable `code` the sync contract's `invalid_session` body already
-      carries: `{"code": "...", "error": "..."}`.
+      hosted API has (a pending deletion, a rejected or spent receipt, an
+      unknown key field) add the stable `code` the sync contract's
+      `invalid_session` body already carries: `{"code": "...", "error": "..."}`.
     - Operations only the hosted API serves answer
       `{"statusCode", "code", "message", "requestId"}`, with `requestId`
       equal to the `X-Request-Id` response header. Unknown paths (`404`) and
@@ -215,6 +215,20 @@ paths:
           description: Opaque app value, returned on the redirect back to the app.
           schema:
             type: string
+        - name: reauthenticate
+          in: query
+          required: false
+          description: |
+            `true` makes the provider ask for credentials again
+            (`max_age=0`), which `DELETE /api/account` needs within the
+            last 10 minutes. The callback refuses a sign-in whose
+            `auth_time` is older than that. A dashboard reauthentication
+            refreshes the browser's current session, if it has one for the
+            same user, and returns to `/dashboard/delete`; an app gets a
+            one-time code for a new session, as for any sign-in.
+          schema:
+            type: string
+            enum: ["true", "false"]
       responses:
         "302":
           description: To the identity provider's authorization endpoint
@@ -229,8 +243,9 @@ paths:
         "400":
           description: |
             `invalid_request`: `redirect_uri` is not allowed,
-            `code_challenge_method` is not `S256`, or `code_challenge` is not
-            an S256 challenge
+            `code_challenge_method` is not `S256`, `code_challenge` is not
+            an S256 challenge, or `reauthenticate` is neither `true` nor
+            `false`
           headers:
             X-Request-Id:
               $ref: "#/components/headers/RequestId"
@@ -284,9 +299,11 @@ paths:
         "302":
           description: |
             App sign-in: to the app's `redirect_uri` with `code` (one-time,
-            for `POST /api/auth/oidc/token`), the provider's `error`, or
-            `error=invalid_request` when the provider sent neither, plus the
-            app's `state`.
+            for `POST /api/auth/oidc/token`), the provider's `error`,
+            `error=invalid_request` when the provider sent neither, or
+            `error=reauthentication_required` when a `reauthenticate=true`
+            sign-in came back with a stale `auth_time`, plus the app's
+            `state`.
           headers:
             Location:
               $ref: "#/components/headers/Location"
@@ -296,13 +313,15 @@ paths:
           description: |
             Dashboard sign-in: to `/dashboard`, with the session cookie
             (`session`, `HttpOnly`, `SameSite=Lax`, 90 days, `Secure` unless
-            `COOKIE_SECURE=false`).
+            `COOKIE_SECURE=false`). A reauthentication goes to
+            `/dashboard/delete` instead, and sets the cookie only when the
+            browser had no session of that user to refresh.
           headers:
             Location:
               $ref: "#/components/headers/Location"
             Set-Cookie:
               required: true
-              description: "`session`, and `oidc_state` cleared"
+              description: "`oidc_state` cleared, and `session` unless a reauthentication refreshed the current one"
               schema:
                 type: string
         "400":
@@ -311,6 +330,20 @@ paths:
             already-used state, or a nonce mismatch. Or, for a dashboard
             sign-in, `sign_in_not_completed`: the provider's error, or a
             callback with neither `code` nor `error`.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+            Set-Cookie:
+              $ref: "#/components/headers/ClearsStateCookie"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostedError"
+        "403":
+          description: |
+            `reauthentication_required`: a dashboard `reauthenticate=true`
+            sign-in came back with an `auth_time` older than 10 minutes, so
+            the provider did not confirm a fresh sign-in
           headers:
             X-Request-Id:
               $ref: "#/components/headers/RequestId"
@@ -535,11 +568,25 @@ paths:
         Schedules the purge 30 days from now and signs out every other
         session. Requesting it again keeps the original schedule. Until the
         purge, `POST /api/account/restore` cancels it.
+
+        The session must have signed in within the last **10 minutes** (the
+        identity provider's `auth_time`). Otherwise sign in again with
+        `GET /api/auth/oidc/start?reauthenticate=true` and retry with the
+        new session.
       responses:
         "200":
           $ref: "#/components/responses/Account"
         "401":
           $ref: "#/components/responses/HostedUnauthorized"
+        "403":
+          description: "`reauthentication_required`: the session signed in more than 10 minutes ago"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostedError"
         "500":
           $ref: "#/components/responses/HostedServerError"
 
@@ -879,6 +926,11 @@ paths:
         `previous_key_updated_at` adopts and returns the authoritative
         material; a rotation needs the current `key_updated_at` and answers
         `409` with `currentKey` when it is stale.
+
+        Unlike self-hosted, a field this API does not store is refused
+        (`400` `invalid_request`) rather than dropped, so a client never
+        believes part of an envelope was saved when it was not. The body is
+        at most 64 KiB.
       requestBody:
         required: true
         content:
@@ -886,6 +938,7 @@ paths:
             schema:
               type: object
               required: [key_salt, key_kdf, encrypted_vault_key]
+              additionalProperties: false
               properties:
                 key_salt:
                   type: string
@@ -916,14 +969,18 @@ paths:
                     $ref: "openapi.yaml#/components/schemas/KeyMaterial"
         "400":
           description: |
-            `invalid json`, `key_salt is required`, `encrypted_vault_key is
-            required`, `key_kdf must be an object`,
+            As self-hosted: `invalid json`, `key_salt is required`,
+            `encrypted_vault_key is required`, `key_kdf must be an object`,
             `previous_key_updated_at must be non-empty when present`, or a
-            rotation with no key to rotate (`no existing key to rotate`)
+            rotation with no key to rotate (`no existing key to rotate`).
+            Hosted only, with code `invalid_request`: a field outside the
+            schema (`unknown field "<name>"`), or a body over 64 KiB.
           content:
             application/json:
               schema:
-                $ref: "openapi.yaml#/components/schemas/Error"
+                anyOf:
+                  - $ref: "openapi.yaml#/components/schemas/Error"
+                  - $ref: "#/components/schemas/InvalidRequestError"
         "401":
           $ref: "#/components/responses/SyncUnauthorized"
         "403":
@@ -1522,6 +1579,18 @@ components:
           type: string
           enum: [receipt already used]
 
+    InvalidRequestError:
+      type: object
+      required: [code, error]
+      additionalProperties: false
+      description: A hosted-only refusal of a malformed sync request.
+      properties:
+        code:
+          type: string
+          enum: [invalid_request]
+        error:
+          type: string
+
     ReceiptRejectedError:
       type: object
       required: [code, error]
@@ -1565,6 +1634,7 @@ components:
         | `region_required` | 409 | Choose a region first |
         | `region_already_chosen` | 409 | The region is fixed |
         | `purge_started` | 409 | The account can no longer be restored |
+        | `reauthentication_required` | 403 | Sign in again with `reauthenticate=true` first |
         | `not_found` | 404 | No such route or session |
         | `method_not_allowed` | 405 | The route does not take this method |
         | `internal_error` | 500 | An internal failure |
@@ -1583,6 +1653,7 @@ components:
         - region_required
         - region_already_chosen
         - purge_started
+        - reauthentication_required
         - not_found
         - method_not_allowed
         - internal_error

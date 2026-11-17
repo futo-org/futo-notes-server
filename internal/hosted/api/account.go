@@ -103,10 +103,16 @@ func (s *Server) handleChooseRegion(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleDeleteAccount serves DELETE /api/account: it schedules the account's
-// deletion and signs out every other device.
+// deletion and signs out every other device. The session must have signed in
+// within account.ReauthWindow.
 func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
-	p := principalFrom(r)
-	if err := s.accounts.RequestDeletion(r.Context(), p.Session.User.ID, p.Session.ID); err != nil {
+	err := s.accounts.ScheduleDeletion(r.Context(), principalFrom(r))
+	if errors.Is(err, account.ErrReauthenticationRequired) {
+		httputil.WriteError(w, r, http.StatusForbidden, codeReauthenticationRequired,
+			"Sign in again to delete the account: start a sign-in with reauthenticate=true")
+		return
+	}
+	if err != nil {
 		serverError(w, r, "requesting account deletion", err)
 		return
 	}

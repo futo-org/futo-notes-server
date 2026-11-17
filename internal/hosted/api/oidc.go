@@ -23,6 +23,7 @@ import (
 	"futo-notes-server/internal/hosted/account"
 	"futo-notes-server/internal/hosted/config"
 	"futo-notes-server/internal/httputil"
+	"futo-notes-server/internal/syncapi"
 )
 
 const (
@@ -95,13 +96,23 @@ func allowedAppRedirect(redirect string, schemes []string) bool {
 // handleOIDCStart begins a sign-in. Without redirect_uri it is a dashboard
 // sign-in, which ends with the session cookie. An app passes redirect_uri,
 // its own PKCE code_challenge (S256), and optionally a state to get back; it
-// ends with a one-time code at redirect_uri.
+// ends with a one-time code at redirect_uri. reauthenticate=true makes the
+// provider ask for credentials again (max_age=0), as deleting the account
+// needs a recent sign-in.
 func (s *Server) handleOIDCStart(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	login := account.Login{
 		State:        auth.GenerateToken(),
 		Nonce:        auth.GenerateToken(),
 		CodeVerifier: oauth2.GenerateVerifier(),
+	}
+	switch q.Get("reauthenticate") {
+	case "", "false":
+	case "true":
+		login.Reauthenticate = true
+	default:
+		badRequest(w, r, "reauthenticate must be true or false")
+		return
 	}
 	if redirect := q.Get("redirect_uri"); redirect != "" {
 		if !allowedAppRedirect(redirect, s.cfg.AppRedirectSchemes) {
@@ -138,8 +149,11 @@ func (s *Server) handleOIDCStart(w http.ResponseWriter, r *http.Request) {
 		Secure:   s.cfg.CookieSecure,
 		SameSite: http.SameSiteLaxMode,
 	})
-	http.Redirect(w, r, oauthConfig.AuthCodeURL(login.State, oidc.Nonce(login.Nonce),
-		oauth2.S256ChallengeOption(login.CodeVerifier)), http.StatusFound)
+	options := []oauth2.AuthCodeOption{oidc.Nonce(login.Nonce), oauth2.S256ChallengeOption(login.CodeVerifier)}
+	if login.Reauthenticate {
+		options = append(options, oauth2.SetAuthURLParam("max_age", "0"))
+	}
+	http.Redirect(w, r, oauthConfig.AuthCodeURL(login.State, options...), http.StatusFound)
 }
 
 // handleOIDCCallback completes a sign-in the identity provider redirected
@@ -197,6 +211,22 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteError(w, r, http.StatusBadGateway, codeProviderError, "Could not complete sign-in with the identity provider")
 		return
 	}
+	authenticatedAt := identity.AuthTime
+	if authenticatedAt.IsZero() {
+		authenticatedAt = time.Now()
+	}
+	// max_age=0 obliges the provider to authenticate the user now; a stale
+	// auth_time means it did not, and the sign-in proves nothing recent.
+	if login.Reauthenticate && (identity.AuthTime.IsZero() || time.Since(identity.AuthTime) > account.ReauthWindow) {
+		s.metrics.login(r.Context(), login.ForApp(), loginNotReauthenticated)
+		if login.ForApp() {
+			redirectApp(w, r, login, url.Values{"error": {codeReauthenticationRequired}})
+			return
+		}
+		httputil.WriteError(w, r, http.StatusForbidden, codeReauthenticationRequired,
+			"The identity provider did not confirm a fresh sign-in")
+		return
+	}
 	user, err := s.accounts.UpsertUser(r.Context(), identity)
 	if err != nil {
 		serverError(w, r, "upserting user", err)
@@ -204,7 +234,7 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if login.ForApp() {
-		code, err := s.accounts.CreateAppCode(r.Context(), user.ID, login.AppCodeChallenge)
+		code, err := s.accounts.CreateAppCode(r.Context(), user.ID, login.AppCodeChallenge, authenticatedAt)
 		if err != nil {
 			serverError(w, r, "creating app code", err)
 			return
@@ -213,7 +243,24 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		redirectApp(w, r, login, url.Values{"code": {code}})
 		return
 	}
-	token, err := s.accounts.CreateSession(r.Context(), user.ID, r.UserAgent())
+	if login.Reauthenticate {
+		// The dashboard reauthenticates to delete the account: refresh this
+		// browser's session rather than open a second one, and go back to
+		// the confirmation.
+		if cookie, err := r.Cookie(syncapi.SessionCookie); err == nil {
+			ok, err := s.accounts.Reauthenticate(r.Context(), cookie.Value, user.ID, authenticatedAt)
+			if err != nil {
+				serverError(w, r, "reauthenticating session", err)
+				return
+			}
+			if ok {
+				s.metrics.login(r.Context(), false, loginSuccess)
+				http.Redirect(w, r, deletePath, http.StatusSeeOther)
+				return
+			}
+		}
+	}
+	token, err := s.accounts.CreateSession(r.Context(), user.ID, r.UserAgent(), authenticatedAt)
 	if err != nil {
 		serverError(w, r, "creating session", err)
 		return
@@ -221,6 +268,10 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	s.metrics.login(r.Context(), false, loginSuccess)
 	s.metrics.issued(r.Context(), tokenSession)
 	s.setSessionCookie(w, token)
+	if login.Reauthenticate {
+		http.Redirect(w, r, deletePath, http.StatusSeeOther)
+		return
+	}
 	http.Redirect(w, r, dashboardPath, http.StatusSeeOther)
 }
 
@@ -252,9 +303,10 @@ func (s *Server) identify(ctx context.Context, code string, login account.Login)
 		return account.Identity{}, errNonceMismatch
 	}
 	var claims struct {
-		Email             string `json:"email"`
-		Name              string `json:"name"`
-		PreferredUsername string `json:"preferred_username"`
+		Email             string  `json:"email"`
+		Name              string  `json:"name"`
+		PreferredUsername string  `json:"preferred_username"`
+		AuthTime          float64 `json:"auth_time"`
 	}
 	if err := idToken.Claims(&claims); err != nil {
 		return account.Identity{}, fmt.Errorf("reading ID token claims: %w", err)
@@ -266,7 +318,11 @@ func (s *Server) identify(ctx context.Context, code string, login account.Login)
 	if name == "" {
 		name, _, _ = strings.Cut(claims.Email, "@")
 	}
-	return account.Identity{Subject: idToken.Subject, Email: claims.Email, Name: name}, nil
+	identity := account.Identity{Subject: idToken.Subject, Email: claims.Email, Name: name}
+	if claims.AuthTime > 0 {
+		identity.AuthTime = time.Unix(int64(claims.AuthTime), 0)
+	}
+	return identity, nil
 }
 
 // redirectApp sends the browser back to the app's redirect_uri with params

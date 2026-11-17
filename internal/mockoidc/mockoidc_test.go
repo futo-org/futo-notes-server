@@ -5,12 +5,15 @@ import (
 	"errors"
 	"html"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
@@ -188,6 +191,63 @@ func TestTestAuthorizeShortcut(t *testing.T) {
 	}
 }
 
+// authTimeOf runs /test/authorize for sub with extra parameters and returns
+// the auth_time of the ID token it leads to.
+func authTimeOf(t *testing.T, srv *httptest.Server, rp relyingParty, sub string, extra url.Values) int64 {
+	t.Helper()
+	pkce := oauth2.GenerateVerifier()
+	u, _ := url.Parse(rp.oauth.AuthCodeURL("s", oauth2.S256ChallengeOption(pkce)))
+	q := u.Query()
+	q.Set("sub", sub)
+	maps.Copy(q, extra)
+	resp, err := noRedirects.Get(srv.URL + "/test/authorize?" + q.Encode())
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := callbackQuery(t, resp).Get("code")
+	tok, err := rp.oauth.Exchange(context.Background(), code, oauth2.VerifierOption(pkce))
+	if err != nil {
+		t.Fatalf("exchange: %v", err)
+	}
+	idToken, err := rp.verifier.Verify(context.Background(), tok.Extra("id_token").(string))
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	var claims struct {
+		AuthTime int64 `json:"auth_time"`
+	}
+	if err := idToken.Claims(&claims); err != nil || claims.AuthTime == 0 {
+		t.Fatalf("auth_time claim = %d, %v", claims.AuthTime, err)
+	}
+	return claims.AuthTime
+}
+
+func TestAuthTimeAndMaxAge(t *testing.T) {
+	srv := mockoidctest.Start(t, testConfig())
+	rp := newRelyingParty(t, srv.URL)
+
+	// Playing a provider that ignores max_age: the token carries the forced
+	// auth_time.
+	stale := time.Now().Add(-time.Hour).Unix()
+	if got := authTimeOf(t, srv, rp, "user-1", url.Values{"auth_time": {strconv.FormatInt(stale, 10)}}); got != stale {
+		t.Fatalf("forced auth_time = %d, want %d", got, stale)
+	}
+	// Without max_age the SSO session's authentication is reused...
+	first := authTimeOf(t, srv, rp, "user-2", nil)
+	if got := authTimeOf(t, srv, rp, "user-2", nil); got != first {
+		t.Fatalf("auth_time without max_age = %d, want the session's %d", got, first)
+	}
+	// ...and kept within a max_age, while one it is too old for (0 here)
+	// authenticates again. auth_time has whole seconds, so wait one out.
+	time.Sleep(1100 * time.Millisecond)
+	if got := authTimeOf(t, srv, rp, "user-2", url.Values{"max_age": {"3600"}}); got != first {
+		t.Fatalf("auth_time within max_age = %d, want the session's %d", got, first)
+	}
+	if got := authTimeOf(t, srv, rp, "user-2", url.Values{"max_age": {"0"}}); got <= first || got < time.Now().Add(-5*time.Second).Unix() {
+		t.Fatalf("auth_time with max_age=0 = %d, want now (first was %d)", got, first)
+	}
+}
+
 func TestTokenEndpointRejects(t *testing.T) {
 	srv := mockoidctest.Start(t, testConfig())
 	rp := newRelyingParty(t, srv.URL)
@@ -256,6 +316,8 @@ func TestAuthorizeRejects(t *testing.T) {
 		"unregistered redirect": func(q url.Values) { q.Set("redirect_uri", "http://evil.test/cb") },
 		"no openid scope":       func(q url.Values) { q.Set("scope", "email") },
 		"implicit flow":         func(q url.Values) { q.Set("response_type", "token") },
+		"negative max_age":      func(q url.Values) { q.Set("max_age", "-1") },
+		"non-numeric max_age":   func(q url.Values) { q.Set("max_age", "soon") },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {

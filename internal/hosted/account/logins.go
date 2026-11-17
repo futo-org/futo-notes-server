@@ -43,6 +43,7 @@ var (
 // CodeVerifier belong to the API's own request to the provider. The App
 // fields are set when an app, not the dashboard, started the login: where to
 // send it back, the state to echo, and the PKCE challenge it must answer.
+// Reauthenticate asks the provider for a fresh sign-in (max_age=0).
 type Login struct {
 	State            string
 	Nonce            string
@@ -50,6 +51,7 @@ type Login struct {
 	AppRedirectURI   string
 	AppState         string
 	AppCodeChallenge string
+	Reauthenticate   bool
 }
 
 // ForApp reports whether an app started the login.
@@ -58,9 +60,9 @@ func (l Login) ForApp() bool { return l.AppRedirectURI != "" }
 // SaveLogin records a login in flight for LoginTTL.
 func (s *Store) SaveLogin(ctx context.Context, l Login) error {
 	_, err := s.database.ExecContext(ctx, `INSERT INTO oidc_logins
-		(state_hash, nonce, code_verifier, app_redirect_uri, app_state, app_code_challenge, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)`, auth.HashToken(l.State), l.Nonce, l.CodeVerifier,
-		nullable(l.AppRedirectURI), nullable(l.AppState), nullable(l.AppCodeChallenge), s.now().Add(LoginTTL))
+		(state_hash, nonce, code_verifier, app_redirect_uri, app_state, app_code_challenge, reauthenticate, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, auth.HashToken(l.State), l.Nonce, l.CodeVerifier,
+		nullable(l.AppRedirectURI), nullable(l.AppState), nullable(l.AppCodeChallenge), l.Reauthenticate, s.now().Add(LoginTTL))
 	return err
 }
 
@@ -72,8 +74,8 @@ func (s *Store) TakeLogin(ctx context.Context, state string) (Login, error) {
 	var redirectURI, appState, challenge sql.NullString
 	var expiresAt time.Time
 	err := s.database.QueryRowContext(ctx, `DELETE FROM oidc_logins WHERE state_hash = $1
-		RETURNING nonce, code_verifier, app_redirect_uri, app_state, app_code_challenge, expires_at`, auth.HashToken(state)).
-		Scan(&l.Nonce, &l.CodeVerifier, &redirectURI, &appState, &challenge, &expiresAt)
+		RETURNING nonce, code_verifier, app_redirect_uri, app_state, app_code_challenge, reauthenticate, expires_at`, auth.HashToken(state)).
+		Scan(&l.Nonce, &l.CodeVerifier, &redirectURI, &appState, &challenge, &l.Reauthenticate, &expiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Login{}, ErrUnknownLogin
 	}
@@ -88,11 +90,12 @@ func (s *Store) TakeLogin(ctx context.Context, state string) (Login, error) {
 }
 
 // CreateAppCode issues the one-time code an app swaps for a session of
-// userID, bound to the app's PKCE codeChallenge. Only its hash is stored.
-func (s *Store) CreateAppCode(ctx context.Context, userID, codeChallenge string) (string, error) {
+// userID, who signed in at authenticatedAt, bound to the app's PKCE
+// codeChallenge. Only its hash is stored.
+func (s *Store) CreateAppCode(ctx context.Context, userID, codeChallenge string, authenticatedAt time.Time) (string, error) {
 	code := auth.GenerateToken()
-	_, err := s.database.ExecContext(ctx, `INSERT INTO oidc_app_codes (code_hash, user_id, code_challenge, expires_at)
-		VALUES ($1, $2, $3, $4)`, auth.HashToken(code), userID, codeChallenge, s.now().Add(appCodeTTL))
+	_, err := s.database.ExecContext(ctx, `INSERT INTO oidc_app_codes (code_hash, user_id, code_challenge, authenticated_at, expires_at)
+		VALUES ($1, $2, $3, $4, $5)`, auth.HashToken(code), userID, codeChallenge, authenticatedAt, s.now().Add(appCodeTTL))
 	if err != nil {
 		return "", err
 	}
@@ -117,10 +120,10 @@ func (s *Store) RedeemAppCode(ctx context.Context, code, codeVerifier string, de
 	defer tx.Discard()
 	var session AppSession
 	var challenge string
-	var expiresAt time.Time
+	var authenticatedAt, expiresAt time.Time
 	err = tx.QueryRowContext(ctx, `DELETE FROM oidc_app_codes WHERE code_hash = $1
-		RETURNING user_id, code_challenge, expires_at`, auth.HashToken(code)).
-		Scan(&session.User.ID, &challenge, &expiresAt)
+		RETURNING user_id, code_challenge, authenticated_at, expires_at`, auth.HashToken(code)).
+		Scan(&session.User.ID, &challenge, &authenticatedAt, &expiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return AppSession{}, ErrInvalidCode
 	}
@@ -145,7 +148,7 @@ func (s *Store) RedeemAppCode(ctx context.Context, code, codeVerifier string, de
 		return AppSession{}, err
 	}
 	var sessionID string
-	if session.Token, sessionID, err = s.createSession(ctx, tx, session.User.ID, device); err != nil {
+	if session.Token, sessionID, err = s.createSession(ctx, tx, session.User.ID, device, authenticatedAt); err != nil {
 		return AppSession{}, err
 	}
 	if session.RefreshToken, err = s.issueRefreshToken(ctx, tx, sessionID); err != nil {

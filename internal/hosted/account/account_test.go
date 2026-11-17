@@ -53,7 +53,7 @@ var challenge = oauth2.S256ChallengeFromVerifier(verifier)
 // appSession signs a user in the way an app does and returns its session.
 func appSession(t *testing.T, store *account.Store, user auth.User) account.AppSession {
 	t.Helper()
-	code, err := store.CreateAppCode(t.Context(), user.ID, challenge)
+	code, err := store.CreateAppCode(t.Context(), user.ID, challenge, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +100,7 @@ func TestSessionsSlideAndExpire(t *testing.T) {
 	ctx := t.Context()
 	user := newUser(t, database, store)
 
-	token, err := store.CreateSession(ctx, user.ID, "browser/1.0")
+	token, err := store.CreateSession(ctx, user.ID, "browser/1.0", c.get())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -353,7 +353,7 @@ func TestAppCodesAreSingleUseAndBoundToTheChallenge(t *testing.T) {
 	ctx := t.Context()
 	user := newUser(t, database, store)
 
-	code, err := store.CreateAppCode(ctx, user.ID, challenge)
+	code, err := store.CreateAppCode(ctx, user.ID, challenge, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -364,7 +364,7 @@ func TestAppCodesAreSingleUseAndBoundToTheChallenge(t *testing.T) {
 		t.Fatalf("code after a wrong verifier = %v, want it spent", err)
 	}
 
-	code, err = store.CreateAppCode(ctx, user.ID, challenge)
+	code, err = store.CreateAppCode(ctx, user.ID, challenge, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -379,7 +379,7 @@ func TestAppCodesAreSingleUseAndBoundToTheChallenge(t *testing.T) {
 		t.Fatalf("replayed code = %v, want ErrInvalidCode", err)
 	}
 
-	code, err = store.CreateAppCode(ctx, user.ID, challenge)
+	code, err = store.CreateAppCode(ctx, user.ID, challenge, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -396,7 +396,7 @@ func TestLoginsAreTakenOnceAndExpire(t *testing.T) {
 	ctx := t.Context()
 
 	login := account.Login{State: auth.GenerateToken(), Nonce: "n", CodeVerifier: "v",
-		AppRedirectURI: "http://127.0.0.1:1234/cb", AppState: "s", AppCodeChallenge: challenge}
+		AppRedirectURI: "http://127.0.0.1:1234/cb", AppState: "s", AppCodeChallenge: challenge, Reauthenticate: true}
 	if err := store.SaveLogin(ctx, login); err != nil {
 		t.Fatal(err)
 	}
@@ -437,11 +437,11 @@ func TestRegionIsChosenOnceAndDeletionCanBeRestored(t *testing.T) {
 		}
 	}
 
-	keep, err := store.CreateSession(ctx, user.ID, "keep")
+	keep, err := store.CreateSession(ctx, user.ID, "keep", c.get())
 	if err != nil {
 		t.Fatal(err)
 	}
-	other, err := store.CreateSession(ctx, user.ID, "other")
+	other, err := store.CreateSession(ctx, user.ID, "other", c.get())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -500,5 +500,74 @@ func TestRestoreRefusesOnceThePurgeIsDue(t *testing.T) {
 	}
 	if a, err := store.Account(ctx, user.ID); err != nil || a.DeletionRequestedAt == nil || a.PurgeAt == nil {
 		t.Fatalf("account after a refused restore = %#v, %v; want still pending", a, err)
+	}
+}
+
+func TestScheduleDeletionNeedsARecentSignIn(t *testing.T) {
+	database := hostedtest.Postgres(t)
+	c := newClock()
+	store := c.store(account.New(database, rotationKey))
+	ctx := t.Context()
+	user := newUser(t, database, store)
+
+	signedIn := c.get().Add(-account.ReauthWindow)
+	token, err := store.CreateSession(ctx, user.ID, "browser", signedIn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := store.Authenticate(ctx, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !p.AuthenticatedAt.Equal(signedIn) || !store.RecentlyAuthenticated(p) {
+		t.Fatalf("principal signed in at %v, recent %v; want %v and recent", p.AuthenticatedAt, store.RecentlyAuthenticated(p), signedIn)
+	}
+
+	c.advance(time.Second)
+	if err := store.ScheduleDeletion(ctx, p); !errors.Is(err, account.ErrReauthenticationRequired) {
+		t.Fatalf("deletion with a sign-in past the window = %v, want ErrReauthenticationRequired", err)
+	}
+	if a, err := store.Account(ctx, user.ID); err != nil || a.DeletionRequestedAt != nil {
+		t.Fatalf("account after a refused deletion = %#v, %v; want nothing scheduled", a, err)
+	}
+
+	// Signing in again on this session makes it recent.
+	if ok, err := store.Reauthenticate(ctx, token, uuid.NewV7().String(), c.get()); err != nil || ok {
+		t.Fatalf("reauthenticating another user's session = %v, %v; want refused", ok, err)
+	}
+	if ok, err := store.Reauthenticate(ctx, token, user.ID, c.get()); err != nil || !ok {
+		t.Fatalf("Reauthenticate = %v, %v", ok, err)
+	}
+	if p, err = store.Authenticate(ctx, token); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ScheduleDeletion(ctx, p); err != nil {
+		t.Fatalf("deletion after signing in again = %v", err)
+	}
+	if a, err := store.Account(ctx, user.ID); err != nil || a.DeletionRequestedAt == nil {
+		t.Fatalf("account after deletion = %#v, %v", a, err)
+	}
+}
+
+func TestAppSessionsKeepTheSignInTime(t *testing.T) {
+	database := hostedtest.Postgres(t)
+	store := account.New(database, rotationKey)
+	ctx := t.Context()
+	user := newUser(t, database, store)
+	signedIn := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
+	code, err := store.CreateAppCode(ctx, user.ID, challenge, signedIn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := store.RedeemAppCode(ctx, code, verifier, account.Device{Name: "Pixel", UserAgent: "ua"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := store.Authenticate(ctx, session.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !p.AuthenticatedAt.Equal(signedIn) || store.RecentlyAuthenticated(p) {
+		t.Fatalf("app session signed in at %v, want %v and not recent", p.AuthenticatedAt, signedIn)
 	}
 }

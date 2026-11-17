@@ -368,7 +368,7 @@ func TestAccountPurgeEmptiesStorageAndRowsAndResumes(t *testing.T) {
 		if err := accounts.RequestDeletion(ctx, userID, uuid.NewV7().String()); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := accounts.CreateSession(ctx, userID, "jobs test"); err != nil {
+		if _, err := accounts.CreateSession(ctx, userID, "jobs test", time.Now()); err != nil {
 			t.Fatal(err)
 		}
 	}

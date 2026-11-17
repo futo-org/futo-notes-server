@@ -32,6 +32,9 @@ type Principal struct {
 	// RegionID is "" until the user chooses a region.
 	RegionID            string
 	DeletionRequestedAt *time.Time
+	// AuthenticatedAt is when the session's user last proved who they are
+	// to the identity provider.
+	AuthenticatedAt time.Time
 	// Slid reports that this authentication extended the session's expiry
 	// to SessionTTL from now, so a cookie carrying the token should be
 	// extended too.
@@ -55,9 +58,9 @@ type Device struct {
 	UserAgent string
 }
 
-// createSession opens a session for userID on device through q and returns
-// its raw token and id.
-func (s *Store) createSession(ctx context.Context, q execer, userID string, device Device) (token, sessionID string, err error) {
+// createSession opens a session for userID on device through q, signed in
+// at authenticatedAt, and returns its raw token and id.
+func (s *Store) createSession(ctx context.Context, q execer, userID string, device Device, authenticatedAt time.Time) (token, sessionID string, err error) {
 	userAgent := device.UserAgent
 	if len(userAgent) > maxUserAgent {
 		userAgent = userAgent[:maxUserAgent]
@@ -65,20 +68,34 @@ func (s *Store) createSession(ctx context.Context, q execer, userID string, devi
 	now := s.now()
 	token, sessionID = auth.GenerateToken(), uuid.NewV7().String()
 	_, err = q.ExecContext(ctx, `INSERT INTO sessions
-		(id, user_id, access_token_hash, expires_at, created_at, last_used_at, user_agent, device_name)
-		VALUES ($1, $2, $3, $4, $5, $5, $6, $7)`,
-		sessionID, userID, auth.HashToken(token), now.Add(SessionTTL), now, userAgent, nullable(device.Name))
+		(id, user_id, access_token_hash, expires_at, created_at, last_used_at, user_agent, device_name, authenticated_at)
+		VALUES ($1, $2, $3, $4, $5, $5, $6, $7, $8)`,
+		sessionID, userID, auth.HashToken(token), now.Add(SessionTTL), now, userAgent, nullable(device.Name), authenticatedAt)
 	if err != nil {
 		return "", "", err
 	}
 	return token, sessionID, nil
 }
 
-// CreateSession opens a session for userID, recording userAgent for the
-// device list, and returns its raw token. Only the token's hash is stored.
-func (s *Store) CreateSession(ctx context.Context, userID, userAgent string) (string, error) {
-	token, _, err := s.createSession(ctx, s.database, userID, Device{UserAgent: userAgent})
+// CreateSession opens a session for userID, signed in at authenticatedAt,
+// recording userAgent for the device list, and returns its raw token. Only
+// the token's hash is stored.
+func (s *Store) CreateSession(ctx context.Context, userID, userAgent string, authenticatedAt time.Time) (string, error) {
+	token, _, err := s.createSession(ctx, s.database, userID, Device{UserAgent: userAgent}, authenticatedAt)
 	return token, err
+}
+
+// Reauthenticate records that the live session token names, if it is
+// userID's, signed in again at authenticatedAt. It reports whether it was.
+func (s *Store) Reauthenticate(ctx context.Context, token, userID string, authenticatedAt time.Time) (bool, error) {
+	result, err := s.database.ExecContext(ctx, `UPDATE sessions SET authenticated_at = $3
+		WHERE access_token_hash = $1 AND user_id = $2 AND expires_at > $4`,
+		auth.HashToken(token), userID, authenticatedAt, s.now())
+	if err != nil {
+		return false, err
+	}
+	n, err := result.RowsAffected()
+	return n > 0, err
 }
 
 // Authenticate returns the caller a raw session token names, sliding the
@@ -89,11 +106,11 @@ func (s *Store) Authenticate(ctx context.Context, token string) (Principal, erro
 	var p Principal
 	var expiresAt, lastUsedAt time.Time
 	var region sql.NullString
-	err := s.database.QueryRowContext(ctx, `SELECT s.id, s.expires_at, s.last_used_at,
+	err := s.database.QueryRowContext(ctx, `SELECT s.id, s.expires_at, s.last_used_at, s.authenticated_at,
 			u.id, u.email, u.name, u.region_id, u.deletion_requested_at
 		FROM sessions s JOIN users u ON u.id = s.user_id
 		WHERE s.access_token_hash = $1`, auth.HashToken(token)).
-		Scan(&p.Session.ID, &expiresAt, &lastUsedAt,
+		Scan(&p.Session.ID, &expiresAt, &lastUsedAt, &p.AuthenticatedAt,
 			&p.Session.User.ID, &p.Session.User.Email, &p.Session.User.Name, &region, &p.DeletionRequestedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Principal{}, auth.ErrNoSession

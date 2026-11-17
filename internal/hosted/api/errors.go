@@ -31,6 +31,9 @@ const (
 	codeReceiptExpired         = "receipt_expired"
 	codeReceiptWrongRegion     = "receipt_wrong_region"
 	codeReceiptWrongUser       = "receipt_wrong_user"
+	// codeReauthenticationRequired asks the client to sign in again with
+	// reauthenticate=true before deleting the account.
+	codeReauthenticationRequired = "reauthentication_required"
 )
 
 // serverError logs an internal failure and answers with a hosted 500.

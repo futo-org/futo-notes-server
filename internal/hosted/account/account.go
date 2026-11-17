@@ -34,7 +34,14 @@ var (
 	// ErrPurgeStarted reports that the account's deletion grace period is
 	// over, so the deletion can no longer be cancelled.
 	ErrPurgeStarted = errors.New("account purge already started")
+	// ErrReauthenticationRequired reports that the session's sign-in is
+	// older than ReauthWindow, too old to delete the account.
+	ErrReauthenticationRequired = errors.New("reauthentication required")
 )
+
+// ReauthWindow is how recent a session's sign-in must be to delete the
+// account.
+const ReauthWindow = 10 * time.Minute
 
 // Store reads and changes hosted account state.
 type Store struct {
@@ -62,6 +69,9 @@ type Identity struct {
 	Subject string
 	Email   string
 	Name    string
+	// AuthTime is when the user last authenticated to the provider, from the
+	// ID token's auth_time; zero when the token has none.
+	AuthTime time.Time
 }
 
 // UpsertUser returns the user for the identity's subject, creating it on
@@ -145,6 +155,22 @@ func (s *Store) RequestDeletion(ctx context.Context, userID, keepSessionID strin
 		return err
 	}
 	return tx.Commit()
+}
+
+// RecentlyAuthenticated reports whether p's session signed in within
+// ReauthWindow.
+func (s *Store) RecentlyAuthenticated(p Principal) bool {
+	return s.now().Sub(p.AuthenticatedAt) <= ReauthWindow
+}
+
+// ScheduleDeletion is RequestDeletion on behalf of p's session, which must
+// have signed in within ReauthWindow: otherwise it returns
+// ErrReauthenticationRequired and changes nothing.
+func (s *Store) ScheduleDeletion(ctx context.Context, p Principal) error {
+	if !s.RecentlyAuthenticated(p) {
+		return ErrReauthenticationRequired
+	}
+	return s.RequestDeletion(ctx, p.Session.User.ID, p.Session.ID)
 }
 
 // Restore cancels a pending deletion. Restoring an account that is not

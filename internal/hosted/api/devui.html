@@ -31,12 +31,16 @@
     <p class="muted">Dashboard sign-in sets the session cookie on this origin and lands on the <a href="/dashboard">htmx dashboard</a>
       (overview, region choice, devices, account deletion); the buttons below then act through the same cookie.
       App sign-in uses the loopback redirect flow and keeps the bearer token and storage refresh token in this tab:
-      open this page at <code>http://127.0.0.1:&lt;port&gt;/dev</code> for it, since only loopback IPs are allowed redirect targets.</p>
+      open this page at <code>http://127.0.0.1:&lt;port&gt;/dev</code> for it, since only loopback IPs are allowed redirect targets.
+      Deleting the account needs a sign-in within 10 minutes; "sign in again" sends <code>max_age=0</code> to the provider
+      (the dashboard one refreshes this browser's session and returns to <a href="/dashboard/delete">delete</a>).</p>
     <div class="row">
       <a href="/api/auth/oidc/start">Dashboard sign-in</a>
       <a href="/dashboard">Open dashboard</a>
       <input id="device-name" placeholder="device name for app sign-in (optional)">
       <button id="app-login">App sign-in</button>
+      <button id="app-reauth">App sign-in again (reauthenticate)</button>
+      <a href="/api/auth/oidc/start?reauthenticate=true">Dashboard sign-in again</a>
       <button id="logout">Log out</button>
       <button id="forget">Forget tab tokens</button>
     </div>
@@ -114,7 +118,7 @@ async function call(method, path, body) {
   return { status: res.status, body: parsed };
 }
 const b64url = (bytes) => btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-async function appLogin() {
+async function appLogin(reauthenticate) {
   const verifier = b64url(crypto.getRandomValues(new Uint8Array(48)));
   const challenge = b64url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)));
   const state = b64url(crypto.getRandomValues(new Uint8Array(16)));
@@ -123,6 +127,7 @@ async function appLogin() {
   store.setItem("device-name", $("device-name").value.trim());
   const redirect = location.origin + "/dev";
   const params = new URLSearchParams({ redirect_uri: redirect, code_challenge: challenge, code_challenge_method: "S256", state });
+  if (reauthenticate === true) params.set("reauthenticate", "true");
   // The callback is served at PUBLIC_URL, so start there for its state cookie.
   location.href = "/api/auth/oidc/start?" + params;
 }
@@ -159,7 +164,8 @@ $("reconcile").onclick = () => {
   if ($("reconcile-now").value) q.set("now", $("reconcile-now").value.trim());
   call("POST", "/dev/jobs/reconciliation?" + q);
 };
-$("app-login").onclick = appLogin;
+$("app-login").onclick = () => appLogin(false);
+$("app-reauth").onclick = () => appLogin(true);
 $("logout").onclick = async () => { await call("POST", "/api/auth/logout"); store.clear(); refreshWho(); };
 $("forget").onclick = () => { store.clear(); refreshWho(); };
 $("choose-region").onclick = () => call("PUT", "/api/account/region", { region_id: $("region").value });

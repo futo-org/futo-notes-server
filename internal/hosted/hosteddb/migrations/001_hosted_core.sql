@@ -15,7 +15,11 @@ alter table sessions
     add column created_at timestamptz not null default now(),
     add column last_used_at timestamptz not null default now(),
     add column user_agent text not null default '',
-    add column device_name text;
+    add column device_name text,
+    -- When the user last proved who they are to the identity provider for
+    -- this session: the ID token's auth_time, or the callback time without
+    -- one. Account deletion needs it recent.
+    add column authenticated_at timestamptz not null default now();
 
 create index idx_sessions_user on sessions (user_id);
 create index idx_sessions_expires_at on sessions (expires_at);
@@ -39,6 +43,8 @@ create table oidc_logins (
     app_redirect_uri text,
     app_state text,
     app_code_challenge text,
+    -- Set when the login must prove a fresh sign-in (max_age=0).
+    reauthenticate boolean not null default false,
     expires_at timestamptz not null
 );
 
@@ -49,6 +55,7 @@ create table oidc_app_codes (
     code_hash bytea primary key,
     user_id uuid not null references users (id) on delete cascade,
     code_challenge text not null,
+    authenticated_at timestamptz not null,
     expires_at timestamptz not null
 );
 

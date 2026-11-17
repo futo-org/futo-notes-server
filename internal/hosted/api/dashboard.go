@@ -32,6 +32,9 @@ const (
 	signInPath    = dashboardPath + "/sign-in"
 	devicesPath   = dashboardPath + "/devices"
 	regionPath    = dashboardPath + "/region"
+	deletePath    = dashboardPath + "/delete"
+	// reauthPath signs the dashboard in again, back to deletePath.
+	reauthPath = "/api/auth/oidc/start?reauthenticate=true"
 
 	// csrfHeader carries the CSRF token on htmx requests (hx-headers);
 	// csrfField carries it on plain form posts, so forms work without
@@ -112,6 +115,9 @@ type dashboardView struct {
 	Devices       []dashboardDevice
 	GraceDays     int
 	ConfirmPhrase string
+	// Reauthenticate asks the user to sign in again before deleting.
+	Reauthenticate bool
+	ReauthPath     string
 }
 
 type dashboardDevice struct {
@@ -131,7 +137,7 @@ func (s *Server) dashboardActions() []dashboardAction {
 	return []dashboardAction{
 		{regionPath, "PUT /api/account/region", s.handleDashboardChooseRegion},
 		{devicesPath + "/{id}/revoke", "DELETE /api/sessions/{id}", s.handleDashboardRevoke},
-		{dashboardPath + "/delete", "DELETE /api/account", s.handleDashboardDelete},
+		{deletePath, "DELETE /api/account", s.handleDashboardDelete},
 		{dashboardPath + "/restore", "POST /api/account/restore", s.handleDashboardRestore},
 		{dashboardPath + "/sign-out", "POST /api/auth/logout", s.handleDashboardSignOut},
 	}
@@ -148,7 +154,7 @@ func (s *Server) dashboardRoutes(r chi.Router) {
 			signed.Get(dashboardPath, s.handleDashboardOverview)
 			signed.Get(regionPath, s.handleDashboardRegion)
 			signed.Get(devicesPath, s.handleDashboardDevices)
-			signed.Get(dashboardPath+"/delete", s.handleDashboardDeletePage)
+			signed.Get(deletePath, s.handleDashboardDeletePage)
 			signed.Group(func(actions chi.Router) {
 				actions.Use(requireCSRF)
 				for _, a := range s.dashboardActions() {
@@ -468,18 +474,29 @@ func (s *Server) handleDashboardDeletePage(w http.ResponseWriter, r *http.Reques
 	v.Account = a
 	v.GraceDays = int(account.DeletionGrace / (24 * time.Hour))
 	v.ConfirmPhrase = confirmPhrase
+	v.Reauthenticate = !s.accounts.RecentlyAuthenticated(principalFrom(r))
+	v.ReauthPath = reauthPath
 	renderDashboard(w, r, "delete", v)
 }
 
 // handleDashboardDelete is the dashboard's DELETE /api/account, once the
-// user has typed the confirmation phrase.
+// user has typed the confirmation phrase. A sign-in older than
+// account.ReauthWindow sends the browser to sign in again first.
 func (s *Server) handleDashboardDelete(w http.ResponseWriter, r *http.Request) {
+	if !s.accounts.RecentlyAuthenticated(principalFrom(r)) {
+		redirectDashboard(w, r, reauthPath)
+		return
+	}
 	if strings.TrimSpace(r.PostFormValue("confirm")) != confirmPhrase {
 		renderDashboardError(w, r, http.StatusUnprocessableEntity, "Type "+confirmPhrase+" to confirm deleting your account.")
 		return
 	}
-	p := principalFrom(r)
-	if err := s.accounts.RequestDeletion(r.Context(), p.Session.User.ID, p.Session.ID); err != nil {
+	err := s.accounts.ScheduleDeletion(r.Context(), principalFrom(r))
+	if errors.Is(err, account.ErrReauthenticationRequired) {
+		redirectDashboard(w, r, reauthPath)
+		return
+	}
+	if err != nil {
 		dashboardServerError(w, r, "requesting account deletion", err)
 		return
 	}

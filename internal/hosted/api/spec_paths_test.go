@@ -67,7 +67,8 @@ func TestSpecAuthenticationOnEveryOperation(t *testing.T) {
 
 // TestSpecPendingDeletionOnEveryGatedOperation sends every session-secured
 // operation as a user whose deletion is pending: exactly the ones that
-// document the pending-deletion 403 must answer it.
+// document the pending-deletion 403 (the PendingDeletion response; other
+// 403s mean something else) must answer it.
 func TestSpecPendingDeletionOnEveryGatedOperation(t *testing.T) {
 	h := newHarness(t)
 	app, _ := h.appLogin(h.newSub())
@@ -80,15 +81,16 @@ func TestSpecPendingDeletionOnEveryGatedOperation(t *testing.T) {
 			continue
 		}
 		res := app.do(o.method, o.path, nil)
-		if o.op.Responses.Status(http.StatusForbidden) == nil {
-			if res.status == http.StatusForbidden {
+		pending := res.status == http.StatusForbidden && strings.Contains(res.body, `"code":"account_pending_deletion"`)
+		if forbidden := o.op.Responses.Status(http.StatusForbidden); forbidden == nil || forbidden.Ref != "#/components/responses/PendingDeletion" {
+			if pending {
 				t.Errorf("%s %s while pending deletion = 403, which it does not document", o.method, o.path)
 			}
 			continue
 		}
 		gated++
-		if res.status != http.StatusForbidden {
-			t.Errorf("%s %s while pending deletion = %d %s, want 403", o.method, o.path, res.status, res.body)
+		if !pending {
+			t.Errorf("%s %s while pending deletion = %d %s, want the pending-deletion 403", o.method, o.path, res.status, res.body)
 		}
 	}
 	if gated == 0 {

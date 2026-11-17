@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -227,6 +228,13 @@ func (c *client) expect(method, target string, body any, status int) response {
 // redirect back to the API.
 func (c *client) authorize(start response, sub string) string {
 	c.h.t.Helper()
+	return c.authorizeWith(start, sub, nil)
+}
+
+// authorizeWith is authorize with extra parameters for the provider's test
+// shortcut, such as auth_time.
+func (c *client) authorizeWith(start response, sub string, extra url.Values) string {
+	c.h.t.Helper()
 	if start.status != http.StatusFound {
 		c.h.t.Fatalf("start = %d %s, want 302", start.status, start.body)
 	}
@@ -242,6 +250,7 @@ func (c *client) authorize(start response, sub string) string {
 	q.Set("sub", sub)
 	q.Set("email", sub+"@example.test")
 	q.Set("name", "Test "+sub)
+	maps.Copy(q, extra)
 	target.RawQuery = q.Encode()
 	res := c.do(http.MethodGet, target.String(), nil)
 	if res.status != http.StatusFound {
