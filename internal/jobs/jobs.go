@@ -7,11 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/rs/zerolog/log"
 
 	"futo-notes-server/internal/blobs"
 	"futo-notes-server/internal/db"
@@ -92,7 +93,7 @@ func ReconcileStorage(ctx context.Context, database *db.DB, store *blobs.Store) 
 		owner, _, ok := strings.Cut(key, "/")
 		if !ok || !ids.IsUUID(owner) {
 			result.Skipped++
-			slog.Info("storage reconciliation: skipping file", "key", key, "reason", "invalid owner")
+			log.Info().Str("key", key).Str("reason", "invalid owner").Msg("storage reconciliation: skipping file")
 			return nil
 		}
 
@@ -110,7 +111,7 @@ func ReconcileStorage(ctx context.Context, database *db.DB, store *blobs.Store) 
 				return err
 			}
 			result.Skipped++
-			slog.Info("storage reconciliation: skipping file", "key", key, "reason", "owner does not exist")
+			log.Info().Str("key", key).Str("reason", "owner does not exist").Msg("storage reconciliation: skipping file")
 			return nil
 		}
 		var inserted int
@@ -137,7 +138,7 @@ func ReconcileStorage(ctx context.Context, database *db.DB, store *blobs.Store) 
 	})
 
 	if errors.Is(err, errReconciliationCap) {
-		slog.Info("storage reconciliation: adoption cap reached", "limit", reconciliationLimit)
+		log.Info().Int("limit", reconciliationLimit).Msg("storage reconciliation: adoption cap reached")
 		return result, nil
 	}
 	if errors.Is(err, os.ErrNotExist) {

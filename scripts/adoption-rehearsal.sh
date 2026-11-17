@@ -442,7 +442,7 @@ rehearse() {
     assert_eq "old-version migrations applied" \
       "$(scalar "SELECT string_agg(name, ',' ORDER BY name) FROM kysely_migration WHERE name >= '009_'")" \
       '009_restore_plural_collections,010_authoritative_blob_ledger,011_mutation_results'
-    if ! rg -q 'count=3 migrations="009_restore_plural_collections, 010_authoritative_blob_ledger, 011_mutation_results"' "$server_log"; then
+    if ! rg -F -q '"count":3,"migrations":"009_restore_plural_collections, 010_authoritative_blob_ledger, 011_mutation_results"' "$server_log"; then
       echo "Go did not report exactly migrations 009-011 for old TS adoption" >&2
       exit 1
     fi

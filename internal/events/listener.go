@@ -4,10 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/rs/zerolog/log"
 )
 
 const (
@@ -36,7 +36,7 @@ func listen(ctx context.Context, databaseURL string, hub *Hub, appName string) {
 		if connected {
 			delay = initialReconnectDelay
 		}
-		slog.Warn("sync events listener lost", "err", err, "reconnect_in", delay)
+		log.Warn().Err(err).Dur("reconnect_in", delay).Msg("sync events listener lost")
 
 		select {
 		case <-ctx.Done():
@@ -70,7 +70,7 @@ func listenOnce(ctx context.Context, databaseURL string, hub *Hub, appName strin
 	// backoff. They may have missed committed notifications, so close them as
 	// soon as LISTEN is restored and force their clients to pull again.
 	hub.CloseAll()
-	slog.Info("sync events listener connected", "channel", Channel)
+	log.Info().Str("channel", Channel).Msg("sync events listener connected")
 
 	for {
 		notification, err := conn.WaitForNotification(ctx)
@@ -82,7 +82,7 @@ func listenOnce(ctx context.Context, databaseURL string, hub *Hub, appName strin
 		}
 		var payload Notification
 		if err := json.Unmarshal([]byte(notification.Payload), &payload); err != nil {
-			slog.Error("sync events listener: dropping invalid payload", "err", err)
+			log.Error().Err(err).Msg("sync events listener: dropping invalid payload")
 			continue
 		}
 		hub.Publish(payload)

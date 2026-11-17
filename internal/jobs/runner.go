@@ -3,8 +3,9 @@ package jobs
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"time"
+
+	"github.com/rs/zerolog/log"
 
 	"futo-notes-server/internal/blobs"
 	"futo-notes-server/internal/db"
@@ -120,9 +121,9 @@ func runJobs(ctx context.Context, jobs []scheduledJob) {
 	for _, job := range jobs {
 		summary, err := job.run(ctx)
 		if err != nil {
-			slog.Error("running job", "job", job.name, "summary", summary, "err", err)
+			log.Error().Err(err).Str("job", job.name).Str("summary", summary).Msg("running job")
 			continue
 		}
-		slog.Info("ran job", "job", job.name, "summary", summary)
+		log.Info().Str("job", job.name).Str("summary", summary).Msg("ran job")
 	}
 }

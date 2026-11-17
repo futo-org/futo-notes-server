@@ -121,6 +121,18 @@ amd64 and arm64. Run `uname -m` on the device to pick the file:
 Then follow the steps above. If the data directory lives on an SD card, back it
 up regularly: the server writes on every change, and SD cards wear out.
 
+## Logs
+
+The server logs one JSON object per line to stderr (`docker compose logs` or
+`journalctl -u futo-notes-server`). Two optional variables change that, in
+`.env` or the service environment:
+
+- `LOG_LEVEL`: `trace`, `debug`, `info` (default), `warn`, `error`, `fatal`,
+  `panic` or `disabled`.
+- `LOG_FORMAT`: `json` (default), or `pretty` for human-readable lines.
+
+The server refuses to start if either holds any other value.
+
 ## Connect the app
 
 In FUTO Notes, go to Settings, then Self-hosted sync, and set the Server URL to

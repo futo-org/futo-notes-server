@@ -6,10 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"os"
 	"unicode/utf8"
+
+	"github.com/rs/zerolog/log"
 
 	"futo-notes-server/internal/blobs"
 	"futo-notes-server/internal/db"
@@ -153,7 +154,7 @@ func handleBatchFetchBlobs(store *blobs.Store) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.WriteHeader(http.StatusOK)
 		if err := streamBlobBatch(w, store, sessionFrom(r).User.ID, keys); err != nil {
-			slog.Error("streaming blob batch", "err", err, "method", r.Method, "path", r.URL.Path)
+			log.Error().Err(err).Str("method", r.Method).Str("path", r.URL.Path).Msg("streaming blob batch")
 			// The status line is already out, so there is no error frame to
 			// send. Drop the connection and let the client retry a transfer it
 			// sees as truncated.

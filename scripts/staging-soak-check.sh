@@ -150,15 +150,15 @@ for index in "${!urls[@]}"; do
   # shellcheck disable=SC2029
   logs=$(ssh "${ssh_options[@]}" "root@$host" \
     "runuser -l podman -c 'podman logs --since $soak_start inventory_futo-notes_sync-server'" 2>&1)
-  if rg -q 'level=(ERROR|FATAL)|panic:|fatal error:' <<<"$logs"; then
+  if rg -q '"level":"(error|fatal|panic)"|panic:|fatal error:' <<<"$logs"; then
     echo "application errors found on $host since $soak_start" >&2
-    rg 'level=(ERROR|FATAL)|panic:|fatal error:' <<<"$logs" >&2
+    rg '"level":"(error|fatal|panic)"|panic:|fatal error:' <<<"$logs" >&2
     exit 1
   fi
 
   if [[ $require_jobs == true ]]; then
-    for pattern in 'msg=sessions summary=' 'msg="storage reconciliation" summary=' \
-      'msg="mutation results" summary=' 'msg="blob GC" summary='; do
+    for pattern in '"job":"sessions","summary":' '"job":"storage reconciliation","summary":' \
+      '"job":"mutation results","summary":' '"job":"blob GC","summary":'; do
       if ! rg -F -q "$pattern" <<<"$logs"; then
         echo "missing scheduled-job evidence on $host: $pattern" >&2
         exit 1

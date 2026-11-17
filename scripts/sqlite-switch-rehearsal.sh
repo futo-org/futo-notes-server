@@ -4,7 +4,7 @@ set -euo pipefail
 # End-to-end rehearsal for migrate-to-sqlite.sh, the one-command switch a
 # self-hoster runs. It builds a Postgres install that deliberately does *not*
 # match the shipped compose file -- Postgres in a named volume, an installer-
-# style data directory, a dropped LOG_LEVEL variable, an older image tag -- and
+# style data directory, a legacy LOG_LEVEL variable, an older image tag -- and
 # then lets the script convert it, because that is the install shape most likely
 # to lose data if the script assumed the shipped layout.
 #

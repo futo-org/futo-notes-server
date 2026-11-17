@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/rs/zerolog"
+
 	"futo-notes-server/internal/db"
 )
 
@@ -40,6 +42,8 @@ type Config struct {
 	AllowFreshDatabase bool          // ALLOW_FRESH_DATABASE, overrides the SQLite/blob safety guard
 	DBPoolMax          int           // DB_POOL_MAX, Postgres only
 	DBPoolIdleTimeout  time.Duration // DB_POOL_IDLE_TIMEOUT_MS, Postgres only
+	LogLevel           zerolog.Level // LOG_LEVEL, a zerolog level name; info by default
+	LogPretty          bool          // LOG_FORMAT=pretty, human-readable console logs instead of JSON
 }
 
 // Load reads the server configuration, applying .env values that the
@@ -74,6 +78,16 @@ func Load() (Config, error) {
 	}
 
 	var err error
+	if cfg.LogLevel, err = zerolog.ParseLevel(getDefault("LOG_LEVEL", "info")); err != nil {
+		return Config{}, fmt.Errorf("LOG_LEVEL must be trace, debug, info, warn, error, fatal, panic or disabled, got %q", os.Getenv("LOG_LEVEL"))
+	}
+	switch format := getDefault("LOG_FORMAT", "json"); format {
+	case "json":
+	case "pretty":
+		cfg.LogPretty = true
+	default:
+		return Config{}, fmt.Errorf("LOG_FORMAT must be json or pretty, got %q", format)
+	}
 	if cfg.Port, err = getInt("PORT", 3005); err != nil {
 		return Config{}, err
 	}
@@ -120,7 +134,6 @@ func DroppedEnvWarnings() []string {
 		{"DB_SSL", "configure pgx TLS with sslmode in DATABASE_URL"},
 		{"DB_SSL_CA", "configure pgx TLS with sslrootcert in DATABASE_URL"},
 		{"DB_SSL_INSECURE", "configure pgx TLS with sslmode in DATABASE_URL"},
-		{"LOG_LEVEL", "the Go server currently uses its built-in log level"},
 		{"MAX_BATCH_BYTES", "the batch limit is fixed at 32 MiB"},
 		{"MAX_BLOB_BYTES", "the upload limit is fixed at 100 MiB"},
 		{"TRUST_PROXY", "forwarded client addresses are not trusted; rate limiting uses the direct peer"},

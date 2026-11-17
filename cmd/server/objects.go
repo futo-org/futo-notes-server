@@ -6,10 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"strconv"
 	"unicode/utf8"
+
+	"github.com/rs/zerolog/log"
 
 	"futo-notes-server/internal/blobs"
 	"futo-notes-server/internal/db"
@@ -508,7 +509,7 @@ func (b batchApplier) entry(r *http.Request, entry batchEntry) any {
 		if err != nil {
 			result, unexpected := batchFailure(err)
 			if unexpected {
-				slog.Error("reserving batch create mutation", "err", err, "method", r.Method, "path", r.URL.Path)
+				log.Error().Err(err).Str("method", r.Method).Str("path", r.URL.Path).Msg("reserving batch create mutation")
 			}
 			return result
 		}
@@ -520,7 +521,7 @@ func (b batchApplier) entry(r *http.Request, entry batchEntry) any {
 	}
 	key, err := blobs.Stage(r.Context(), b.database, b.blobs, b.userID, entry.Blob)
 	if err != nil {
-		slog.Error("staging batch blob", "err", err, "method", r.Method, "path", r.URL.Path)
+		log.Error().Err(err).Str("method", r.Method).Str("path", r.URL.Path).Msg("staging batch blob")
 		return batchInternalError
 	}
 	var response objects.MutationResponse
@@ -532,7 +533,7 @@ func (b batchApplier) entry(r *http.Request, entry batchEntry) any {
 	if err != nil {
 		result, unexpected := batchFailure(err)
 		if unexpected {
-			slog.Error("applying batch object mutation", "err", err, "method", r.Method, "path", r.URL.Path)
+			log.Error().Err(err).Str("method", r.Method).Str("path", r.URL.Path).Msg("applying batch object mutation")
 		}
 		return result
 	}

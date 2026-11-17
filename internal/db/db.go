@@ -7,13 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/rs/zerolog/log"
 
 	// Open selects these drivers by name: "pgx" for Postgres, "sqlite" for SQLite.
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -211,7 +212,7 @@ func (t *Tx) Rollback() error { return t.tx.Rollback() }
 // has no caller to report to, so it is logged.
 func (t *Tx) Discard() {
 	if err := t.tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
-		slog.Warn("rolling back transaction", "err", err)
+		log.Warn().Err(err).Msg("rolling back transaction")
 	}
 }
 

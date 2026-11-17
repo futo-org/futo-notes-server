@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -16,6 +16,9 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 
 	"futo-notes-server/internal/auth"
 	"futo-notes-server/internal/blobs"
@@ -76,7 +79,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(v); err != nil {
-		slog.Error("writing JSON response", "err", err)
+		log.Error().Err(err).Msg("writing JSON response")
 	}
 }
 
@@ -162,22 +165,33 @@ func routes(cfg config.Config, database *db.DB, blobStore *blobs.Store, eventHub
 		mux.HandleFunc("GET /dev", handleDevUI(database))
 		mux.HandleFunc("POST /dev/panic", handleDevPanic)
 		registerDevJobHandlers(mux, database, blobStore)
-		slog.Info("dev UI enabled", "path", "/dev")
+		log.Info().Str("path", "/dev").Msg("dev UI enabled")
 	}
 
 	return recoverPanic(mux)
 }
 
 func main() {
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	slog.SetDefault(logger)
+	zerolog.TimeFieldFormat = time.RFC3339
+	zerolog.TimestampFunc = func() time.Time { return time.Now().UTC() }
+	configureLogging(zerolog.InfoLevel, false)
 	if len(os.Args) > 1 && os.Args[1] == "migrate-to-sqlite" {
 		os.Exit(runMigrateToSQLite(os.Args[2:], os.Stdout, os.Stderr))
 	}
 	if err := run(); err != nil {
-		slog.Error("server failed", "err", err)
-		os.Exit(1)
+		log.Fatal().Err(err).Msg("server failed")
 	}
+}
+
+// configureLogging points the global logger at stderr, as JSON or, when
+// pretty, as human-readable console output.
+func configureLogging(level zerolog.Level, pretty bool) {
+	var output io.Writer = os.Stderr
+	if pretty {
+		output = zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.RFC3339}
+	}
+	log.Logger = zerolog.New(output).With().Timestamp().Caller().Logger()
+	zerolog.SetGlobalLevel(level)
 }
 
 // run starts the server and blocks until SIGINT or SIGTERM has shut it down
@@ -193,8 +207,9 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
+	configureLogging(cfg.LogLevel, cfg.LogPretty)
 	for _, warning := range config.DroppedEnvWarnings() {
-		slog.Warn("ignoring legacy setting", "warning", warning)
+		log.Warn().Str("warning", warning).Msg("ignoring legacy setting")
 	}
 
 	database, err := db.Open(cfg.DatabaseURL, db.Options{
@@ -215,7 +230,7 @@ func run() error {
 		return fmt.Errorf("applying database migrations: %w", err)
 	}
 	if len(applied) > 0 {
-		slog.Info("applied database migrations", "count", len(applied), "migrations", strings.Join(applied, ", "))
+		log.Info().Int("count", len(applied)).Str("migrations", strings.Join(applied, ", ")).Msg("applied database migrations")
 	}
 
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.Port))
@@ -237,7 +252,7 @@ func run() error {
 	}
 	background.Go(func() { jobs.Run(ctx, database, blobStore, jobs.DefaultSchedule, cfg.BlobGCEnabled) })
 
-	slog.Info("listening", "addr", listener.Addr().String())
+	log.Info().Str("addr", listener.Addr().String()).Msg("listening")
 	return serve(ctx, listener, routes(cfg, database, blobStore, eventHub, publisher), eventHub.CloseAll)
 }
 
@@ -257,7 +272,7 @@ func serve(ctx context.Context, listener net.Listener, handler http.Handler, end
 	case <-ctx.Done():
 	}
 
-	slog.Info("shutting down")
+	log.Info().Msg("shutting down")
 	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {

@@ -3,25 +3,27 @@ package main
 import (
 	"bytes"
 	"errors"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 )
 
-func captureSlog(t *testing.T) *bytes.Buffer {
+func captureLogs(t *testing.T) *bytes.Buffer {
 	t.Helper()
-	previous := slog.Default()
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	previous := log.Logger
+	t.Cleanup(func() { log.Logger = previous })
 
 	var output bytes.Buffer
-	slog.SetDefault(slog.New(slog.NewTextHandler(&output, nil)))
+	log.Logger = zerolog.New(&output)
 	return &output
 }
 
 func TestServerError(t *testing.T) {
-	logs := captureSlog(t)
+	logs := captureLogs(t)
 	request := httptest.NewRequest(http.MethodPost, "/api/things?cursor=1", nil)
 	response := httptest.NewRecorder()
 
@@ -34,12 +36,12 @@ func TestServerError(t *testing.T) {
 		t.Fatalf("body = %q", got)
 	}
 	for _, want := range []string{
-		`level=ERROR`,
-		`msg="internal server error"`,
-		`action="loading things"`,
-		`err="database unavailable"`,
-		`method=POST`,
-		`path=/api/things`,
+		`"level":"error"`,
+		`"message":"internal server error"`,
+		`"action":"loading things"`,
+		`"error":"database unavailable"`,
+		`"method":"POST"`,
+		`"path":"/api/things"`,
 	} {
 		if !strings.Contains(logs.String(), want) {
 			t.Errorf("log = %q, want it to contain %q", logs.String(), want)
@@ -48,7 +50,7 @@ func TestServerError(t *testing.T) {
 }
 
 func TestRecoverPanic(t *testing.T) {
-	logs := captureSlog(t)
+	logs := captureLogs(t)
 	handler := recoverPanic(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		panic("broken handler")
 	}))
@@ -67,12 +69,12 @@ func TestRecoverPanic(t *testing.T) {
 		t.Fatalf("Connection = %q, want close", got)
 	}
 	for _, want := range []string{
-		`level=ERROR`,
-		`msg=panic`,
-		`err="broken handler"`,
-		`method=PUT`,
-		`path=/api/things/1`,
-		`stack=`,
+		`"level":"error"`,
+		`"message":"panic"`,
+		`"error":"broken handler"`,
+		`"method":"PUT"`,
+		`"path":"/api/things/1"`,
+		`"stack":"goroutine `,
 		`TestRecoverPanic`,
 	} {
 		if !strings.Contains(logs.String(), want) {

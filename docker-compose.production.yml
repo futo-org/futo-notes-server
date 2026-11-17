@@ -10,6 +10,8 @@ services:
       COOKIE_SECURE: ${COOKIE_SECURE:-true}
       BLOB_DIR: /data/blobs
       BLOB_GC_ENABLED: ${BLOB_GC_ENABLED:-true}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
     ports:
       - "${FUTO_NOTES_PORT:-3005}:3000"
     volumes:

@@ -8,11 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
 	"strings"
 	"text/tabwriter"
 	"time"
+
+	"github.com/rs/zerolog/log"
 )
 
 type copyTable struct {
@@ -80,7 +81,7 @@ func MigratePostgresToSQLite(ctx context.Context, sourceURL, targetURL string, o
 	defer func() {
 		// The snapshot only read, so failing to end it cannot affect the copy.
 		if rollbackErr := snapshot.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
-			slog.Warn("ending Postgres snapshot", "err", rollbackErr)
+			log.Warn().Err(rollbackErr).Msg("ending Postgres snapshot")
 		}
 	}()
 
