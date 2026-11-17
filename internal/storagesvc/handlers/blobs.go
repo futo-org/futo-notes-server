@@ -13,6 +13,7 @@ import (
 	"github.com/rs/zerolog/hlog"
 
 	"futo-notes-server/internal/blobframe"
+	"futo-notes-server/internal/httpbody"
 	"futo-notes-server/internal/ids"
 	"futo-notes-server/internal/storagesvc/auth"
 	"futo-notes-server/internal/storagesvc/httputil"
@@ -210,14 +211,10 @@ func ownBlobKey(userID, key string) bool {
 }
 
 func readLimitedBody(w http.ResponseWriter, r *http.Request, limit int64, tooLarge string) ([]byte, bool) {
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
-	if err == nil {
-		return body, true
+	body, rejection := httpbody.ReadLimited(w, r, limit, tooLarge)
+	if rejection != nil {
+		httputil.WriteError(w, r, rejection.Status, rejection.Message)
+		return nil, false
 	}
-	if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
-		httputil.WriteError(w, r, http.StatusRequestEntityTooLarge, tooLarge)
-	} else {
-		httputil.WriteError(w, r, http.StatusBadRequest, "could not read body")
-	}
-	return nil, false
+	return body, true
 }

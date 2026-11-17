@@ -2,12 +2,12 @@ package syncapi
 
 import (
 	"errors"
-	"io"
 	"net/http"
 	"strconv"
 
 	"futo-notes-server/internal/db"
 	"futo-notes-server/internal/events"
+	"futo-notes-server/internal/httpbody"
 	"futo-notes-server/internal/objects"
 )
 
@@ -99,16 +99,12 @@ func WriteObjectError(w http.ResponseWriter, r *http.Request, action string, err
 // ReadLimitedBody reads at most limit bytes of the request body. A longer
 // body is answered with 413 and tooLarge as the message.
 func ReadLimitedBody(w http.ResponseWriter, r *http.Request, limit int64, tooLarge string) ([]byte, bool) {
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
-	if err == nil {
-		return body, true
+	body, rejection := httpbody.ReadLimited(w, r, limit, tooLarge)
+	if rejection != nil {
+		WriteError(w, rejection.Status, rejection.Message)
+		return nil, false
 	}
-	if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
-		WriteError(w, http.StatusRequestEntityTooLarge, tooLarge)
-	} else {
-		WriteError(w, http.StatusBadRequest, "could not read body")
-	}
-	return nil, false
+	return body, true
 }
 
 // listObjectsResponse keeps the key order a sorted map gave the wire.
