@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -272,7 +271,7 @@ func sandboxEvent(t *testing.T, s sandbox, subID string) []byte {
 			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatal(fmt.Sprintf("no customer.subscription.updated event for %s", subID))
+			t.Fatalf("no customer.subscription.updated event for %s", subID)
 		}
 		time.Sleep(2 * time.Second)
 	}
