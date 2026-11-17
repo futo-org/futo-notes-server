@@ -1,6 +1,7 @@
 package syncapi
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strconv"
@@ -81,24 +82,90 @@ func ParsePositive(value string) (int64, bool) {
 // Anything that is not a domain failure is logged under action and answered
 // with a 500.
 func WriteObjectError(w http.ResponseWriter, r *http.Request, action string, err error) {
-	if conflict, ok := errors.AsType[*objects.ConflictError](err); ok {
-		WriteJSON(w, http.StatusConflict, conflict.Conflict)
+	if out, ok := objectErrorOutcome(err); ok {
+		out.write(w)
 		return
+	}
+	ServerError(w, r, action, err)
+}
+
+// Outcome is the status and body an object write answers with.
+type Outcome struct {
+	Status int
+	Body   any
+}
+
+func (o Outcome) write(w http.ResponseWriter) { WriteJSON(w, o.Status, o.Body) }
+
+// objectErrorOutcome is the answer to an objects domain failure, and false
+// for any other error.
+func objectErrorOutcome(err error) (Outcome, bool) {
+	if conflict, ok := errors.AsType[*objects.ConflictError](err); ok {
+		return Outcome{http.StatusConflict, conflict.Conflict}, true
 	}
 	switch {
 	case errors.Is(err, objects.ErrNotFound):
-		WriteError(w, http.StatusNotFound, "not found")
+		return Outcome{http.StatusNotFound, ErrorResponse{Error: "not found"}}, true
 	case errors.Is(err, objects.ErrBlobNotStaged):
-		WriteError(w, http.StatusConflict, "blob is not staged")
+		return Outcome{http.StatusConflict, ErrorResponse{Error: "blob is not staged"}}, true
 	case errors.Is(err, objects.ErrReceiptUsed):
-		WriteCodedError(w, http.StatusConflict, CodeReceiptUsed, "receipt already used")
+		return Outcome{http.StatusConflict, CodedErrorResponse{Code: CodeReceiptUsed, Error: "receipt already used"}}, true
 	case errors.Is(err, objects.ErrMutationMismatch):
-		WriteError(w, http.StatusConflict, "Mutation-Id reused for different intent")
+		return Outcome{http.StatusConflict, ErrorResponse{Error: "Mutation-Id reused for different intent"}}, true
 	case errors.Is(err, objects.ErrMutationPending):
-		WriteError(w, http.StatusConflict, "mutation still in progress")
+		return Outcome{http.StatusConflict, ErrorResponse{Error: "mutation still in progress"}}, true
 	default:
-		ServerError(w, r, action, err)
+		return Outcome{}, false
 	}
+}
+
+// CreateObject runs an object create for m and the blob claim names, and
+// returns what POST /api/collections/{id}/objects answers. A deferred claim
+// is verified only when no result is recorded under m's Mutation ID. The
+// error is set only for a failure that is not a domain outcome, which the
+// caller answers with a 500.
+func CreateObject(ctx context.Context, store *objects.Store, m objects.Mutation, claim BlobClaim) (Outcome, error) {
+	if claim.verify != nil {
+		response, replayed, err := store.ReplayCreate(ctx, m)
+		if err != nil || replayed {
+			return mutationOutcome(http.StatusCreated, response, err)
+		}
+	}
+	blob, err := claim.resolve()
+	if err != nil {
+		return badRequestOutcome(err), nil
+	}
+	response, err := store.Create(ctx, m, blob)
+	return mutationOutcome(http.StatusCreated, response, err)
+}
+
+// UpdateObject is CreateObject for an update of m's object to version, as
+// PUT /api/collections/{id}/objects/{objectId} answers it.
+func UpdateObject(ctx context.Context, store *objects.Store, m objects.Mutation, version int64, claim BlobClaim) (Outcome, error) {
+	if claim.verify != nil {
+		response, replayed, err := store.ReplayUpdate(ctx, m, version)
+		if err != nil || replayed {
+			return mutationOutcome(http.StatusOK, response, err)
+		}
+	}
+	blob, err := claim.resolve()
+	if err != nil {
+		return badRequestOutcome(err), nil
+	}
+	response, err := store.Update(ctx, m, blob, version)
+	return mutationOutcome(http.StatusOK, response, err)
+}
+
+// mutationOutcome answers a create or update's result: response with status
+// on success, the failure's answer otherwise.
+func mutationOutcome(status int, response objects.MutationResponse, err error) (Outcome, error) {
+	if err == nil {
+		return Outcome{status, response}, nil
+	}
+	if out, ok := objectErrorOutcome(err); ok {
+		return out, nil
+	}
+	return Outcome{}, err
 }
 
 // ReadLimitedBody reads at most limit bytes of the request body. A longer
@@ -193,28 +260,12 @@ func HandleCreateObject(database *db.DB, publisher events.Publisher, blobs BlobR
 			return
 		}
 		m := objects.Mutation{UserID: SessionFrom(r).User.ID, CollectionID: r.PathValue("id"), MutationID: mID}
-		if claim.verify != nil {
-			response, replayed, err := store.ReplayCreate(r.Context(), m)
-			if err != nil {
-				WriteObjectError(w, r, "creating object", err)
-				return
-			}
-			if replayed {
-				WriteJSON(w, http.StatusCreated, response)
-				return
-			}
-		}
-		blob, err := claim.resolve()
+		out, err := CreateObject(r.Context(), store, m, claim)
 		if err != nil {
-			writeBadRequest(w, err)
+			ServerError(w, r, "creating object", err)
 			return
 		}
-		response, err := store.Create(r.Context(), m, blob)
-		if err != nil {
-			WriteObjectError(w, r, "creating object", err)
-			return
-		}
-		WriteJSON(w, http.StatusCreated, response)
+		out.write(w)
 	}
 }
 
@@ -234,28 +285,12 @@ func HandleUpdateObject(database *db.DB, publisher events.Publisher, blobs BlobR
 			return
 		}
 		m := objects.Mutation{UserID: SessionFrom(r).User.ID, CollectionID: r.PathValue("id"), ObjectID: r.PathValue("objectId"), MutationID: mID}
-		if claim.verify != nil {
-			response, replayed, err := store.ReplayUpdate(r.Context(), m, version)
-			if err != nil {
-				WriteObjectError(w, r, "updating object", err)
-				return
-			}
-			if replayed {
-				WriteJSON(w, http.StatusOK, response)
-				return
-			}
-		}
-		blob, err := claim.resolve()
+		out, err := UpdateObject(r.Context(), store, m, version, claim)
 		if err != nil {
-			writeBadRequest(w, err)
+			ServerError(w, r, "updating object", err)
 			return
 		}
-		response, err := store.Update(r.Context(), m, blob, version)
-		if err != nil {
-			WriteObjectError(w, r, "updating object", err)
-			return
-		}
-		WriteJSON(w, http.StatusOK, response)
+		out.write(w)
 	}
 }
 

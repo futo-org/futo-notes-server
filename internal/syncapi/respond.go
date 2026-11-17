@@ -54,11 +54,16 @@ func (e *CodedError) Error() string { return e.Message }
 // writeBadRequest answers a 400 with err's message, and its code when err is
 // a CodedError.
 func writeBadRequest(w http.ResponseWriter, err error) {
+	badRequestOutcome(err).write(w)
+}
+
+// badRequestOutcome is the 400 carrying err's message, and its code when err
+// is a CodedError.
+func badRequestOutcome(err error) Outcome {
 	if coded, ok := errors.AsType[*CodedError](err); ok {
-		WriteCodedError(w, http.StatusBadRequest, coded.Code, coded.Message)
-		return
+		return Outcome{http.StatusBadRequest, CodedErrorResponse{Code: coded.Code, Error: coded.Message}}
 	}
-	WriteError(w, http.StatusBadRequest, err.Error())
+	return Outcome{http.StatusBadRequest, ErrorResponse{Error: err.Error()}}
 }
 
 // WriteJSON answers with status and v encoded as JSON.
