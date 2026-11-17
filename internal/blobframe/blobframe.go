@@ -24,7 +24,8 @@ const (
 	// MaxKeyChars caps each key's length in characters (runes).
 	MaxKeyChars = 128
 	// MaxBatchBytes caps the encoded response, counting every frame's fixed
-	// bytes, key bytes and blob bytes.
+	// bytes, key bytes and blob bytes. The self-hosted batch upload body
+	// shares the cap.
 	MaxBatchBytes = 32 << 20
 	// MaxBlobBytes is the largest blob a frame may carry: the largest blob a
 	// single upload can create.

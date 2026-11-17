@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"futo-notes-server/internal/auth"
+	"futo-notes-server/internal/blobframe"
 	"futo-notes-server/internal/blobs"
 	"futo-notes-server/internal/syncapi"
 )
@@ -50,7 +51,7 @@ func sparseStore(t testing.TB, sizes map[string]int64) *blobs.Store {
 
 type frame struct {
 	Key    string
-	Status frameStatus
+	Status blobframe.Status
 	Blob   []byte
 }
 
@@ -68,7 +69,7 @@ func decodeFrames(t testing.TB, payload []byte) []frame {
 		}
 		f := frame{Key: string(payload[offset : offset+keyLen])}
 		offset += keyLen
-		f.Status = frameStatus(payload[offset])
+		f.Status = blobframe.Status(payload[offset])
 		offset++
 		blobLen := int(binary.BigEndian.Uint32(payload[offset:]))
 		offset += 4
@@ -102,7 +103,7 @@ func TestStreamBlobBatch(t *testing.T) {
 	if len(frames) != len(keys) {
 		t.Fatalf("got %d frames, want %d", len(frames), len(keys))
 	}
-	wantStatus := []frameStatus{frameOK, frameMissing, frameMissing, frameMissing, frameMissing, frameOK}
+	wantStatus := []blobframe.Status{blobframe.OK, blobframe.Missing, blobframe.Missing, blobframe.Missing, blobframe.Missing, blobframe.OK}
 	for i, f := range frames {
 		if f.Key != keys[i] {
 			t.Errorf("frame %d key = %q, want %q", i, f.Key, keys[i])
@@ -110,7 +111,7 @@ func TestStreamBlobBatch(t *testing.T) {
 		if f.Status != wantStatus[i] {
 			t.Errorf("frame %d status = %d, want %d", i, f.Status, wantStatus[i])
 		}
-		if f.Status != frameOK && len(f.Blob) != 0 {
+		if f.Status != blobframe.OK && len(f.Blob) != 0 {
 			t.Errorf("frame %d carries %d bytes with status %d", i, len(f.Blob), f.Status)
 		}
 	}
@@ -132,13 +133,13 @@ func TestStreamBlobBatchCap(t *testing.T) {
 	if err := streamBlobBatch(&out, store, fuzzUser, keys); err != nil {
 		t.Fatal(err)
 	}
-	if out.Len() > maxBatchBytes {
-		t.Fatalf("payload %d exceeds the %d cap", out.Len(), maxBatchBytes)
+	if out.Len() > blobframe.MaxBatchBytes {
+		t.Fatalf("payload %d exceeds the %d cap", out.Len(), blobframe.MaxBatchBytes)
 	}
 	frames := decodeFrames(t, out.Bytes())
 	// Two 12 MiB blobs fit under 32 MiB; the third would not. A later blob
 	// small enough to fit still ships.
-	want := []frameStatus{frameOK, frameOK, frameOmitted, frameOK}
+	want := []blobframe.Status{blobframe.OK, blobframe.OK, blobframe.Omitted, blobframe.OK}
 	for i, f := range frames {
 		if f.Status != want[i] {
 			t.Fatalf("frame %d status = %d, want %d", i, f.Status, want[i])
@@ -148,30 +149,30 @@ func TestStreamBlobBatchCap(t *testing.T) {
 
 func TestStreamBlobBatchShipsFirstOversizeBlob(t *testing.T) {
 	oversize, next := blobKey(fuzzUser, 1), blobKey(fuzzUser, 2)
-	store := sparseStore(t, map[string]int64{oversize: maxBatchBytes + 1, next: 8})
+	store := sparseStore(t, map[string]int64{oversize: blobframe.MaxBatchBytes + 1, next: 8})
 
 	var out bytes.Buffer
 	if err := streamBlobBatch(&out, store, fuzzUser, []string{oversize, next}); err != nil {
 		t.Fatal(err)
 	}
 	frames := decodeFrames(t, out.Bytes())
-	if frames[0].Status != frameOK || len(frames[0].Blob) != maxBatchBytes+1 {
+	if frames[0].Status != blobframe.OK || len(frames[0].Blob) != blobframe.MaxBatchBytes+1 {
 		t.Fatalf("first frame did not ship: status %d, %d bytes", frames[0].Status, len(frames[0].Blob))
 	}
-	if frames[1].Status != frameOmitted {
+	if frames[1].Status != blobframe.Omitted {
 		t.Fatalf("second frame status = %d, want omitted", frames[1].Status)
 	}
 }
 
 func TestStreamBlobBatchSkipsUnframeableFile(t *testing.T) {
 	huge := blobKey(fuzzUser, 1)
-	store := sparseStore(t, map[string]int64{huge: maxBlobBytes + 1})
+	store := sparseStore(t, map[string]int64{huge: blobframe.MaxBlobBytes + 1})
 
 	var out bytes.Buffer
 	if err := streamBlobBatch(&out, store, fuzzUser, []string{huge}); err != nil {
 		t.Fatal(err)
 	}
-	if frames := decodeFrames(t, out.Bytes()); frames[0].Status != frameMissing {
+	if frames := decodeFrames(t, out.Bytes()); frames[0].Status != blobframe.Missing {
 		t.Fatalf("status = %d, want missing", frames[0].Status)
 	}
 }
@@ -187,8 +188,8 @@ func batchRequest(store *blobs.Store, body string) *httptest.ResponseRecorder {
 
 func TestBatchFetchValidation(t *testing.T) {
 	store := sparseStore(t, map[string]int64{blobKey(fuzzUser, 1): 4})
-	longKey := strings.Repeat("k", maxBatchKeyChars+1)
-	manyKeys := make([]string, maxBatchFetchKeys+1)
+	longKey := strings.Repeat("k", blobframe.MaxKeyChars+1)
+	manyKeys := make([]string, blobframe.MaxKeys+1)
 	for i := range manyKeys {
 		manyKeys[i] = `"` + blobKey(fuzzUser, i) + `"`
 	}
@@ -207,7 +208,7 @@ func TestBatchFetchValidation(t *testing.T) {
 		{"empty keys", `{"keys": []}`, http.StatusBadRequest},
 		{"key too long", `{"keys": ["` + longKey + `"]}`, http.StatusBadRequest},
 		{"too many keys", `{"keys": [` + strings.Join(manyKeys, ",") + `]}`, http.StatusBadRequest},
-		{"body too large", `{"keys": ["` + strings.Repeat("x", maxBatchFetchBody) + `"]}`, http.StatusRequestEntityTooLarge},
+		{"body too large", `{"keys": ["` + strings.Repeat("x", blobframe.MaxRequestBytes) + `"]}`, http.StatusRequestEntityTooLarge},
 		{"ok", `{"keys": ["` + blobKey(fuzzUser, 1) + `"]}`, http.StatusOK},
 	}
 	for _, test := range tests {
@@ -221,7 +222,7 @@ func TestBatchFetchValidation(t *testing.T) {
 
 func TestBatchFetchMaximumKeys(t *testing.T) {
 	store := sparseStore(t, map[string]int64{blobKey(fuzzUser, 0): 3})
-	keys := make([]string, maxBatchFetchKeys)
+	keys := make([]string, blobframe.MaxKeys)
 	for i := range keys {
 		keys[i] = `"` + blobKey(fuzzUser, i) + `"`
 	}
@@ -232,8 +233,8 @@ func TestBatchFetchMaximumKeys(t *testing.T) {
 	if w.Header().Get("Content-Type") != "application/octet-stream" {
 		t.Fatalf("content type = %q", w.Header().Get("Content-Type"))
 	}
-	if frames := decodeFrames(t, w.Body.Bytes()); len(frames) != maxBatchFetchKeys {
-		t.Fatalf("got %d frames, want %d", len(frames), maxBatchFetchKeys)
+	if frames := decodeFrames(t, w.Body.Bytes()); len(frames) != blobframe.MaxKeys {
+		t.Fatalf("got %d frames, want %d", len(frames), blobframe.MaxKeys)
 	}
 }
 
@@ -290,11 +291,11 @@ func FuzzStreamBlobBatch(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, joined string) {
 		keys := strings.Split(joined, "\n")
-		if len(keys) > maxBatchFetchKeys {
-			keys = keys[:maxBatchFetchKeys]
+		if len(keys) > blobframe.MaxKeys {
+			keys = keys[:blobframe.MaxKeys]
 		}
 		for _, key := range keys {
-			if utf8.RuneCountInString(key) > maxBatchKeyChars {
+			if utf8.RuneCountInString(key) > blobframe.MaxKeyChars {
 				t.Skip()
 			}
 		}
@@ -310,10 +311,10 @@ func FuzzStreamBlobBatch(f *testing.F) {
 			if f.Key != keys[i] {
 				t.Fatalf("frame %d key = %q, want %q", i, f.Key, keys[i])
 			}
-			if f.Status > frameOmitted {
+			if f.Status > blobframe.Omitted {
 				t.Fatalf("frame %d status = %d", i, f.Status)
 			}
-			if f.Status != frameOK && len(f.Blob) != 0 {
+			if f.Status != blobframe.OK && len(f.Blob) != 0 {
 				t.Fatalf("frame %d carries bytes with status %d", i, f.Status)
 			}
 			if string(f.Blob) != "" && string(f.Blob) != "mine" {

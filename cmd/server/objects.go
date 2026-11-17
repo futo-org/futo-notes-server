@@ -10,6 +10,7 @@ import (
 
 	"github.com/rs/zerolog/hlog"
 
+	"futo-notes-server/internal/blobframe"
 	"futo-notes-server/internal/blobs"
 	"futo-notes-server/internal/db"
 	"futo-notes-server/internal/events"
@@ -18,10 +19,7 @@ import (
 	"futo-notes-server/internal/syncapi"
 )
 
-const (
-	maxBatchBytes   = 32 << 20
-	maxBatchEntries = 200
-)
+const maxBatchEntries = 200
 
 // stagedBlobs reads the blob of an object create or update as the self-hosted
 // server names it: a blob_key the caller staged with POST /api/blobs, and its
@@ -69,7 +67,7 @@ func (stagedBlobs) ReadUpdate(r *http.Request) (int64, syncapi.BlobClaim, error)
 }
 
 func readBlobBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
-	body, ok := syncapi.ReadLimitedBody(w, r, maxBlobBytes, "blob too large")
+	body, ok := syncapi.ReadLimitedBody(w, r, blobframe.MaxBlobBytes, "blob too large")
 	if !ok {
 		return nil, false
 	}
@@ -264,7 +262,7 @@ var batchInternalError = batchStatusResult{Error: "internal server error", Statu
 func handleBatchBlobObjects(database *db.DB, blobStore *blobs.Store, publisher events.Publisher) http.HandlerFunc {
 	store := objects.New(database, publisher)
 	return func(w http.ResponseWriter, r *http.Request) {
-		body, ok := syncapi.ReadLimitedBody(w, r, maxBatchBytes, "request too large")
+		body, ok := syncapi.ReadLimitedBody(w, r, blobframe.MaxBatchBytes, "request too large")
 		if !ok {
 			return
 		}
@@ -299,7 +297,7 @@ type batchApplier struct {
 // entry stages one entry's blob and applies its mutation, returning the
 // entry's result. A failure affects only this entry.
 func (b batchApplier) entry(r *http.Request, entry batchEntry) any {
-	if len(entry.Blob) > maxBlobBytes {
+	if len(entry.Blob) > blobframe.MaxBlobBytes {
 		return batchStatusResult{Status: "too_large"}
 	}
 	m := objects.Mutation{UserID: b.userID, CollectionID: b.collectionID}
