@@ -5,6 +5,7 @@
 //
 //	kind     signed by   iss         aud         claims                 lifetime
 //	access   API         notes-api   region id   sub, scope=blobs       24h
+//	                                             or scope=blobs.read
 //	admin    API         notes-api   region id   scope=admin (no sub)   5 min
 //	receipt  region      region id   notes-api   sub, key, size         24h
 //
@@ -34,6 +35,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 	"uuid"
@@ -46,8 +48,11 @@ import (
 const (
 	// apiIssuer is the iss of access and admin tokens and the aud of receipts.
 	apiIssuer = "notes-api"
-	// scopeBlobs is the scope of access tokens.
+	// scopeBlobs is the scope of access tokens that may read and write.
 	scopeBlobs = "blobs"
+	// scopeBlobsRead is the scope of access tokens that may only read: an
+	// account without a subscription keeps its notes readable.
+	scopeBlobsRead = "blobs.read"
 	// scopeAdmin is the scope of admin tokens.
 	scopeAdmin = "admin"
 	// accessTokenTTL is how long an access token stays valid.
@@ -90,6 +95,8 @@ func buildOptions(opts []Option) options {
 // AccessToken is a verified access token.
 type AccessToken struct {
 	UserID string
+	// Write reports that the token may upload, not only read.
+	Write bool
 }
 
 // Receipt is a verified upload receipt.
@@ -121,16 +128,25 @@ func NewMinter(key SigningKey, opts ...Option) *Minter {
 	return &Minter{key: key, now: buildOptions(opts).now}
 }
 
-// MintAccess signs a 24h access token for userID at region. It returns the
-// token and its expiry.
+// MintAccess signs a 24h access token for userID at region that may read
+// and write. It returns the token and its expiry.
 func (m *Minter) MintAccess(region, userID string) (string, time.Time, error) {
+	return m.mintAccess(region, userID, scopeBlobs)
+}
+
+// MintReadAccess is MintAccess for a token that may only read.
+func (m *Minter) MintReadAccess(region, userID string) (string, time.Time, error) {
+	return m.mintAccess(region, userID, scopeBlobsRead)
+}
+
+func (m *Minter) mintAccess(region, userID, scope string) (string, time.Time, error) {
 	if err := checkRegion(region); err != nil {
 		return "", time.Time{}, err
 	}
 	if !ids.IsUserID(userID) {
 		return "", time.Time{}, fmt.Errorf("user id %q is not a UUID", userID)
 	}
-	return m.mint(region, userID, scopeBlobs, accessTokenTTL)
+	return m.mint(region, userID, scope, accessTokenTTL)
 }
 
 // MintAdmin signs a 5-minute admin token for region.
@@ -180,16 +196,17 @@ func NewVerifier(keys KeySet, region string, opts ...Option) (*Verifier, error) 
 	return &Verifier{keys: keys, region: region, now: buildOptions(opts).now}, nil
 }
 
-// VerifyAccess checks an access token and returns its user.
+// VerifyAccess checks an access token, of either scope, and returns its
+// user and whether it may write.
 func (v *Verifier) VerifyAccess(token string) (AccessToken, error) {
-	c, err := v.verify(token, scopeBlobs)
+	c, err := v.verify(token, scopeBlobs, scopeBlobsRead)
 	if err != nil {
 		return AccessToken{}, err
 	}
 	if !ids.IsUserID(c.Subject) {
 		return AccessToken{}, invalid(errors.New("sub is not a UUID"))
 	}
-	return AccessToken{UserID: c.Subject}, nil
+	return AccessToken{UserID: c.Subject, Write: c.Scope == scopeBlobs}, nil
 }
 
 // VerifyAdmin checks an admin token.
@@ -204,13 +221,13 @@ func (v *Verifier) VerifyAdmin(token string) error {
 	return nil
 }
 
-func (v *Verifier) verify(token, scope string) (scopedClaims, error) {
+func (v *Verifier) verify(token string, scopes ...string) (scopedClaims, error) {
 	var c scopedClaims
 	if err := parse(token, &c, v.keys, apiIssuer, v.region, v.now); err != nil {
 		return scopedClaims{}, err
 	}
-	if c.Scope != scope {
-		return scopedClaims{}, invalid(fmt.Errorf("scope %q, want %q", c.Scope, scope))
+	if !slices.Contains(scopes, c.Scope) {
+		return scopedClaims{}, invalid(fmt.Errorf("scope %q, want one of %q", c.Scope, scopes))
 	}
 	return c, nil
 }
