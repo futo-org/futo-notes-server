@@ -28,6 +28,9 @@
 # The API runs with DEV_UI and the mock web payment provider, so billing is
 # on: a test user writes only once subscribed, through the mock checkout
 # (POST /api/billing/checkout, then POST the URL it returns).
+# HOSTED_STACK_ALLOWED_EMAIL_DOMAINS, optional and empty by default, is the
+# API's ALLOWED_EMAIL_DOMAINS: the comma-separated email domains new accounts
+# may sign up with. Empty lets anyone sign up.
 # HOSTED_STACK_DIR holds the stack's state and its service logs
 # (logs/<service>.log), by default $TMPDIR/futo-notes-hosted-stack. Give every
 # command the same one.
@@ -252,6 +255,7 @@ up() {
     OIDC_CLIENT_ID=notes-test
     OIDC_CLIENT_SECRET=notes-test-secret
     APP_REDIRECT_SCHEMES="tech.futo.notes,tech.futo.notes.dev"
+    ALLOWED_EMAIL_DOMAINS="${HOSTED_STACK_ALLOWED_EMAIL_DOMAINS:-}"
     REGIONS_FILE="$state/regions.json"
     API_SIGNING_KEY="$(cat "$keys/api.key.pem")"
     STORAGE_REFRESH_ROTATION_KEY="$(cat "$keys/storage-refresh-rotation.key")"
