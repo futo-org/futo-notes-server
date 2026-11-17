@@ -222,29 +222,26 @@ func authTimeOf(t *testing.T, srv *httptest.Server, rp relyingParty, sub string,
 	return claims.AuthTime
 }
 
-func TestAuthTimeAndMaxAge(t *testing.T) {
+func TestTestAuthorizeSignsInAfresh(t *testing.T) {
 	srv := mockoidctest.Start(t, testConfig())
 	rp := newRelyingParty(t, srv.URL)
 
-	// Playing a provider that ignores max_age: the token carries the forced
-	// auth_time.
+	// Playing a provider that answers with an old SSO session: the token
+	// carries the forced auth_time.
 	stale := time.Now().Add(-time.Hour).Unix()
 	if got := authTimeOf(t, srv, rp, "user-1", url.Values{"auth_time": {strconv.FormatInt(stale, 10)}}); got != stale {
 		t.Fatalf("forced auth_time = %d, want %d", got, stale)
 	}
-	// Without max_age the SSO session's authentication is reused...
+	// Otherwise every sign-in is recorded as now, even for a subject that
+	// signed in before and with no max_age. auth_time has whole seconds, so
+	// wait one out between sign-ins.
 	first := authTimeOf(t, srv, rp, "user-2", nil)
-	if got := authTimeOf(t, srv, rp, "user-2", nil); got != first {
-		t.Fatalf("auth_time without max_age = %d, want the session's %d", got, first)
-	}
-	// ...and kept within a max_age, while one it is too old for (0 here)
-	// authenticates again. auth_time has whole seconds, so wait one out.
-	time.Sleep(1100 * time.Millisecond)
-	if got := authTimeOf(t, srv, rp, "user-2", url.Values{"max_age": {"3600"}}); got != first {
-		t.Fatalf("auth_time within max_age = %d, want the session's %d", got, first)
-	}
-	if got := authTimeOf(t, srv, rp, "user-2", url.Values{"max_age": {"0"}}); got <= first || got < time.Now().Add(-5*time.Second).Unix() {
-		t.Fatalf("auth_time with max_age=0 = %d, want now (first was %d)", got, first)
+	for _, extra := range []url.Values{nil, {"max_age": {"3600"}}, {"max_age": {"0"}}} {
+		time.Sleep(1100 * time.Millisecond)
+		before := time.Now().Unix()
+		if got := authTimeOf(t, srv, rp, "user-2", extra); got < before || got <= first {
+			t.Fatalf("auth_time with %v = %d, want now (>= %d, after the first sign-in's %d)", extra, got, before, first)
+		}
 	}
 }
 
