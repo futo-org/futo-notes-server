@@ -15,7 +15,7 @@ import (
 	"github.com/getkin/kin-openapi/routers/legacy"
 
 	"futo-notes-server/internal/hostedauth"
-	"futo-notes-server/internal/storagesvc/httputil"
+	"futo-notes-server/internal/httputil"
 	"futo-notes-server/internal/storagesvc/metrics"
 	"futo-notes-server/internal/storagesvc/storage"
 )

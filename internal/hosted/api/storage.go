@@ -12,6 +12,7 @@ import (
 
 	"futo-notes-server/internal/hosted/account"
 	"futo-notes-server/internal/hostedauth"
+	"futo-notes-server/internal/httputil"
 	"futo-notes-server/internal/objects"
 	"futo-notes-server/internal/syncapi"
 )
@@ -40,23 +41,23 @@ func (s *Server) handleStorageToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if body.RefreshToken == "" {
-		writeError(w, r, http.StatusBadRequest, "refresh_token is required")
+		httputil.WriteError(w, r, http.StatusBadRequest, "refresh_token is required")
 		return
 	}
 	exchange, err := s.accounts.ExchangeRefreshToken(r.Context(), body.RefreshToken)
 	switch {
 	case errors.Is(err, account.ErrInvalidRefreshToken):
 		s.metrics.refresh(r.Context(), "invalid")
-		writeError(w, r, http.StatusUnauthorized, "Invalid refresh token")
+		httputil.WriteError(w, r, http.StatusUnauthorized, "Invalid refresh token")
 		return
 	case errors.Is(err, account.ErrRefreshTokenReused):
 		s.metrics.refresh(r.Context(), "reuse_detected")
 		hlog.FromRequest(r).Warn().Msg("storage refresh token reused; session revoked")
-		writeError(w, r, http.StatusUnauthorized, "Refresh token already used; the session has been signed out")
+		httputil.WriteError(w, r, http.StatusUnauthorized, "Refresh token already used; the session has been signed out")
 		return
 	case errors.Is(err, account.ErrRefreshTokenRotating):
 		s.metrics.refresh(r.Context(), "concurrent")
-		writeError(w, r, http.StatusConflict, "Refresh token was just rotated by a concurrent request; use the token that request returned")
+		httputil.WriteError(w, r, http.StatusConflict, "Refresh token was just rotated by a concurrent request; use the token that request returned")
 		return
 	case errors.Is(err, account.ErrPendingDeletion):
 		s.metrics.refresh(r.Context(), "pending_deletion")
@@ -64,7 +65,7 @@ func (s *Server) handleStorageToken(w http.ResponseWriter, r *http.Request) {
 		return
 	case errors.Is(err, account.ErrNoRegion):
 		s.metrics.refresh(r.Context(), "no_region")
-		writeError(w, r, http.StatusConflict, "Choose a region before requesting a storage token")
+		httputil.WriteError(w, r, http.StatusConflict, "Choose a region before requesting a storage token")
 		return
 	case err != nil:
 		serverError(w, r, "exchanging storage refresh token", err)
@@ -85,7 +86,7 @@ func (s *Server) handleStorageToken(w http.ResponseWriter, r *http.Request) {
 	}
 	s.metrics.issued(r.Context(), tokenStorageAccess)
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, r, http.StatusOK, storageTokenResponse{
+	httputil.WriteJSON(w, r, http.StatusOK, storageTokenResponse{
 		AccessToken:  accessToken,
 		ExpiresAt:    expiresAt,
 		RefreshToken: exchange.RefreshToken,

@@ -24,6 +24,7 @@ import (
 	"futo-notes-server/internal/hosted/config"
 	"futo-notes-server/internal/hosted/storageclient"
 	"futo-notes-server/internal/hostedauth"
+	"futo-notes-server/internal/httputil"
 	"futo-notes-server/internal/syncapi"
 )
 
@@ -113,9 +114,11 @@ func (s *Server) router() chi.Router {
 		syncapi.RecoverPanic,
 		chimw.GetHead,
 	)
-	r.NotFound(func(w http.ResponseWriter, r *http.Request) { writeError(w, r, http.StatusNotFound, "Not found") })
+	r.NotFound(func(w http.ResponseWriter, r *http.Request) {
+		httputil.WriteError(w, r, http.StatusNotFound, "Not found")
+	})
 	r.MethodNotAllowed(func(w http.ResponseWriter, r *http.Request) {
-		writeError(w, r, http.StatusMethodNotAllowed, "Method not allowed")
+		httputil.WriteError(w, r, http.StatusMethodNotAllowed, "Method not allowed")
 	})
 
 	r.Get("/", syncapi.HandleCapability(syncapi.NewCapability(s.version, "oidc", "open")))
@@ -220,7 +223,7 @@ func (s *Server) authenticate(shape errorShape) func(http.Handler) http.Handler 
 				if shape == syncErrors {
 					syncapi.WriteUnauthorized(w)
 				} else {
-					writeError(w, r, http.StatusUnauthorized, "Unauthorized")
+					httputil.WriteError(w, r, http.StatusUnauthorized, "Unauthorized")
 				}
 				return
 			}
@@ -231,7 +234,7 @@ func (s *Server) authenticate(shape errorShape) func(http.Handler) http.Handler 
 				return
 			case errors.Is(err, auth.ErrNoSession):
 				w.Header().Set("WWW-Authenticate", `Bearer realm="futo-notes", error="invalid_token"`)
-				writeError(w, r, http.StatusUnauthorized, "Session expired or invalid")
+				httputil.WriteError(w, r, http.StatusUnauthorized, "Session expired or invalid")
 				return
 			case err != nil && shape == syncErrors:
 				syncapi.ServerError(w, r, "validating session", err)

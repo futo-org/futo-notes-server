@@ -13,7 +13,7 @@ import (
 	"github.com/rs/zerolog/hlog"
 
 	"futo-notes-server/internal/hostedauth"
-	"futo-notes-server/internal/storagesvc/httputil"
+	"futo-notes-server/internal/httputil"
 )
 
 // Token kinds, as reported to OnFailure.

@@ -8,6 +8,7 @@ import (
 	"futo-notes-server/internal/auth"
 	"futo-notes-server/internal/hosted/account"
 	"futo-notes-server/internal/hosted/config"
+	"futo-notes-server/internal/httputil"
 )
 
 // regionResponse is a region as clients see it. Receipt keys stay private.
@@ -28,7 +29,7 @@ func (s *Server) handleRegions(w http.ResponseWriter, r *http.Request) {
 	for _, region := range s.cfg.Regions {
 		regions = append(regions, publicRegion(region))
 	}
-	writeJSON(w, r, http.StatusOK, regions)
+	httputil.WriteJSON(w, r, http.StatusOK, regions)
 }
 
 // accountResponse is the body of the account endpoints. Region and Deletion
@@ -68,7 +69,7 @@ func (s *Server) writeAccount(w http.ResponseWriter, r *http.Request) {
 	if a.DeletionRequestedAt != nil && a.PurgeAt != nil {
 		response.Deletion = &deletionResponse{RequestedAt: a.DeletionRequestedAt.UTC(), PurgeAt: a.PurgeAt.UTC()}
 	}
-	writeJSON(w, r, http.StatusOK, response)
+	httputil.WriteJSON(w, r, http.StatusOK, response)
 }
 
 // handleAccount serves GET /api/account.
@@ -86,12 +87,12 @@ func (s *Server) handleChooseRegion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, ok := s.regions[body.RegionID]; !ok {
-		writeError(w, r, http.StatusBadRequest, "Unknown region")
+		httputil.WriteError(w, r, http.StatusBadRequest, "Unknown region")
 		return
 	}
 	err := s.accounts.ChooseRegion(r.Context(), principalFrom(r).Session.User.ID, body.RegionID)
 	if errors.Is(err, account.ErrRegionChosen) {
-		writeError(w, r, http.StatusConflict, "Region already chosen")
+		httputil.WriteError(w, r, http.StatusConflict, "Region already chosen")
 		return
 	}
 	if err != nil {
@@ -117,7 +118,7 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRestoreAccount(w http.ResponseWriter, r *http.Request) {
 	err := s.accounts.Restore(r.Context(), principalFrom(r).Session.User.ID)
 	if errors.Is(err, account.ErrPurgeStarted) {
-		writeError(w, r, http.StatusConflict, "The deletion grace period is over; the account can no longer be restored")
+		httputil.WriteError(w, r, http.StatusConflict, "The deletion grace period is over; the account can no longer be restored")
 		return
 	}
 	if err != nil {
@@ -160,7 +161,7 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 			Current:    d.ID == p.Session.ID,
 		})
 	}
-	writeJSON(w, r, http.StatusOK, response)
+	httputil.WriteJSON(w, r, http.StatusOK, response)
 }
 
 // handleRevokeSession serves DELETE /api/sessions/{id}: it signs the device
@@ -168,7 +169,7 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRevokeSession(w http.ResponseWriter, r *http.Request) {
 	err := s.accounts.RevokeSession(r.Context(), principalFrom(r).Session.User.ID, r.PathValue("id"))
 	if errors.Is(err, account.ErrNotFound) {
-		writeError(w, r, http.StatusNotFound, "Session not found")
+		httputil.WriteError(w, r, http.StatusNotFound, "Session not found")
 		return
 	}
 	if err != nil {

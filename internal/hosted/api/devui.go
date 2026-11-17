@@ -11,6 +11,7 @@ import (
 
 	"futo-notes-server/internal/hosted/config"
 	"futo-notes-server/internal/hosted/hostedjobs"
+	"futo-notes-server/internal/httputil"
 )
 
 //go:embed devui.html
@@ -52,7 +53,7 @@ func (s *Server) handleDevReconciliation(w http.ResponseWriter, r *http.Request)
 	if id := q.Get("region"); id != "" {
 		i := slices.IndexFunc(regions, func(region config.Region) bool { return region.ID == id })
 		if i < 0 {
-			writeError(w, r, http.StatusBadRequest, fmt.Sprintf("unknown region %q", id))
+			httputil.WriteError(w, r, http.StatusBadRequest, fmt.Sprintf("unknown region %q", id))
 			return
 		}
 		regions = regions[i : i+1]
@@ -61,7 +62,7 @@ func (s *Server) handleDevReconciliation(w http.ResponseWriter, r *http.Request)
 	if value := q.Get("now"); value != "" {
 		var err error
 		if now, err = time.Parse(time.RFC3339, value); err != nil {
-			writeError(w, r, http.StatusBadRequest, "now must be an RFC 3339 time")
+			httputil.WriteError(w, r, http.StatusBadRequest, "now must be an RFC 3339 time")
 			return
 		}
 	}
@@ -87,12 +88,12 @@ func handleDevJob[T any](run func(*http.Request) (T, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		result, err := run(r)
 		if err != nil {
-			writeJSON(w, r, http.StatusInternalServerError, struct {
+			httputil.WriteJSON(w, r, http.StatusInternalServerError, struct {
 				Result T      `json:"result"`
 				Error  string `json:"error"`
 			}{Result: result, Error: err.Error()})
 			return
 		}
-		writeJSON(w, r, http.StatusOK, result)
+		httputil.WriteJSON(w, r, http.StatusOK, result)
 	}
 }

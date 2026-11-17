@@ -12,7 +12,7 @@ import (
 	"github.com/rs/zerolog/hlog"
 
 	"futo-notes-server/internal/ids"
-	"futo-notes-server/internal/storagesvc/httputil"
+	"futo-notes-server/internal/httputil"
 	"futo-notes-server/internal/storagesvc/storage"
 )
 
