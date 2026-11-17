@@ -1,5 +1,6 @@
 // Package mockweb is a web payment provider for development and for the
-// apps' test stack, in the style of cmd/mock-oidc. Its checkout and portal
+// apps' test stack, in the style of cmd/mock-oidc. Like the real one, it
+// knows each customer by their OIDC sub. Its checkout and portal
 // are pages the API itself serves under /dev/billing when DEV_UI is on.
 // Completing a checkout, or cancelling in the portal, produces a webhook
 // delivery signed with the shared secret, which the API applies through the
@@ -56,8 +57,9 @@ type Provider struct {
 
 // Subscription is one mock subscription.
 type Subscription struct {
-	ID        string    `json:"id"`
-	UserID    string    `json:"user_id"`
+	ID string `json:"id"`
+	// Subject is the customer's OIDC sub.
+	Subject   string    `json:"subject"`
 	ProductID string    `json:"product_id"`
 	Status    string    `json:"status"`
 	WillRenew bool      `json:"will_renew"`
@@ -84,25 +86,25 @@ func (p *Provider) Source() billing.Source { return billing.SourceWeb }
 
 // CheckoutURL is the mock checkout page for c.
 func (p *Provider) CheckoutURL(_ context.Context, c billing.Customer) (string, error) {
-	return p.customerURL(CheckoutPath, c.UserID), nil
+	return p.customerURL(CheckoutPath, c.Subject), nil
 }
 
 // PortalURL is the mock portal page for c.
 func (p *Provider) PortalURL(_ context.Context, c billing.Customer) (string, error) {
-	return p.customerURL(PortalPath, c.UserID), nil
+	return p.customerURL(PortalPath, c.Subject), nil
 }
 
-// customerURL signs userID into a page link, as a real provider's session
+// customerURL signs subject into a page link, as a real provider's session
 // URL names its customer unforgeably.
-func (p *Provider) customerURL(path, userID string) string {
-	return p.publicURL + path + "?" + url.Values{"customer": {userID}, "sig": {p.sign([]byte("customer:" + userID))}}.Encode()
+func (p *Provider) customerURL(path, subject string) string {
+	return p.publicURL + path + "?" + url.Values{"customer": {subject}, "sig": {p.sign([]byte("customer:" + subject))}}.Encode()
 }
 
-// Customer returns the customer a page link names, or false when its
-// signature does not hold.
+// Customer returns the sub of the customer a page link names, or false when
+// its signature does not hold.
 func (p *Provider) Customer(query url.Values) (string, bool) {
-	userID := query.Get("customer")
-	return userID, userID != "" && hmac.Equal([]byte(query.Get("sig")), []byte(p.sign([]byte("customer:"+userID))))
+	subject := query.Get("customer")
+	return subject, subject != "" && hmac.Equal([]byte(query.Get("sig")), []byte(p.sign([]byte("customer:"+subject))))
 }
 
 func (p *Provider) sign(data []byte) string {
@@ -128,7 +130,7 @@ func event(s Subscription, raw []byte) billing.Event {
 	return billing.Event{
 		Source:      billing.SourceWeb,
 		ExternalID:  s.ID,
-		UserID:      s.UserID,
+		Subject:     s.Subject,
 		ProductID:   s.ProductID,
 		Status:      billing.Status(s.Status),
 		WillRenew:   s.WillRenew,
@@ -179,14 +181,14 @@ func (p *Provider) update(externalID string, change func(*Subscription)) (Subscr
 	return s, nil
 }
 
-// Checkout completes a checkout for userID: a new subscription, paid for
-// one Period.
-func (p *Provider) Checkout(userID string) Subscription {
+// Checkout completes a checkout for the customer whose sub is subject: a
+// new subscription, paid for one Period.
+func (p *Provider) Checkout(subject string) Subscription {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := p.now()
 	s := Subscription{
-		ID: "mock_sub_" + uuid.NewV7().String(), UserID: userID, ProductID: ProductID,
+		ID: "mock_sub_" + uuid.NewV7().String(), Subject: subject, ProductID: ProductID,
 		Status: string(billing.StatusActive), WillRenew: true, ExpiresAt: now.Add(Period), UpdatedAt: now,
 	}
 	p.subs[s.ID] = s
@@ -202,7 +204,7 @@ func (p *Provider) Record(ev billing.Event) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	s := Subscription{
-		ID: ev.ExternalID, UserID: ev.UserID, ProductID: ev.ProductID, Status: string(ev.Status),
+		ID: ev.ExternalID, Subject: ev.Subject, ProductID: ev.ProductID, Status: string(ev.Status),
 		WillRenew: ev.WillRenew, UpdatedAt: ev.EventAt,
 	}
 	if ev.ExpiresAt != nil {
@@ -219,13 +221,14 @@ func (p *Provider) Subscription(id string) (Subscription, bool) {
 	return s, ok
 }
 
-// Subscriptions lists userID's mock subscriptions, newest first.
-func (p *Provider) Subscriptions(userID string) []Subscription {
+// Subscriptions lists the mock subscriptions of the customer whose sub is
+// subject, newest first.
+func (p *Provider) Subscriptions(subject string) []Subscription {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	var subs []Subscription
 	for _, s := range p.subs {
-		if s.UserID == userID {
+		if s.Subject == subject {
 			subs = append(subs, s)
 		}
 	}

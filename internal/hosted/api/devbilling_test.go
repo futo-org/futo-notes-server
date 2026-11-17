@@ -11,7 +11,8 @@ import (
 
 func TestDevBillingEvents(t *testing.T) {
 	h := newBillingHarness(t)
-	app, tokens := h.appLogin(h.newSub())
+	subject := h.newSub()
+	app, _ := h.appLogin(subject)
 	event := func(kind string) billingBody {
 		t.Helper()
 		var b billingBody
@@ -34,7 +35,7 @@ func TestDevBillingEvents(t *testing.T) {
 		t.Fatalf("refund = %+v", b)
 	}
 	// The mock agrees with the synthetic events, so reconciliation keeps them.
-	if subs := h.mock.Subscriptions(tokens.User.ID); len(subs) != 3 {
+	if subs := h.mock.Subscriptions(subject); len(subs) != 3 {
 		t.Fatalf("mock subscriptions = %+v, want the three grants", subs)
 	}
 	app.expect(http.MethodPost, "/dev/jobs/billing-reconciliation", nil, http.StatusOK)

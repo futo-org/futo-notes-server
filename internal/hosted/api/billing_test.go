@@ -282,7 +282,8 @@ func TestBillingCapabilityAndState(t *testing.T) {
 
 func TestWebCheckoutAndPortal(t *testing.T) {
 	h := newBillingHarness(t)
-	app, tokens := h.appLogin(h.newSub())
+	subject := h.newSub()
+	app, _ := h.appLogin(subject)
 	app.subscribe()
 	b := app.billing()
 	if !b.Entitled || str(b.Status) != "active" || str(b.Source) != "web" || str(b.ProductID) != mockweb.ProductID || !b.WillRenew ||
@@ -301,7 +302,7 @@ func TestWebCheckoutAndPortal(t *testing.T) {
 	if err != nil || page.Path != mockweb.PortalPath {
 		t.Fatalf("portal URL %q (%v)", portal.URL, err)
 	}
-	subs := h.mock.Subscriptions(tokens.User.ID)
+	subs := h.mock.Subscriptions(subject)
 	if len(subs) != 1 {
 		t.Fatalf("mock subscriptions = %+v", subs)
 	}
@@ -396,9 +397,10 @@ func TestStorePurchases(t *testing.T) {
 
 func TestBillingWebhooks(t *testing.T) {
 	h := newBillingHarness(t)
-	app, tokens := h.appLogin(h.newSub())
+	subject := h.newSub()
+	app, _ := h.appLogin(subject)
 
-	sub := h.mock.Checkout(tokens.User.ID)
+	sub := h.mock.Checkout(subject)
 	delivery, err := h.mock.Delivery(sub)
 	if err != nil {
 		t.Fatal(err)
@@ -558,7 +560,8 @@ func TestStorageTokenScopeFollowsTheSubscription(t *testing.T) {
 
 func TestDeleteAccountCancelsRenewals(t *testing.T) {
 	h := newBillingHarness(t)
-	app, tokens := h.appLogin(h.newSub())
+	subject := h.newSub()
+	app, _ := h.appLogin(subject)
 	app.subscribe()
 	accountToken := app.billing().StoreAccountToken
 	playToken, playSub := h.play.sell(accountToken)
@@ -567,7 +570,7 @@ func TestDeleteAccountCancelsRenewals(t *testing.T) {
 	app.expect(http.MethodPost, "/api/billing/app-store/transactions", map[string]string{"signed_transaction": appleToken}, http.StatusOK)
 
 	app.expect(http.MethodDelete, "/api/account", nil, http.StatusOK)
-	web := h.mock.Subscriptions(tokens.User.ID)
+	web := h.mock.Subscriptions(subject)
 	if len(web) != 1 || web[0].WillRenew {
 		t.Fatalf("web subscriptions after deletion = %+v, want cancelled", web)
 	}

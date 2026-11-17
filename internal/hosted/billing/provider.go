@@ -1,8 +1,8 @@
 // Package billing decides whether a hosted account has paid. Payment
 // providers report subscriptions as normalized Events; the entitlement store
 // keeps one row per subscription, and an account is entitled while any of its
-// rows is active or in grace. The web provider (FUTOpay, Polar or Stripe) is
-// pluggable; the App Store and Play are providers behind the same interface.
+// rows is active or in grace. The web provider (Stripe in production, a mock
+// in development) is pluggable; the App Store and Play are providers behind the same interface.
 package billing
 
 import (
@@ -57,9 +57,10 @@ type Event struct {
 	// token (linkedPurchaseToken names the old one); each token is its own
 	// row, the old one expires, and any active row entitles the account.
 	ExternalID string
-	// UserID is the account a web subscription belongs to, from the
-	// reference passed at checkout. Empty for store sources.
-	UserID string
+	// Subject is the OIDC sub of the account a web subscription belongs
+	// to, as the web provider recorded it at checkout. Empty for store
+	// sources.
+	Subject string
 	// AccountToken is the account's store_account_token as the store
 	// recorded it: the App Store appAccountToken or the Play
 	// obfuscatedExternalAccountId. Empty for web.
@@ -97,10 +98,13 @@ type Provider interface {
 	Cancel(ctx context.Context, externalID string) error
 }
 
-// Customer is the account a web checkout or portal is for.
+// Customer is the account a web checkout or portal is for. The web provider
+// knows it by Subject, its OIDC sub; Email is only for receipts and is never
+// matched on.
 type Customer struct {
-	UserID string
-	Email  string
+	UserID  string
+	Subject string
+	Email   string
 }
 
 // WebProvider is the web payment provider: checkout and self-service portal
@@ -109,6 +113,29 @@ type WebProvider interface {
 	Provider
 	CheckoutURL(ctx context.Context, c Customer) (string, error)
 	PortalURL(ctx context.Context, c Customer) (string, error)
+}
+
+// EmbeddedCheckout is a web provider whose checkout is mounted inside our
+// own pages rather than reached by a redirect. CheckoutURL is then unused.
+type EmbeddedCheckout interface {
+	WebProvider
+	// PublishableKey is the browser-side key the page mounts checkout with.
+	PublishableKey() string
+	// StartCheckout opens a checkout for c that, once paid, returns the
+	// browser to returnURL. The client secret mounts it in the browser and
+	// must not be logged.
+	StartCheckout(ctx context.Context, c Customer, returnURL string) (Checkout, error)
+	// CompleteCheckout returns the subscription a completed checkout
+	// created, so entitlement need not wait for the webhook. It returns
+	// ErrCheckoutForeign for a checkout opened for another customer, and
+	// ErrCheckoutIncomplete for one not yet paid.
+	CompleteCheckout(ctx context.Context, c Customer, checkoutID string) (Event, error)
+}
+
+// Checkout is an open embedded checkout.
+type Checkout struct {
+	ID           string
+	ClientSecret string
 }
 
 // Purchase is what an app submits after a store purchase: the App Store
@@ -136,4 +163,9 @@ var (
 	// ErrInvalidPurchase reports a submitted purchase the store does not
 	// vouch for.
 	ErrInvalidPurchase = errors.New("invalid purchase")
+	// ErrCheckoutForeign reports a checkout opened for another customer, or
+	// unknown to the provider.
+	ErrCheckoutForeign = errors.New("checkout belongs to another customer")
+	// ErrCheckoutIncomplete reports a checkout not yet paid.
+	ErrCheckoutIncomplete = errors.New("checkout is not complete")
 )

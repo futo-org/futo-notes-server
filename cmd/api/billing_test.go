@@ -7,7 +7,9 @@ import (
 
 	"futo-notes-server/internal/hosted/billing"
 	"futo-notes-server/internal/hosted/billing/appstore"
+	"futo-notes-server/internal/hosted/billing/mockweb"
 	"futo-notes-server/internal/hosted/billing/play"
+	"futo-notes-server/internal/hosted/billing/stripe"
 	"futo-notes-server/internal/hosted/config"
 )
 
@@ -23,5 +25,17 @@ func TestBillingProvidersRegistersConfiguredStores(t *testing.T) {
 		if got := p.Stores[source]; got == nil || got.Source() != source {
 			t.Errorf("Stores[%s] = %v", source, got)
 		}
+	}
+}
+
+func TestBillingProvidersRegistersTheWebProvider(t *testing.T) {
+	mock := billingProviders(config.Config{WebBilling: config.WebBilling{Provider: config.WebProviderMock, MockWebhookSecret: []byte("0123456789abcdef")}})
+	if _, ok := mock.Web.(*mockweb.Provider); !ok {
+		t.Fatalf("mock web provider = %T", mock.Web)
+	}
+	p := billingProviders(config.Config{WebBilling: config.WebBilling{Provider: config.WebProviderStripe, Stripe: &stripe.Config{PublishableKey: "pk_test_x"}}})
+	embedded, ok := p.Web.(billing.EmbeddedCheckout)
+	if _, isStripe := p.Web.(*stripe.Provider); !ok || !isStripe || embedded.PublishableKey() != "pk_test_x" {
+		t.Fatalf("stripe web provider = %T", p.Web)
 	}
 }

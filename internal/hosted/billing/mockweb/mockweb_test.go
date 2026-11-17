@@ -10,13 +10,17 @@ import (
 	"futo-notes-server/internal/hosted/billing/mockweb"
 )
 
-const userID = "0195e2a1-0000-7000-8000-000000000001"
+const subject = "mock-web-test-subject"
 
 func TestLinksNameTheirCustomer(t *testing.T) {
 	mock := mockweb.New("https://api.test", []byte("mock-webhook-secret"))
 	for _, link := range []func() (string, error){
-		func() (string, error) { return mock.CheckoutURL(t.Context(), billing.Customer{UserID: userID}) },
-		func() (string, error) { return mock.PortalURL(t.Context(), billing.Customer{UserID: userID}) },
+		func() (string, error) {
+			return mock.CheckoutURL(t.Context(), billing.Customer{UserID: "0195e2a1-0000-7000-8000-000000000001", Subject: subject})
+		},
+		func() (string, error) {
+			return mock.PortalURL(t.Context(), billing.Customer{UserID: "0195e2a1-0000-7000-8000-000000000001", Subject: subject})
+		},
 	} {
 		raw, err := link()
 		if err != nil {
@@ -26,11 +30,11 @@ func TestLinksNameTheirCustomer(t *testing.T) {
 		if err != nil || !strings.HasPrefix(raw, "https://api.test/dev/billing/") {
 			t.Fatalf("link %s (%v)", raw, err)
 		}
-		if got, ok := mock.Customer(u.Query()); !ok || got != userID {
+		if got, ok := mock.Customer(u.Query()); !ok || got != subject {
 			t.Fatalf("Customer(%s) = %q, %t", raw, got, ok)
 		}
 		forged := u.Query()
-		forged.Set("customer", "0195e2a1-0000-7000-8000-000000000002")
+		forged.Set("customer", "another-subject")
 		if _, ok := mock.Customer(forged); ok {
 			t.Fatal("a link re-pointed at another customer verified")
 		}
@@ -39,7 +43,7 @@ func TestLinksNameTheirCustomer(t *testing.T) {
 
 func TestCheckoutDeliveryVerifies(t *testing.T) {
 	mock := mockweb.New("https://api.test", []byte("mock-webhook-secret"))
-	sub := mock.Checkout(userID)
+	sub := mock.Checkout(subject)
 	delivery, err := mock.Delivery(sub)
 	if err != nil {
 		t.Fatal(err)
@@ -49,7 +53,7 @@ func TestCheckoutDeliveryVerifies(t *testing.T) {
 		t.Fatalf("Verify = %q, %v, %v", id, events, err)
 	}
 	ev := events[0]
-	if ev.Source != billing.SourceWeb || ev.ExternalID != sub.ID || ev.UserID != userID || ev.Status != billing.StatusActive ||
+	if ev.Source != billing.SourceWeb || ev.ExternalID != sub.ID || ev.Subject != subject || ev.Status != billing.StatusActive ||
 		!ev.WillRenew || ev.ExpiresAt == nil || !ev.ExpiresAt.Equal(sub.ExpiresAt) || !ev.EventAt.Equal(sub.UpdatedAt) {
 		t.Fatalf("event = %+v for %+v", ev, sub)
 	}
@@ -67,7 +71,7 @@ func TestCheckoutDeliveryVerifies(t *testing.T) {
 
 func TestCancelAndRefresh(t *testing.T) {
 	mock := mockweb.New("https://api.test", []byte("mock-webhook-secret"))
-	sub := mock.Checkout(userID)
+	sub := mock.Checkout(subject)
 	if err := mock.Cancel(t.Context(), sub.ID); err != nil {
 		t.Fatal(err)
 	}

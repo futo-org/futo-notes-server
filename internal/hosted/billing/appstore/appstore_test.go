@@ -40,7 +40,7 @@ func TestSubmit(t *testing.T) {
 	}
 	if ev.Source != billing.SourceAppStore || ev.ExternalID != origID || ev.AccountToken != accountTok ||
 		ev.ProductID != productID || ev.Status != billing.StatusActive || !ev.WillRenew ||
-		ev.Environment != billing.EnvironmentProduction || !ev.EventAt.Equal(answered) || ev.GraceUntil != nil || ev.UserID != "" {
+		ev.Environment != billing.EnvironmentProduction || !ev.EventAt.Equal(answered) || ev.GraceUntil != nil || ev.Subject != "" {
 		t.Fatalf("event = %+v", ev)
 	}
 	if ev.ExpiresAt == nil || ev.ExpiresAt.UnixMilli() != apiTx["expiresDate"] {

@@ -112,6 +112,17 @@ dd { margin: 0; overflow-wrap: anywhere; }
   margin: 0 0 1rem;
 }
 
+.notice {
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: .75rem 1rem;
+  margin: 0 0 1rem;
+}
+
+/* Stripe sizes the checkout frame itself; this only keeps the panel from
+   collapsing while it loads. */
+.checkout { min-height: 12rem; margin-top: 1rem; }
+
 button, .button {
   display: inline-block;
   font: inherit;

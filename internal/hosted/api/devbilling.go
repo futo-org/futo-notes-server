@@ -61,7 +61,7 @@ func (s *Server) mockWeb(w http.ResponseWriter, r *http.Request) (*mockweb.Provi
 	return mock, ok
 }
 
-// mockCustomer reads the customer a mock page link names.
+// mockCustomer reads the sub of the customer a mock page link names.
 func (s *Server) mockCustomer(w http.ResponseWriter, r *http.Request) (*mockweb.Provider, string, bool) {
 	mock, ok := s.mockWeb(w, r)
 	if !ok {
@@ -71,11 +71,11 @@ func (s *Server) mockCustomer(w http.ResponseWriter, r *http.Request) (*mockweb.
 		badRequest(w, r, "Invalid form")
 		return nil, "", false
 	}
-	userID, ok := mock.Customer(r.Form)
+	subject, ok := mock.Customer(r.Form)
 	if !ok {
 		httputil.WriteError(w, r, http.StatusForbidden, httputil.CodeUnauthorized, "This mock billing link is not signed for that customer")
 	}
-	return mock, userID, ok
+	return mock, subject, ok
 }
 
 var mockPages = template.Must(template.New("").Parse(`
@@ -114,19 +114,19 @@ func writeMockPage(w http.ResponseWriter, r *http.Request, name string, data any
 
 // handleMockCheckoutPage serves the mock checkout a CheckoutURL points at.
 func (s *Server) handleMockCheckoutPage(w http.ResponseWriter, r *http.Request) {
-	if _, userID, ok := s.mockCustomer(w, r); ok {
-		writeMockPage(w, r, "checkout", map[string]string{"Customer": userID, "Sig": r.Form.Get("sig")})
+	if _, subject, ok := s.mockCustomer(w, r); ok {
+		writeMockPage(w, r, "checkout", map[string]string{"Customer": subject, "Sig": r.Form.Get("sig")})
 	}
 }
 
 // handleMockCheckout completes a mock checkout: the mock sells a
 // subscription and announces it through the webhook route.
 func (s *Server) handleMockCheckout(w http.ResponseWriter, r *http.Request) {
-	mock, userID, ok := s.mockCustomer(w, r)
+	mock, subject, ok := s.mockCustomer(w, r)
 	if !ok {
 		return
 	}
-	sub := mock.Checkout(userID)
+	sub := mock.Checkout(subject)
 	if err := s.deliverMock(r, mock, sub); err != nil {
 		serverError(w, r, "delivering mock checkout", err)
 		return
@@ -136,24 +136,24 @@ func (s *Server) handleMockCheckout(w http.ResponseWriter, r *http.Request) {
 
 // handleMockPortalPage serves the mock portal a PortalURL points at.
 func (s *Server) handleMockPortalPage(w http.ResponseWriter, r *http.Request) {
-	mock, userID, ok := s.mockCustomer(w, r)
+	mock, subject, ok := s.mockCustomer(w, r)
 	if !ok {
 		return
 	}
 	writeMockPage(w, r, "portal", map[string]any{
-		"Customer": userID, "Sig": r.Form.Get("sig"), "Subscriptions": mock.Subscriptions(userID),
+		"Customer": subject, "Sig": r.Form.Get("sig"), "Subscriptions": mock.Subscriptions(subject),
 	})
 }
 
 // handleMockPortal cancels or resumes a mock subscription, announces the
 // change through the webhook route, and shows the portal again.
 func (s *Server) handleMockPortal(w http.ResponseWriter, r *http.Request) {
-	mock, userID, ok := s.mockCustomer(w, r)
+	mock, subject, ok := s.mockCustomer(w, r)
 	if !ok {
 		return
 	}
 	id := r.Form.Get("subscription")
-	if sub, ok := mock.Subscription(id); !ok || sub.UserID != userID {
+	if sub, ok := mock.Subscription(id); !ok || sub.Subject != subject {
 		httputil.WriteError(w, r, http.StatusNotFound, httputil.CodeNotFound, "No such subscription")
 		return
 	}
@@ -175,7 +175,7 @@ func (s *Server) handleMockPortal(w http.ResponseWriter, r *http.Request) {
 		serverError(w, r, "changing mock subscription", err)
 		return
 	}
-	http.Redirect(w, r, mockweb.PortalPath+"?"+url.Values{"customer": {userID}, "sig": {r.Form.Get("sig")}}.Encode(), http.StatusSeeOther)
+	http.Redirect(w, r, mockweb.PortalPath+"?"+url.Values{"customer": {subject}, "sig": {r.Form.Get("sig")}}.Encode(), http.StatusSeeOther)
 }
 
 // deliverMock posts the mock's signed delivery for sub to this server's own
@@ -207,13 +207,18 @@ const devPeriod = 30 * 24 * time.Hour
 // quiet, and refund reports it revoked. It answers with GET /api/billing.
 func (s *Server) handleDevBillingEvent(w http.ResponseWriter, r *http.Request) {
 	userID := principalFrom(r).Session.User.ID
+	customer, err := s.billing.Customer(r.Context(), userID)
+	if err != nil {
+		serverError(w, r, "reading customer", err)
+		return
+	}
 	now := time.Now()
 	var events []billing.Event
 	switch kind := chi.URLParam(r, "kind"); kind {
 	case "grant":
 		events = append(events, billing.Event{
 			Source: billing.SourceWeb, ExternalID: "dev_" + userID + "_" + strconv.FormatInt(now.UnixNano(), 36),
-			UserID: userID, ProductID: mockweb.ProductID, Status: billing.StatusActive, ExpiresAt: new(now.Add(devPeriod)),
+			Subject: customer.Subject, ProductID: mockweb.ProductID, Status: billing.StatusActive, ExpiresAt: new(now.Add(devPeriod)),
 			Environment: billing.EnvironmentSandbox, EventAt: now, Raw: []byte(`{"dev":"grant"}`),
 		})
 	case "lapse", "expire", "refund":
@@ -250,7 +255,7 @@ func (s *Server) handleDevBillingEvent(w http.ResponseWriter, r *http.Request) {
 	mock, _ := s.providers.Web.(*mockweb.Provider)
 	for _, ev := range events {
 		if ev.Source == billing.SourceWeb {
-			ev.UserID = userID
+			ev.Subject = customer.Subject
 		}
 		if _, err := s.billing.Submit(r.Context(), userID, ev); err != nil {
 			serverError(w, r, "applying synthetic event", err)

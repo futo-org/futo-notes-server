@@ -34,6 +34,7 @@
 {{define "billing" -}}
 <section class="card" aria-labelledby="billing-heading">
 <h2 id="billing-heading">Subscription</h2>
+{{template "notice" .}}
 {{with .Billing.Current -}}
 <dl>
 <dt>Status</dt><dd data-billing-status="{{.Status}}">{{if $.Billing.Entitled}}Active{{else}}Inactive{{end}} ({{.Status}})</dd>
@@ -45,7 +46,11 @@
 {{- end}}
 {{if not .Billing.Entitled -}}
 <p>Without a subscription your notes stay readable, but your devices cannot sync changes.</p>
-{{if .WebPayments -}}
+{{if .EmbeddedCheckout -}}
+{{with .Checkout}}{{template "checkout-panel" .}}{{else -}}
+<p><a class="button" href="/dashboard/billing/subscribe" hx-get="/dashboard/billing/subscribe" hx-push-url="true">Subscribe</a></p>
+{{- end}}
+{{- else if .WebPayments -}}
 <form method="post" action="/dashboard/billing/checkout" hx-post="/dashboard/billing/checkout">
 {{template "csrf-field" .}}
 <button type="submit">Subscribe</button>

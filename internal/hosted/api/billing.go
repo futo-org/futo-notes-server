@@ -107,26 +107,45 @@ var (
 	errManagedByStore     = errors.New("the subscription is managed by an app store")
 )
 
-// checkoutURL is the web checkout for p's account. It refuses an account
-// that is already entitled from any source, so nobody pays twice.
-func (s *Server) checkoutURL(ctx context.Context, userID, email string) (string, error) {
-	if s.providers.Web == nil {
-		return "", errBillingUnavailable
+// checkoutURL is the web checkout for userID's account. It refuses an
+// account that is already entitled from any source, so nobody pays twice.
+// A provider whose checkout is embedded in our pages gets a one-time link to
+// our checkout page, which needs no dashboard session, so an app can open it
+// in the system browser.
+func (s *Server) checkoutURL(ctx context.Context, userID string) (string, error) {
+	if err := s.checkoutAllowed(ctx, userID); err != nil {
+		return "", err
 	}
-	state, err := s.billing.State(ctx, userID)
+	if s.embedded() != nil {
+		return s.checkoutLink(userID)
+	}
+	customer, err := s.billing.Customer(ctx, userID)
 	if err != nil {
 		return "", err
 	}
-	if state.Entitled {
-		return "", errAlreadySubscribed
+	return s.providers.Web.CheckoutURL(ctx, customer)
+}
+
+// checkoutAllowed refuses a checkout when there is no web provider or the
+// account is already entitled.
+func (s *Server) checkoutAllowed(ctx context.Context, userID string) error {
+	if s.providers.Web == nil {
+		return errBillingUnavailable
 	}
-	return s.providers.Web.CheckoutURL(ctx, billing.Customer{UserID: userID, Email: email})
+	state, err := s.billing.State(ctx, userID)
+	if err != nil {
+		return err
+	}
+	if state.Entitled {
+		return errAlreadySubscribed
+	}
+	return nil
 }
 
 // portalURL is the web provider's self-service page for the account,
 // refused when the account's subscription is an app store's, which only the
 // store can manage.
-func (s *Server) portalURL(ctx context.Context, userID, email string) (string, error) {
+func (s *Server) portalURL(ctx context.Context, userID string) (string, error) {
 	if s.providers.Web == nil {
 		return "", errBillingUnavailable
 	}
@@ -137,7 +156,11 @@ func (s *Server) portalURL(ctx context.Context, userID, email string) (string, e
 	if state.Current != nil && state.Current.Source != billing.SourceWeb {
 		return "", errManagedByStore
 	}
-	return s.providers.Web.PortalURL(ctx, billing.Customer{UserID: userID, Email: email})
+	customer, err := s.billing.Customer(ctx, userID)
+	if err != nil {
+		return "", err
+	}
+	return s.providers.Web.PortalURL(ctx, customer)
 }
 
 // writeBillingURLError answers a checkout or portal failure.
@@ -156,8 +179,7 @@ func writeBillingURLError(w http.ResponseWriter, r *http.Request, action string,
 
 // handleCheckout serves POST /api/billing/checkout.
 func (s *Server) handleCheckout(w http.ResponseWriter, r *http.Request) {
-	user := principalFrom(r).Session.User
-	target, err := s.checkoutURL(r.Context(), user.ID, user.Email)
+	target, err := s.checkoutURL(r.Context(), principalFrom(r).Session.User.ID)
 	if err != nil {
 		writeBillingURLError(w, r, "creating checkout", err)
 		return
@@ -167,8 +189,7 @@ func (s *Server) handleCheckout(w http.ResponseWriter, r *http.Request) {
 
 // handlePortal serves GET /api/billing/portal.
 func (s *Server) handlePortal(w http.ResponseWriter, r *http.Request) {
-	user := principalFrom(r).Session.User
-	target, err := s.portalURL(r.Context(), user.ID, user.Email)
+	target, err := s.portalURL(r.Context(), principalFrom(r).Session.User.ID)
 	if err != nil {
 		writeBillingURLError(w, r, "creating portal session", err)
 		return

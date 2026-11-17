@@ -137,7 +137,7 @@ func (e *billingEnv) user(email string) string {
 func (e *billingEnv) subscribe(userID string, status billing.Status, expires, eventAt time.Time) billing.Event {
 	e.t.Helper()
 	ev := billing.Event{
-		Source: billing.SourceWeb, ExternalID: "sub_" + uuid.NewV7().String(), UserID: userID, ProductID: "monthly",
+		Source: billing.SourceWeb, ExternalID: "sub_" + uuid.NewV7().String(), Subject: "jobs-billing-" + userID, ProductID: "monthly",
 		Status: status, WillRenew: status == billing.StatusActive, ExpiresAt: &expires,
 		Environment: billing.EnvironmentProduction, EventAt: eventAt,
 	}

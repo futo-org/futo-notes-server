@@ -19,17 +19,25 @@ func newUser(t *testing.T, database *db.DB) (string, string) {
 	id := uuid.NewV7().String()
 	var token string
 	if err := database.QueryRowContext(t.Context(), `INSERT INTO users (id, sub, name, email) VALUES ($1, $2, 'billing test', $3)
-		RETURNING store_account_token`, id, "billing-test-"+id, id+"@example.test").Scan(&token); err != nil {
+		RETURNING store_account_token`, id, subjectOf(id), id+"@example.test").Scan(&token); err != nil {
 		t.Fatal(err)
 	}
 	dbtest.CleanupExec(t, database, `DELETE FROM users WHERE id = $1`, id)
 	return id, token
 }
 
-// webEvent is a web subscription event for userID at eventAt.
+// subjectOf is the OIDC sub newUser gives userID.
+func subjectOf(userID string) string {
+	if userID == "" {
+		return ""
+	}
+	return "billing-test-" + userID
+}
+
+// webEvent is a web subscription event for userID's sub at eventAt.
 func webEvent(userID, id string, status billing.Status, expires, eventAt time.Time) billing.Event {
 	return billing.Event{
-		Source: billing.SourceWeb, ExternalID: id, UserID: userID, ProductID: "monthly", Status: status,
+		Source: billing.SourceWeb, ExternalID: id, Subject: subjectOf(userID), ProductID: "monthly", Status: status,
 		WillRenew: status == billing.StatusActive, ExpiresAt: new(expires), Environment: billing.EnvironmentProduction,
 		EventAt: eventAt, Raw: []byte(`{"test":true}`),
 	}
@@ -203,6 +211,14 @@ func TestWebEventNeedsItsUser(t *testing.T) {
 	}
 	owner, _ := newUser(t, database)
 	other, _ := newUser(t, database)
+	// The sub is the only key: the account's id or email names nobody.
+	for _, subject := range []string{owner, owner + "@example.test"} {
+		ev := webEvent(owner, "sub_"+uuid.NewV7().String(), billing.StatusActive, now.Add(time.Hour), now)
+		ev.Subject = subject
+		if _, err := store.Apply(t.Context(), ev); !errors.Is(err, billing.ErrUnknownUser) {
+			t.Errorf("web event with subject %q = %v, want ErrUnknownUser", subject, err)
+		}
+	}
 	sub := "sub_" + uuid.NewV7().String()
 	if _, err := store.Apply(t.Context(), webEvent(owner, sub, billing.StatusActive, now.Add(time.Hour), now)); err != nil {
 		t.Fatal(err)

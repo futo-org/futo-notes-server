@@ -172,7 +172,7 @@ func Load(getenv Getenv) (Config, error) {
 	if cfg.DevUI, err = hostedenv.Bool(getenv, "DEV_UI", false); err != nil {
 		return Config{}, err
 	}
-	if cfg.WebBilling, err = loadWebBilling(getenv, cfg.DevUI); err != nil {
+	if cfg.WebBilling, err = loadWebBilling(getenv, cfg.DevUI, cfg.PublicURL); err != nil {
 		return Config{}, err
 	}
 	if cfg.DrainDelay, err = hostedenv.Millis(getenv, "DRAIN_DELAY_MS", 15*time.Second, 0); err != nil {

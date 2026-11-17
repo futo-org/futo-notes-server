@@ -42,7 +42,7 @@ func TestSubmitAcknowledges(t *testing.T) {
 	}
 	if ev.Source != billing.SourcePlay || ev.ExternalID != purchaseToken || ev.AccountToken != accountToken || ev.ProductID != productID ||
 		ev.Status != billing.StatusActive || !ev.WillRenew || ev.ExpiresAt == nil || !ev.ExpiresAt.Equal(expiry) ||
-		ev.Environment != billing.EnvironmentProduction || ev.EventAt.Before(before) || ev.GraceUntil != nil || ev.UserID != "" {
+		ev.Environment != billing.EnvironmentProduction || ev.EventAt.Before(before) || ev.GraceUntil != nil || ev.Subject != "" {
 		t.Fatalf("event = %+v", ev)
 	}
 	var raw map[string]any

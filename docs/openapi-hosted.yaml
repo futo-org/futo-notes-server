@@ -87,7 +87,10 @@ info:
     code as the JSON operation it matches) and, when `DEV_UI` is set, a
     manual test page at `/dev` with its `/dev/jobs/*`, `/dev/email/*` and
     `/dev/billing/*` triggers, and the mock web payment provider's checkout
-    and portal pages under `/dev/billing`. Those are
+    and portal pages under `/dev/billing`. With Stripe as the web provider,
+    the dashboard mounts its embedded checkout in place, and
+    `/billing/checkout/{token}` is the page an app's checkout link opens.
+    Those are
     pages and test tooling, not API: clients must not
     depend on them, so they are listed in `x-internal-routes` rather than
     described as operations.
@@ -102,6 +105,11 @@ x-internal-routes:
   - GET /dashboard/region
   - GET /dashboard/sign-in
   - GET /dashboard/static/{name}
+  - GET /dashboard/billing/return
+  - GET /dashboard/billing/subscribe
+  - GET /billing/checkout/return
+  - GET /billing/checkout/{token}
+  - POST /billing/checkout/{token}/session
   - GET /dev
   - POST /dashboard/delete
   - POST /dashboard/devices/{id}/revoke

@@ -48,6 +48,9 @@ const (
 	codeStoreSubscriptionElsewhere = "store_subscription_owned_elsewhere"
 	codeInvalidPurchase            = "invalid_purchase"
 	codeInvalidDelivery            = "invalid_delivery"
+	// codeCheckoutLinkExpired answers an app's checkout link that is
+	// forged, expired or already used.
+	codeCheckoutLinkExpired = "checkout_link_expired"
 )
 
 // serverError logs an internal failure and answers with a hosted 500.

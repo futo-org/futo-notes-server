@@ -19,7 +19,7 @@ var (
 	// owning account or subscribe on the web.
 	ErrOwnedElsewhere = errors.New("store subscription belongs to another account")
 	// ErrUnknownUser reports an event that names no account: a web event
-	// whose user is gone, or a store event whose account token matches no
+	// whose subject matches no account, or a store event whose account token matches no
 	// account and whose subscription has no row yet.
 	ErrUnknownUser = errors.New("billing event names no account")
 )
@@ -61,7 +61,7 @@ type Applied struct {
 }
 
 // Apply records ev, a provider's view of a subscription, and returns its
-// owner. A web event belongs to ev.UserID. A store event belongs to the
+// owner. A web event belongs to the account whose sub is ev.Subject. A store event belongs to the
 // account its row already names, or else to the account ev.AccountToken
 // names. An event older than the stored one changes nothing. It returns
 // ErrUnknownUser when no account owns the event.
@@ -175,21 +175,31 @@ func apply(ctx context.Context, tx *db.Tx, ev Event, submitter string) (Applied,
 	return Applied{UserID: owner}, nil
 }
 
-// webOwner returns the account a web event belongs to: the one it names,
-// which must exist, and which must be the row's owner if there is a row.
+// webOwner returns the account a web event belongs to: the one whose sub it
+// names, which must be the row's owner if there is a row.
 func webOwner(ctx context.Context, tx *db.Tx, ev Event, rowOwner string) (string, error) {
-	if !ids.IsUUID(ev.UserID) {
+	if ev.Subject == "" {
 		return "", ErrUnknownUser
 	}
-	if rowOwner != "" && rowOwner != ev.UserID {
-		return "", fmt.Errorf("web subscription %s belongs to %s, not %s", ev.ExternalID, rowOwner, ev.UserID)
-	}
 	var id string
-	err := tx.QueryRowContext(ctx, `SELECT id FROM users WHERE id = $1`, ev.UserID).Scan(&id)
+	err := tx.QueryRowContext(ctx, `SELECT id FROM users WHERE sub = $1`, ev.Subject).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrUnknownUser
 	}
-	return id, err
+	if err != nil {
+		return "", err
+	}
+	if rowOwner != "" && rowOwner != id {
+		return "", fmt.Errorf("web subscription %s belongs to %s, not %s", ev.ExternalID, rowOwner, id)
+	}
+	return id, nil
+}
+
+// Customer returns userID as the web provider knows it: by its OIDC sub.
+func (s *Store) Customer(ctx context.Context, userID string) (Customer, error) {
+	c := Customer{UserID: userID}
+	err := s.database.QueryRowContext(ctx, `SELECT sub, coalesce(email, '') FROM users WHERE id = $1`, userID).Scan(&c.Subject, &c.Email)
+	return c, err
 }
 
 // storeOwner returns the account a store event belongs to. A subscription
