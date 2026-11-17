@@ -22,6 +22,8 @@ import (
 	"github.com/rs/zerolog"
 
 	"futo-notes-server/internal/hosted/account"
+	"futo-notes-server/internal/hosted/billing/appstore"
+	"futo-notes-server/internal/hosted/billing/play"
 	hostedmail "futo-notes-server/internal/hosted/mail"
 	"futo-notes-server/internal/hostedauth"
 	"futo-notes-server/internal/hostedenv"
@@ -74,6 +76,11 @@ type Config struct {
 	OTLPMetricsEndpoint string
 	OTLPMetricsURLPath  string
 	OTLPMetricsInterval time.Duration
+
+	// AppStore and Play are the store billing providers, nil while their
+	// APPLE_* or PLAY_* variables are unset (stores.go).
+	AppStore *appstore.Config
+	Play     *play.Config
 }
 
 // OIDC is the identity provider the API signs users in with, as a
@@ -179,6 +186,9 @@ func Load(getenv Getenv) (Config, error) {
 	// Well under vmagent's one-minute idle timeout, which a once-a-minute
 	// export races.
 	if cfg.OTLPMetricsInterval, err = hostedenv.Millis(getenv, "OTLP_METRICS_INTERVAL_MS", 15*time.Second, 1); err != nil {
+		return Config{}, err
+	}
+	if err := loadStores(getenv, &cfg); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
