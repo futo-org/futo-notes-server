@@ -83,6 +83,15 @@ func (d Dialect) ForUpdate() string {
 	return ""
 }
 
+// ForShare returns the clause that read-locks the selected rows against a
+// concurrent ForUpdate, which is empty on SQLite.
+func (d Dialect) ForShare() string {
+	if d.engine == Postgres {
+		return " FOR SHARE"
+	}
+	return ""
+}
+
 // ForUpdateSkipLocked is ForUpdate, skipping rows another transaction holds.
 func (d Dialect) ForUpdateSkipLocked() string {
 	if d.engine == Postgres {

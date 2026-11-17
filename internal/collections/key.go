@@ -20,6 +20,18 @@ type KeyMaterial struct {
 	KeyKDF            json.RawMessage `json:"key_kdf"`
 	EncryptedVaultKey string          `json:"encrypted_vault_key"`
 	KeyUpdatedAt      time.Time       `json:"key_updated_at"`
+	// Only Keys with a RecoveryStore set it. Nil marshals no field at all,
+	// so key material without one keeps the self-hosted bytes.
+	*RecoveryEnvelope
+}
+
+// RecoveryEnvelope is the vault key wrapped a second time, under a recovery
+// key instead of the vault password. Its fields are as opaque as the password
+// envelope's.
+type RecoveryEnvelope struct {
+	Salt              string          `json:"recovery_key_salt"`
+	KDF               json.RawMessage `json:"recovery_key_kdf"`
+	EncryptedVaultKey string          `json:"recovery_encrypted_vault_key"`
 }
 
 func (m KeyMaterial) revisionToken() string {
@@ -31,6 +43,27 @@ type KeyInput struct {
 	KeySalt           string
 	KeyKDF            json.RawMessage
 	EncryptedVaultKey string
+	// Recovery is the recovery envelope to store with the key, or nil to
+	// store none. Keys without a RecoveryStore ignore it.
+	Recovery *RecoveryEnvelope
+}
+
+// RecoveryStore keeps recovery envelopes, which the shared schema has no
+// columns for, inside the key's own transaction.
+type RecoveryStore interface {
+	// Load returns the collection's envelope and whether it has one.
+	Load(ctx context.Context, tx *db.Tx, collectionID string) (RecoveryEnvelope, bool, error)
+	// Replace stores envelope as the collection's, deleting the stored one
+	// when envelope is nil.
+	Replace(ctx context.Context, tx *db.Tx, collectionID string, envelope *RecoveryEnvelope) error
+}
+
+// Keys reads and writes collections' key material in DB. With Recovery set
+// (the hosted API) a recovery envelope travels with the key and shares its
+// revision; without it (self-hosted) key material never carries one.
+type Keys struct {
+	DB       *db.DB
+	Recovery RecoveryStore
 }
 
 // ErrNoCurrentKey reports a rotation token supplied when no key is stored,
@@ -71,19 +104,52 @@ func scanKeyMaterial(row db.Scanner) (KeyMaterial, bool, error) {
 	}, true, nil
 }
 
-// GetKey returns the collection's key material and reports whether a key has
+// Get returns the collection's key material and reports whether a key has
 // been claimed yet. It returns ErrNotFound when the collection is absent or
 // owned by another user.
-func GetKey(ctx context.Context, database *db.DB, userID, id string) (KeyMaterial, bool, error) {
+func (k Keys) Get(ctx context.Context, userID, id string) (KeyMaterial, bool, error) {
 	if !ids.IsUUID(id) {
 		return KeyMaterial{}, false, ErrNotFound
 	}
-	key, ok, err := scanKeyMaterial(database.QueryRowContext(ctx,
-		`SELECT `+keyColumns+` FROM collections WHERE id = $1 AND user_id = $2`, id, userID))
+	if k.Recovery == nil {
+		key, ok, err := scanKeyMaterial(k.DB.QueryRowContext(ctx,
+			`SELECT `+keyColumns+` FROM collections WHERE id = $1 AND user_id = $2`, id, userID))
+		if errors.Is(err, sql.ErrNoRows) {
+			return KeyMaterial{}, false, ErrNotFound
+		}
+		return key, ok, err
+	}
+
+	tx, err := k.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return KeyMaterial{}, false, err
+	}
+	defer tx.Discard()
+	// The share lock waits out a Put in flight, so the envelope read next
+	// belongs to the same revision as the key.
+	key, ok, err := k.lockedKey(ctx, tx, userID, id, k.DB.Dialect().ForShare())
+	if err != nil {
+		return KeyMaterial{}, false, err
+	}
+	return key, ok, tx.Commit()
+}
+
+// lockedKey reads the collection's key material under lock (a row-locking
+// clause), with its recovery envelope when k keeps them.
+func (k Keys) lockedKey(ctx context.Context, tx *db.Tx, userID, id, lock string) (KeyMaterial, bool, error) {
+	key, claimed, err := scanKeyMaterial(tx.QueryRowContext(ctx,
+		`SELECT `+keyColumns+` FROM collections WHERE id = $1 AND user_id = $2`+lock, id, userID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return KeyMaterial{}, false, ErrNotFound
 	}
-	return key, ok, err
+	if err != nil || !claimed || k.Recovery == nil {
+		return key, claimed, err
+	}
+	envelope, ok, err := k.Recovery.Load(ctx, tx, id)
+	if ok {
+		key.RecoveryEnvelope = &envelope
+	}
+	return key, claimed, err
 }
 
 // nextRevision picks the key_updated_at to store. Timestamps are kept to the
@@ -103,7 +169,7 @@ func nextRevision(current KeyMaterial, claimed bool) time.Time {
 	return updatedAt
 }
 
-// PutKey claims or rotates the collection's key material and returns what is
+// Put claims or rotates the collection's key material and returns what is
 // stored afterwards. It returns ErrNotFound when the collection is absent or
 // owned by another user.
 //
@@ -114,22 +180,21 @@ func nextRevision(current KeyMaterial, claimed bool) time.Time {
 // Rotation (prevToken set): replaces the material only when the token matches
 // the current revision. A stale token yields a *KeyConflictError carrying the
 // current material; a token with nothing stored yields ErrNoCurrentKey.
-func PutKey(ctx context.Context, database *db.DB, userID, id string, in KeyInput, prevToken *string) (KeyMaterial, error) {
+//
+// With a RecoveryStore, a write replaces both envelopes: in.Recovery nil
+// deletes the stored recovery envelope.
+func (k Keys) Put(ctx context.Context, userID, id string, in KeyInput, prevToken *string) (KeyMaterial, error) {
 	if !ids.IsUUID(id) {
 		return KeyMaterial{}, ErrNotFound
 	}
 
-	tx, err := database.BeginTx(ctx, nil)
+	tx, err := k.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return KeyMaterial{}, err
 	}
 	defer tx.Discard()
 
-	current, claimed, err := scanKeyMaterial(tx.QueryRowContext(ctx,
-		`SELECT `+keyColumns+` FROM collections WHERE id = $1 AND user_id = $2`+database.Dialect().ForUpdate(), id, userID))
-	if errors.Is(err, sql.ErrNoRows) {
-		return KeyMaterial{}, ErrNotFound
-	}
+	current, claimed, err := k.lockedKey(ctx, tx, userID, id, k.DB.Dialect().ForUpdate())
 	if err != nil {
 		return KeyMaterial{}, err
 	}
@@ -152,11 +217,17 @@ func PutKey(ctx context.Context, database *db.DB, userID, id string, in KeyInput
 
 	stored, _, err := scanKeyMaterial(tx.QueryRowContext(ctx,
 		`UPDATE collections
-		 SET key_salt = $1, key_kdf = $2`+database.Dialect().JSONCast()+`, encrypted_vault_key = $3, key_updated_at = $5
+		 SET key_salt = $1, key_kdf = $2`+k.DB.Dialect().JSONCast()+`, encrypted_vault_key = $3, key_updated_at = $5
 		 WHERE id = $4 RETURNING `+keyColumns,
 		in.KeySalt, string(in.KeyKDF), in.EncryptedVaultKey, id, db.Timestamp(nextRevision(current, claimed))))
 	if err != nil {
 		return KeyMaterial{}, err
+	}
+	if k.Recovery != nil {
+		if err := k.Recovery.Replace(ctx, tx, id, in.Recovery); err != nil {
+			return KeyMaterial{}, err
+		}
+		stored.RecoveryEnvelope = in.Recovery
 	}
 	return stored, tx.Commit()
 }

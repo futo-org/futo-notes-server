@@ -46,7 +46,7 @@ func token(material collections.KeyMaterial) string {
 // been claimed.
 func getKey(ctx context.Context, t *testing.T, database *db.DB, userID, id string) collections.KeyMaterial {
 	t.Helper()
-	key, claimed, err := collections.GetKey(ctx, database, userID, id)
+	key, claimed, err := (collections.Keys{DB: database}).Get(ctx, userID, id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,14 +73,14 @@ func wantKeyConflict(t *testing.T, what string, err error) collections.KeyMateri
 func TestPutKeyRotationAdvancesRevisionToken(t *testing.T) {
 	ctx, database, userID, id := keyTestCollection(t)
 
-	claimed, err := collections.PutKey(ctx, database, userID, id, keyInput("one"), nil)
+	claimed, err := (collections.Keys{DB: database}).Put(ctx, userID, id, keyInput("one"), nil)
 	if err != nil {
 		t.Fatalf("claim = %v", err)
 	}
 	previous := token(claimed)
 
 	for i := range 8 {
-		rotated, err := collections.PutKey(ctx, database, userID, id, keyInput("two"), &previous)
+		rotated, err := (collections.Keys{DB: database}).Put(ctx, userID, id, keyInput("two"), &previous)
 		if err != nil {
 			t.Fatalf("rotation %d = %v", i, err)
 		}
@@ -113,7 +113,7 @@ func TestPutKeyRotationAdvancesRevisionToken(t *testing.T) {
 func TestPutKeyRotationAdvancesPastAFutureRevision(t *testing.T) {
 	ctx, database, userID, id := keyTestCollection(t)
 
-	if _, err := collections.PutKey(ctx, database, userID, id, keyInput("one"), nil); err != nil {
+	if _, err := (collections.Keys{DB: database}).Put(ctx, userID, id, keyInput("one"), nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := database.ExecContext(ctx, `UPDATE collections SET key_updated_at = $1 WHERE id = $2`,
@@ -123,7 +123,7 @@ func TestPutKeyRotationAdvancesPastAFutureRevision(t *testing.T) {
 	ahead := getKey(ctx, t, database, userID, id)
 	previous := token(ahead)
 
-	rotated, err := collections.PutKey(ctx, database, userID, id, keyInput("two"), &previous)
+	rotated, err := (collections.Keys{DB: database}).Put(ctx, userID, id, keyInput("two"), &previous)
 	if err != nil {
 		t.Fatalf("rotation = %v", err)
 	}
@@ -132,7 +132,7 @@ func TestPutKeyRotationAdvancesPastAFutureRevision(t *testing.T) {
 			rotated.KeyUpdatedAt, ahead.KeyUpdatedAt)
 	}
 
-	_, err = collections.PutKey(ctx, database, userID, id, keyInput("three"), &previous)
+	_, err = (collections.Keys{DB: database}).Put(ctx, userID, id, keyInput("three"), &previous)
 	wantKeyConflict(t, "rotation from the superseded token", err)
 }
 
@@ -142,17 +142,17 @@ func TestPutKeyRotationAdvancesPastAFutureRevision(t *testing.T) {
 func TestPutKeyRejectsSecondRotationFromSameToken(t *testing.T) {
 	ctx, database, userID, id := keyTestCollection(t)
 
-	claimed, err := collections.PutKey(ctx, database, userID, id, keyInput("one"), nil)
+	claimed, err := (collections.Keys{DB: database}).Put(ctx, userID, id, keyInput("one"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	stale := token(claimed)
 
-	winner, err := collections.PutKey(ctx, database, userID, id, keyInput("two"), &stale)
+	winner, err := (collections.Keys{DB: database}).Put(ctx, userID, id, keyInput("two"), &stale)
 	if err != nil {
 		t.Fatalf("first rotation = %v", err)
 	}
-	_, err = collections.PutKey(ctx, database, userID, id, keyInput("three"), &stale)
+	_, err = (collections.Keys{DB: database}).Put(ctx, userID, id, keyInput("three"), &stale)
 	current := wantKeyConflict(t, "second rotation from the same token", err)
 	if current.EncryptedVaultKey != winner.EncryptedVaultKey {
 		t.Fatalf("conflict returned %q, want the first rotation's %q",
@@ -170,7 +170,7 @@ func TestPutKeyRejectsSecondRotationFromSameToken(t *testing.T) {
 func TestPutKeyConcurrentRotationsFromSameToken(t *testing.T) {
 	ctx, database, userID, id := keyTestCollection(t)
 
-	material, err := collections.PutKey(ctx, database, userID, id, keyInput("claim"), nil)
+	material, err := (collections.Keys{DB: database}).Put(ctx, userID, id, keyInput("claim"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +184,7 @@ func TestPutKeyConcurrentRotationsFromSameToken(t *testing.T) {
 		for i := range results {
 			wg.Go(func() {
 				<-start
-				results[i], errs[i] = collections.PutKey(ctx, database, userID, id,
+				results[i], errs[i] = (collections.Keys{DB: database}).Put(ctx, userID, id,
 					keyInput(string(rune('a'+i))), &stale)
 			})
 		}

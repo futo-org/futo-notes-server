@@ -29,6 +29,10 @@ info:
       slide: every authenticated request extends them, and a request
       authenticated by the session cookie gets the cookie re-issued when it
       slides.
+    - **Recovery envelope.** Vault key material also carries an optional
+      second wrapping of the vault key, under a recovery key
+      (`recovery_key_salt`, `recovery_key_kdf`,
+      `recovery_encrypted_vault_key`). See `putCollectionKey`.
     - **Pending deletion.** Between `DELETE /api/account` and the purge 30
       days later, every sync operation except logout, and
       `POST /api/storage/token`, answer
@@ -894,7 +898,8 @@ paths:
         "200":
           description: |
             The stored material, or `{"key": null}` when the collection exists
-            but no key has been claimed yet.
+            but no key has been claimed yet. The recovery envelope's three
+            fields are present when one is stored and absent otherwise.
           content:
             application/json:
               schema:
@@ -905,7 +910,7 @@ paths:
                     type: object
                     nullable: true
                     allOf:
-                      - $ref: "openapi.yaml#/components/schemas/KeyMaterial"
+                      - $ref: "#/components/schemas/HostedKeyMaterial"
         "401":
           $ref: "#/components/responses/SyncUnauthorized"
         "403":
@@ -931,6 +936,23 @@ paths:
         (`400` `invalid_request`) rather than dropped, so a client never
         believes part of an envelope was saved when it was not. The body is
         at most 64 KiB.
+
+        **Recovery envelope** (hosted only): the same vault key wrapped a
+        second time, under a recovery key, in `recovery_key_salt`,
+        `recovery_key_kdf` and `recovery_encrypted_vault_key`.
+
+        - **All three or none.** A body with some but not all of them
+          answers `400` `invalid_request`. A `null` counts as absent.
+        - **A `PUT` replaces both envelopes.** A write without the recovery
+          fields **deletes the stored recovery envelope**. Changing the vault
+          password re-wraps the same vault key, so a client doing it must
+          send the recovery envelope again in the same request, or the
+          recovery key stops working.
+        - **One revision.** Both envelopes share one `key_updated_at`, so
+          issuing a new recovery key is a rotation like any other.
+        - A claim of an already claimed key returns the stored material,
+          recovery envelope included; a stale rotation's `currentKey`
+          carries it too.
       requestBody:
         required: true
         content:
@@ -956,6 +978,31 @@ paths:
                   description: |
                     Opaque revision token from a prior GET/PUT. Required for
                     rotation, omitted for a first claim.
+                recovery_key_salt:
+                  type: string
+                  minLength: 1
+                  nullable: true
+                  description: |
+                    Recovery envelope, with `recovery_key_kdf` and
+                    `recovery_encrypted_vault_key`: all three or none.
+                    Leaving all three out **deletes the stored recovery
+                    envelope**.
+                recovery_key_kdf:
+                  type: object
+                  nullable: true
+                  additionalProperties: true
+                  description: |
+                    The recovery key's KDF parameters, any JSON object.
+                    Leaving the recovery fields out **deletes the stored
+                    recovery envelope**.
+                recovery_encrypted_vault_key:
+                  type: string
+                  minLength: 1
+                  nullable: true
+                  description: |
+                    The vault key wrapped under the recovery key. Leaving the
+                    recovery fields out **deletes the stored recovery
+                    envelope**.
       responses:
         "200":
           description: Material stored, or the authoritative material adopted
@@ -966,7 +1013,7 @@ paths:
                 required: [key]
                 properties:
                   key:
-                    $ref: "openapi.yaml#/components/schemas/KeyMaterial"
+                    $ref: "#/components/schemas/HostedKeyMaterial"
         "400":
           description: |
             As self-hosted: `invalid json`, `key_salt is required`,
@@ -974,7 +1021,8 @@ paths:
             `previous_key_updated_at must be non-empty when present`, or a
             rotation with no key to rotate (`no existing key to rotate`).
             Hosted only, with code `invalid_request`: a field outside the
-            schema (`unknown field "<name>"`), or a body over 64 KiB.
+            schema (`unknown field "<name>"`), a body over 64 KiB, some but
+            not all of the recovery fields, or an empty or mistyped one.
           content:
             application/json:
               schema:
@@ -999,7 +1047,7 @@ paths:
                     type: string
                     enum: [key conflict]
                   currentKey:
-                    $ref: "openapi.yaml#/components/schemas/KeyMaterial"
+                    $ref: "#/components/schemas/HostedKeyMaterial"
         "500":
           $ref: "#/components/responses/SyncServerError"
 
@@ -1612,6 +1660,22 @@ components:
         error:
           type: string
           enum: [invalid receipt]
+
+    HostedKeyMaterial:
+      description: |
+        The self-hosted key material, plus the recovery envelope when one is
+        stored: its three fields are present together or not at all.
+      allOf:
+        - $ref: "openapi.yaml#/components/schemas/KeyMaterial"
+        - type: object
+          properties:
+            recovery_key_salt:
+              type: string
+            recovery_key_kdf:
+              type: object
+              additionalProperties: true
+            recovery_encrypted_vault_key:
+              type: string
 
     ErrorCode:
       type: string

@@ -63,6 +63,13 @@ Removed on hosted (bytes go to storage instead): `POST /api/blobs`, `GET|DELETE
 Changed: object create and update take `"receipt": "<jwt>"` in place of a staged `blob_key`. The
 receipt names the key and the size. `size_bytes` in responses comes from the receipt.
 
+Changed: vault key material (`GET|PUT /api/collections/{id}/key`) also carries an optional
+**recovery envelope**, the vault key wrapped under a recovery key: `recovery_key_salt`,
+`recovery_key_kdf` and `recovery_encrypted_vault_key`. They come all three or none (a partial set
+is a 400), and a `PUT` replaces both envelopes, so **a `PUT` without them deletes the stored
+recovery envelope**. Both envelopes share one `key_updated_at`. Self-hosted neither stores nor
+returns them.
+
 Capability (`GET /`, still the JSON document): `auth_mode: "oidc"`, `signup: "open"`, `billing: false`.
 
 New endpoints:
@@ -107,6 +114,8 @@ The dashboard uses the session cookie and CSRF tokens on state-changing requests
   - session device fields (created, last used, user agent)
   - `storage_refresh_tokens` (hash, `session_id` with cascade delete, created and rotated times)
   - OIDC logins in flight and one-time app codes
+  - `collection_recovery_envelopes`: each collection's recovery envelope, written in the key's
+    transaction
   - `hosted_job_runs` (below)
 - Migrations run in an `api migrate` subcommand, as a Helm **pre**-install/pre-upgrade hook Job.
   Backups uses post-*, but here that would deadlock: the API refuses to start while migrations are
