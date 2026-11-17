@@ -25,6 +25,9 @@ import (
 const (
 	requestTimeout = 30 * time.Second
 	eventDeadline  = 15 * time.Second
+	// streamEndBound is how soon a stream ends once its session does. It is
+	// far below the API's 25s ping, so only its events listener can meet it.
+	streamEndBound = 5 * time.Second
 	// appRedirect is where the app's loopback listener would be. The
 	// scenario reads the code off the API's redirect and never connects.
 	appRedirect = "http://127.0.0.1:1/callback"
@@ -504,6 +507,23 @@ func (e *events) next(name string) event {
 			return ev
 		case <-deadline:
 			e.t.Fatalf("no %q sync event within %s", name, eventDeadline)
+		}
+	}
+}
+
+// ended fails the test unless the stream ends within streamEndBound,
+// skipping the events still queued before the end.
+func (e *events) ended(why string) {
+	e.t.Helper()
+	deadline := time.After(streamEndBound)
+	for {
+		select {
+		case _, open := <-e.ch:
+			if !open {
+				return
+			}
+		case <-deadline:
+			e.t.Fatalf("sync event stream still open %s after %s", streamEndBound, why)
 		}
 	}
 }
