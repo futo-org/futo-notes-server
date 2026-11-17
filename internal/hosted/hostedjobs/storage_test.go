@@ -26,6 +26,7 @@ import (
 	"futo-notes-server/internal/objects"
 	"futo-notes-server/internal/storagesvc/adminapi"
 	"futo-notes-server/internal/storagesvc/handlers"
+	"futo-notes-server/internal/storagesvc/metrics"
 	"futo-notes-server/internal/storagesvc/storage"
 )
 
@@ -145,10 +146,15 @@ func newStorageEnv(t *testing.T) *storageEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer((&handlers.Server{Storage: store, Verifier: verifier, Signer: signer}).Handler())
+	meter := noop.NewMeterProvider().Meter("test")
+	storageMetrics, err := metrics.NewMetrics(meter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer((&handlers.Server{Storage: store, Verifier: verifier, Signer: signer, Metrics: storageMetrics}).Handler())
 	t.Cleanup(srv.Close)
 	client, err := storageclient.New([]config.Region{{ID: testRegion, Endpoint: srv.URL}},
-		hostedauth.NewMinter(apiKey), noop.NewMeterProvider().Meter("test"))
+		hostedauth.NewMinter(apiKey), meter)
 	if err != nil {
 		t.Fatal(err)
 	}
