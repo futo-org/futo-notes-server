@@ -28,6 +28,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/golang-jwt/jwt/v5"
+	"golang.org/x/oauth2"
 )
 
 const (
@@ -344,8 +345,7 @@ func pkceMatches(verifier, challenge string) bool {
 	if len(verifier) < 43 || len(verifier) > 128 {
 		return false
 	}
-	sum := sha256.Sum256([]byte(verifier))
-	return subtle.ConstantTimeCompare([]byte(base64.RawURLEncoding.EncodeToString(sum[:])), []byte(challenge)) == 1
+	return subtle.ConstantTimeCompare([]byte(oauth2.S256ChallengeFromVerifier(verifier)), []byte(challenge)) == 1
 }
 
 func (p *Provider) signIDToken(code authCode, now time.Time) (string, error) {

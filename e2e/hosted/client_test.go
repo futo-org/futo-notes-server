@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -17,6 +16,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/oauth2"
 
 	"futo-notes-server/internal/blobframe"
 )
@@ -58,8 +59,7 @@ func (s *stack) login(t *testing.T, sub, userAgent string) *device {
 	}}
 
 	verifier := randomToken(t)
-	sum := sha256.Sum256([]byte(verifier))
-	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
+	challenge := oauth2.S256ChallengeFromVerifier(verifier)
 	state := randomToken(t)
 	start := s.apiURL + "/api/auth/oidc/start?" + url.Values{
 		"redirect_uri":          {appRedirect},

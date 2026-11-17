@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"time"
 
+	"golang.org/x/oauth2"
+
 	"futo-notes-server/internal/auth"
 )
 
@@ -176,8 +178,7 @@ func PKCEMatches(verifier, challenge string) bool {
 	if !verifierPattern.MatchString(verifier) {
 		return false
 	}
-	sum := sha256.Sum256([]byte(verifier))
-	return subtle.ConstantTimeCompare([]byte(base64.RawURLEncoding.EncodeToString(sum[:])), []byte(challenge)) == 1
+	return subtle.ConstantTimeCompare([]byte(oauth2.S256ChallengeFromVerifier(verifier)), []byte(challenge)) == 1
 }
 
 // ValidCodeChallenge reports whether challenge is an S256 code_challenge: the

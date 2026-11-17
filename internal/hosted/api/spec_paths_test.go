@@ -246,7 +246,7 @@ func TestSpecSignInFailures(t *testing.T) {
 		http.StatusBadRequest)
 	browser = h.client()
 	s = state(browser.do(http.MethodGet, "/api/auth/oidc/start?"+url.Values{
-		"redirect_uri": {"http://127.0.0.1:43123/callback"}, "code_challenge": {challenge(verifier)}, "state": {"app-state"},
+		"redirect_uri": {"http://127.0.0.1:43123/callback"}, "code_challenge": {challenge}, "state": {"app-state"},
 	}.Encode(), nil))
 	res := browser.do(http.MethodGet, callback(url.Values{"state": {s}, "error": {"access_denied"}}), nil)
 	if res.status != http.StatusFound || res.header.Get("Location") != "http://127.0.0.1:43123/callback?error=access_denied&state=app-state" {

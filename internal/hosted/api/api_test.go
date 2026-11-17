@@ -191,14 +191,14 @@ func TestAppSignInRejectsDisallowedRedirects(t *testing.T) {
 		"javascript:alert(1)",
 	} {
 		res := c.do(http.MethodGet, "/api/auth/oidc/start?"+url.Values{
-			"redirect_uri": {redirect}, "code_challenge": {challenge(verifier)}, "code_challenge_method": {"S256"},
+			"redirect_uri": {redirect}, "code_challenge": {challenge}, "code_challenge_method": {"S256"},
 		}.Encode(), nil)
 		expectHostedError(t, res, http.StatusBadRequest)
 	}
 	for _, params := range []url.Values{
 		{"redirect_uri": {"http://127.0.0.1:8080/cb"}},
 		{"redirect_uri": {"http://127.0.0.1:8080/cb"}, "code_challenge": {"short"}},
-		{"redirect_uri": {"http://127.0.0.1:8080/cb"}, "code_challenge": {challenge(verifier)}, "code_challenge_method": {"plain"}},
+		{"redirect_uri": {"http://127.0.0.1:8080/cb"}, "code_challenge": {challenge}, "code_challenge_method": {"plain"}},
 	} {
 		expectHostedError(t, c.do(http.MethodGet, "/api/auth/oidc/start?"+params.Encode(), nil), http.StatusBadRequest)
 	}

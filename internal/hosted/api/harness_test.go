@@ -2,8 +2,6 @@ package api_test
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -16,6 +14,7 @@ import (
 	"uuid"
 
 	"go.opentelemetry.io/otel/metric/noop"
+	"golang.org/x/oauth2"
 
 	"futo-notes-server/internal/db"
 	"futo-notes-server/internal/dbtest"
@@ -33,6 +32,8 @@ const (
 	appScheme    = "org.futo.notes.test"
 	verifier     = "dBjftJeZ4CVP-mJ92K9YQ4WllYjv4Ac4lDmRVLz4xBxl0vpEqbr7iw"
 )
+
+var challenge = oauth2.S256ChallengeFromVerifier(verifier)
 
 // harness is a hosted API on an httptest server, signing users in through an
 // in-process mock OIDC issuer, with two storage regions whose receipt keys
@@ -266,18 +267,13 @@ func (h *harness) dashboardLogin(sub string) *client {
 	return c
 }
 
-func challenge(v string) string {
-	sum := sha256.Sum256([]byte(v))
-	return base64.RawURLEncoding.EncodeToString(sum[:])
-}
-
 // appCode runs the app flow up to the redirect back to the app and returns
 // that redirect.
 func (c *client) appCode(sub, redirectURI string) *url.URL {
 	c.h.t.Helper()
 	start := c.do(http.MethodGet, "/api/auth/oidc/start?"+url.Values{
 		"redirect_uri":          {redirectURI},
-		"code_challenge":        {challenge(verifier)},
+		"code_challenge":        {challenge},
 		"code_challenge_method": {"S256"},
 		"state":                 {"app-state"},
 	}.Encode(), nil)

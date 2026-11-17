@@ -1,14 +1,14 @@
 package account_test
 
 import (
-	"crypto/sha256"
-	"encoding/base64"
 	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 	"uuid"
+
+	"golang.org/x/oauth2"
 
 	"futo-notes-server/internal/auth"
 	"futo-notes-server/internal/db"
@@ -42,17 +42,14 @@ func newUser(t *testing.T, database *db.DB, store *account.Store) auth.User {
 	return user
 }
 
-func challengeFor(verifier string) string {
-	sum := sha256.Sum256([]byte(verifier))
-	return base64.RawURLEncoding.EncodeToString(sum[:])
-}
-
 const verifier = "dBjftJeZ4CVP-mJ92K9YQ4WllYjv4Ac4lDmRVLz4xBxl0vpEqbr7iw"
+
+var challenge = oauth2.S256ChallengeFromVerifier(verifier)
 
 // appSession signs a user in the way an app does and returns its session.
 func appSession(t *testing.T, store *account.Store, user auth.User) account.AppSession {
 	t.Helper()
-	code, err := store.CreateAppCode(t.Context(), user.ID, challengeFor(verifier))
+	code, err := store.CreateAppCode(t.Context(), user.ID, challenge)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,7 +270,7 @@ func TestAppCodesAreSingleUseAndBoundToTheChallenge(t *testing.T) {
 	ctx := t.Context()
 	user := newUser(t, database, store)
 
-	code, err := store.CreateAppCode(ctx, user.ID, challengeFor(verifier))
+	code, err := store.CreateAppCode(ctx, user.ID, challenge)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,7 +281,7 @@ func TestAppCodesAreSingleUseAndBoundToTheChallenge(t *testing.T) {
 		t.Fatalf("code after a wrong verifier = %v, want it spent", err)
 	}
 
-	code, err = store.CreateAppCode(ctx, user.ID, challengeFor(verifier))
+	code, err = store.CreateAppCode(ctx, user.ID, challenge)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,7 +296,7 @@ func TestAppCodesAreSingleUseAndBoundToTheChallenge(t *testing.T) {
 		t.Fatalf("replayed code = %v, want ErrInvalidCode", err)
 	}
 
-	code, err = store.CreateAppCode(ctx, user.ID, challengeFor(verifier))
+	code, err = store.CreateAppCode(ctx, user.ID, challenge)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -316,7 +313,7 @@ func TestLoginsAreTakenOnceAndExpire(t *testing.T) {
 	ctx := t.Context()
 
 	login := account.Login{State: auth.GenerateToken(), Nonce: "n", CodeVerifier: "v",
-		AppRedirectURI: "http://127.0.0.1:1234/cb", AppState: "s", AppCodeChallenge: challengeFor(verifier)}
+		AppRedirectURI: "http://127.0.0.1:1234/cb", AppState: "s", AppCodeChallenge: challenge}
 	if err := store.SaveLogin(ctx, login); err != nil {
 		t.Fatal(err)
 	}
