@@ -74,6 +74,10 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 // writePendingDeletion answers the 403 for an account scheduled for
 // deletion, in the sync contract's shape with its code, wherever it occurs.
 func writePendingDeletion(w http.ResponseWriter, purgeAt *time.Time) {
+	if purgeAt != nil {
+		utc := purgeAt.UTC()
+		purgeAt = &utc
+	}
 	syncapi.WriteJSON(w, http.StatusForbidden, pendingDeletionResponse{
 		Code: codeAccountPendingDeletion, Error: account.ErrPendingDeletion.Error(), PurgeAt: purgeAt,
 	})

@@ -26,7 +26,7 @@ info:
       the upload. It names the key and the size; the object's `blob_key` and
       `size_bytes` come from it.
     - **Batch claim.** `POST /api/collections/{id}/objects/batch` claims up
-      to 200 receipts in one call, after one storage `POST /blobs/batch`
+      to 200 receipts in one call, after one storage `POST /blobs/batch-upload`
       uploaded their blobs. Self-hosted has no such route; its
       `blob-objects/batch` carries the bytes instead.
     - **OIDC sign-in.** No password or dev login. Sessions last 90 days and
@@ -1657,7 +1657,7 @@ paths:
       description: |
         The batch form of `createObject` and `updateObject`, for a first sync
         of a large vault: upload the blobs with one storage
-        `POST /blobs/batch`, then claim their receipts here in one call.
+        `POST /blobs/batch-upload`, then claim their receipts here in one call.
         Hosted only.
 
         Each entry is one object write. Without `object_id` it is a create,
@@ -2641,7 +2641,7 @@ components:
           description: An update's version, the object's current version + 1; absent for a create
         receipt:
           type: string
-          description: The receipt JWT from the storage service's `POST /blobs` or `POST /blobs/batch`
+          description: The receipt JWT from the storage service's `POST /blobs` or `POST /blobs/batch-upload`
 
     BatchObjectsResponse:
       type: object
