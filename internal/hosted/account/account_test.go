@@ -118,8 +118,8 @@ func TestSessionsSlideAndExpire(t *testing.T) {
 	}
 
 	c.advance(5 * time.Minute)
-	if _, err := store.Authenticate(ctx, token); err != nil {
-		t.Fatal(err)
+	if p, err := store.Authenticate(ctx, token); err != nil || p.Slid {
+		t.Fatalf("Authenticate within the touch interval = %#v, %v; want no slide", p, err)
 	}
 	if got := expiry(); !got.Equal(created.Add(account.SessionTTL)) {
 		t.Fatalf("expiry after a use within the touch interval = %v, want it unchanged", got)
@@ -131,7 +131,7 @@ func TestSessionsSlideAndExpire(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.Session.User.ID != user.ID || p.RegionID != "" || p.PendingDeletion() {
+	if p.Session.User.ID != user.ID || p.RegionID != "" || p.PendingDeletion() || !p.Slid {
 		t.Fatalf("principal = %#v", p)
 	}
 	if got := expiry(); !got.Equal(used.Add(account.SessionTTL)) {

@@ -29,6 +29,10 @@ type Principal struct {
 	// RegionID is "" until the user chooses a region.
 	RegionID            string
 	DeletionRequestedAt *time.Time
+	// Slid reports that this authentication extended the session's expiry
+	// to SessionTTL from now, so a cookie carrying the token should be
+	// extended too.
+	Slid bool
 }
 
 // PendingDeletion reports whether the caller's account is scheduled for
@@ -67,7 +71,7 @@ func (s *Store) CreateSession(ctx context.Context, userID, userAgent string) (st
 
 // Authenticate returns the caller a raw session token names, sliding the
 // session's expiry when it was last recorded in use more than touchInterval
-// ago. It returns auth.ErrNoSession for an unknown or expired token, deleting
+// ago and reporting that in Principal.Slid. It returns auth.ErrNoSession for an unknown or expired token, deleting
 // an expired session.
 func (s *Store) Authenticate(ctx context.Context, token string) (Principal, error) {
 	var p Principal
@@ -96,10 +100,16 @@ func (s *Store) Authenticate(ctx context.Context, token string) (Principal, erro
 	if now.Sub(lastUsedAt) >= touchInterval {
 		// The guard on last_used_at lets only one of several concurrent
 		// requests write.
-		if _, err := s.database.ExecContext(ctx, `UPDATE sessions SET last_used_at = $2, expires_at = $3
-			WHERE id = $1 AND last_used_at <= $4`, p.Session.ID, now, now.Add(SessionTTL), now.Add(-touchInterval)); err != nil {
+		result, err := s.database.ExecContext(ctx, `UPDATE sessions SET last_used_at = $2, expires_at = $3
+			WHERE id = $1 AND last_used_at <= $4`, p.Session.ID, now, now.Add(SessionTTL), now.Add(-touchInterval))
+		if err != nil {
 			return Principal{}, err
 		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return Principal{}, err
+		}
+		p.Slid = n > 0
 	}
 	return p, nil
 }
