@@ -26,7 +26,7 @@ type Server struct {
 	Storage  storage.Storage
 	Verifier *hostedauth.Verifier
 	Signer   *hostedauth.ReceiptSigner
-	// Metrics may be nil.
+	// Metrics are built on a no-op meter provider when metrics are off.
 	Metrics *metrics.Metrics
 }
 
@@ -44,9 +44,7 @@ func (s *Server) routes() chi.Router {
 	r.Use(hlog.UserAgentHandler("user_agent"))
 	r.Use(hlog.AccessHandler(httputil.LogAccess))
 	r.Use(chimw.Recoverer)
-	if s.Metrics != nil {
-		r.Use(metrics.Middleware(s.Metrics))
-	}
+	r.Use(s.Metrics.Middleware)
 	r.NotFound(func(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteError(w, r, http.StatusNotFound, "Not Found")
 	})

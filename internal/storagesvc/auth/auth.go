@@ -29,7 +29,7 @@ const (
 	ReasonInvalid = "invalid"
 )
 
-// OnFailure is told about every rejected request. It may be nil.
+// OnFailure is told about every rejected request.
 type OnFailure func(ctx context.Context, kind, reason string)
 
 type contextKey struct{}
@@ -85,9 +85,7 @@ func Admin(v *hostedauth.Verifier, onFailure OnFailure) func(http.Handler) http.
 func bearer(w http.ResponseWriter, r *http.Request, kind string, onFailure OnFailure) (string, bool) {
 	token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if !ok || token == "" {
-		if onFailure != nil {
-			onFailure(r.Context(), kind, ReasonMissing)
-		}
+		onFailure(r.Context(), kind, ReasonMissing)
 		httputil.WriteError(w, r, http.StatusUnauthorized, "Expected Bearer token")
 		return "", false
 	}
@@ -100,8 +98,6 @@ func reject(w http.ResponseWriter, r *http.Request, kind string, err error, onFa
 		reason = ReasonExpired
 	}
 	hlog.FromRequest(r).Info().Err(err).Str("token_kind", kind).Msg("rejected token")
-	if onFailure != nil {
-		onFailure(r.Context(), kind, reason)
-	}
+	onFailure(r.Context(), kind, reason)
 	httputil.WriteError(w, r, http.StatusUnauthorized, "Invalid token")
 }

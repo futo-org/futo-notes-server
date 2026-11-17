@@ -34,7 +34,7 @@ func newS3Env(t *testing.T) (*env, string) {
 		SecretAccessKey: os.Getenv("S3_TEST_SECRET_ACCESS_KEY"),
 		ForcePathStyle:  true,
 	})
-	e := newEnvWith(t, store, nil)
+	e := newEnvWith(t, store, noopMetrics(t))
 	user := uuid.NewV4().String()
 	t.Cleanup(func() {
 		for range 100 {

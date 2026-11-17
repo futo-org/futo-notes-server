@@ -4,29 +4,18 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"slices"
-	"time"
 
-	"github.com/go-chi/chi/v5"
 	"go.opentelemetry.io/otel/attribute"
 	otelmetric "go.opentelemetry.io/otel/metric"
 
 	"futo-notes-server/internal/db"
+	"futo-notes-server/internal/hostedmetrics"
 )
-
-// durationBuckets replaces the SDK's default boundaries, which are sized for
-// milliseconds and would put every request recorded in seconds in the first
-// bucket.
-var durationBuckets = []float64{
-	0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120,
-}
 
 // Metrics are the API's instruments. Build them from a no-op meter provider
 // when metrics are off; every recording is then free.
 type Metrics struct {
-	requestDuration otelmetric.Float64Histogram
-	requestCount    otelmetric.Int64Counter
-	requestErrors   otelmetric.Int64Counter
+	http            *hostedmetrics.HTTP
 	logins          otelmetric.Int64Counter
 	tokensIssued    otelmetric.Int64Counter
 	tokenRefreshes  otelmetric.Int64Counter
@@ -40,18 +29,8 @@ type Metrics struct {
 func NewMetrics(meter otelmetric.Meter, database *db.DB) (*Metrics, error) {
 	var m Metrics
 	var err error
-	if m.requestDuration, err = meter.Float64Histogram("http.server.request.duration",
-		otelmetric.WithDescription("HTTP server request duration"), otelmetric.WithUnit("s"),
-		otelmetric.WithExplicitBucketBoundaries(durationBuckets...)); err != nil {
-		return nil, fmt.Errorf("creating request duration histogram: %w", err)
-	}
-	if m.requestCount, err = meter.Int64Counter("http.server.request.count",
-		otelmetric.WithDescription("HTTP requests served")); err != nil {
-		return nil, fmt.Errorf("creating request counter: %w", err)
-	}
-	if m.requestErrors, err = meter.Int64Counter("http.server.request.errors",
-		otelmetric.WithDescription("HTTP requests answered with a 4xx or 5xx status")); err != nil {
-		return nil, fmt.Errorf("creating request error counter: %w", err)
+	if m.http, err = hostedmetrics.NewHTTP(meter); err != nil {
+		return nil, err
 	}
 	if m.logins, err = meter.Int64Counter("auth.logins",
 		otelmetric.WithDescription("OIDC sign-ins by mode and outcome")); err != nil {
@@ -160,65 +139,4 @@ func (m *Metrics) countStreams(next http.HandlerFunc) http.HandlerFunc {
 		defer m.sseStreams.Add(context.WithoutCancel(r.Context()), -1)
 		next(w, r)
 	}
-}
-
-// statusRecorder notes the status a handler answers with. Unwrap keeps
-// http.ResponseController reaching the underlying writer, which sync event
-// streams flush through.
-type statusRecorder struct {
-	http.ResponseWriter
-	status int
-}
-
-func (w *statusRecorder) WriteHeader(status int) {
-	if w.status == 0 {
-		w.status = status
-	}
-	w.ResponseWriter.WriteHeader(status)
-}
-
-func (w *statusRecorder) Write(b []byte) (int, error) {
-	if w.status == 0 {
-		w.status = http.StatusOK
-	}
-	return w.ResponseWriter.Write(b)
-}
-
-func (w *statusRecorder) Unwrap() http.ResponseWriter { return w.ResponseWriter }
-
-// knownMethods are the methods recorded by name; clients can send any token.
-var knownMethods = []string{
-	http.MethodConnect, http.MethodDelete, http.MethodGet, http.MethodHead, http.MethodOptions,
-	http.MethodPatch, http.MethodPost, http.MethodPut, http.MethodTrace,
-}
-
-// middleware records request duration, count and errors by method, route
-// pattern and status. Routes are chi patterns, never raw paths, so
-// cardinality stays bounded.
-func (m *Metrics) middleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-		recorder := &statusRecorder{ResponseWriter: w}
-		next.ServeHTTP(recorder, r)
-		status := recorder.status
-		if status == 0 {
-			status = http.StatusOK
-		}
-		route := "unmatched"
-		if rctx := chi.RouteContext(r.Context()); rctx != nil && rctx.RoutePattern() != "" {
-			route = rctx.RoutePattern()
-		}
-		method := r.Method
-		if !slices.Contains(knownMethods, method) {
-			method = "other"
-		}
-		attrs := otelmetric.WithAttributes(attribute.String("method", method), attribute.String("route", route),
-			attribute.Int("status", status))
-		ctx := context.WithoutCancel(r.Context())
-		m.requestDuration.Record(ctx, time.Since(start).Seconds(), attrs)
-		m.requestCount.Add(ctx, 1, attrs)
-		if status >= http.StatusBadRequest {
-			m.requestErrors.Add(ctx, 1, attrs)
-		}
-	})
 }

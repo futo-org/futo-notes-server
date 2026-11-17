@@ -13,6 +13,7 @@ import (
 	"github.com/getkin/kin-openapi/openapi3filter"
 	"github.com/getkin/kin-openapi/routers"
 	"github.com/getkin/kin-openapi/routers/legacy"
+	"go.opentelemetry.io/otel/metric/noop"
 
 	"futo-notes-server/internal/hostedauth"
 	"futo-notes-server/internal/httputil"
@@ -41,7 +42,16 @@ type env struct {
 }
 
 func newEnv(t *testing.T) *env {
-	return newEnvWith(t, newMemStorage(), nil)
+	return newEnvWith(t, newMemStorage(), noopMetrics(t))
+}
+
+func noopMetrics(t *testing.T) *metrics.Metrics {
+	t.Helper()
+	m, err := metrics.NewMetrics(noop.NewMeterProvider().Meter("test"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m
 }
 
 func newEnvWithMetrics(t *testing.T, m *metrics.Metrics) *env {

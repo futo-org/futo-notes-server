@@ -18,9 +18,10 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
-	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/attribute"
 
 	"futo-notes-server/internal/hostedauth"
+	"futo-notes-server/internal/hostedmetrics"
 	"futo-notes-server/internal/storagesvc/config"
 	"futo-notes-server/internal/storagesvc/handlers"
 	"futo-notes-server/internal/storagesvc/metrics"
@@ -51,19 +52,15 @@ func main() {
 		log.Fatal().Err(err).Str("addr", addr).Msg("failed to bind listener")
 	}
 
-	var m *metrics.Metrics
-	var meterProvider *sdkmetric.MeterProvider
-	if cfg.OTLPMetricsEndpoint != "" {
-		meterProvider, err = metrics.SetupMeterProvider(cfg.OTLPMetricsEndpoint, cfg.OTLPMetricsURLPath,
-			cfg.OTLPMetricsInterval, version, cfg.RegionID)
-		if err != nil {
-			log.Fatal().Err(err).Msg("failed to set up meter provider")
-		}
-		m, err = metrics.NewMetrics(meterProvider.Meter(metrics.ServiceName))
-		if err != nil {
-			log.Fatal().Err(err).Msg("failed to create metrics")
-		}
-		log.Info().Str("endpoint", cfg.OTLPMetricsEndpoint).Msg("OpenTelemetry metrics enabled")
+	meterProvider, err := hostedmetrics.NewProvider(hostedmetrics.Export{
+		Endpoint: cfg.OTLPMetricsEndpoint, URLPath: cfg.OTLPMetricsURLPath, Interval: cfg.OTLPMetricsInterval,
+	}, metrics.ServiceName, version, attribute.String("region", cfg.RegionID))
+	if err != nil {
+		log.Fatal().Err(err).Msg("failed to set up meter provider")
+	}
+	m, err := metrics.NewMetrics(meterProvider.Meter(metrics.ServiceName))
+	if err != nil {
+		log.Fatal().Err(err).Msg("failed to create metrics")
 	}
 
 	verifier, err := hostedauth.NewVerifier(cfg.APIPublicKeys, cfg.RegionID)
@@ -121,10 +118,8 @@ func main() {
 	// otherwise leave the final export an expired context.
 	telemetryCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if meterProvider != nil {
-		if err := meterProvider.Shutdown(telemetryCtx); err != nil {
-			log.Error().Err(err).Msg("meter provider shutdown error")
-		}
+	if err := meterProvider.Shutdown(telemetryCtx); err != nil {
+		log.Error().Err(err).Msg("meter provider shutdown error")
 	}
 	log.Info().Msg("shutdown complete")
 }

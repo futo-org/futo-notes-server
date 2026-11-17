@@ -18,12 +18,6 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
-	otelmetric "go.opentelemetry.io/otel/metric"
-	"go.opentelemetry.io/otel/metric/noop"
-	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
-	sdkresource "go.opentelemetry.io/otel/sdk/resource"
 
 	"futo-notes-server/internal/db"
 	"futo-notes-server/internal/events"
@@ -33,6 +27,7 @@ import (
 	"futo-notes-server/internal/hosted/hostedjobs"
 	"futo-notes-server/internal/hosted/storageclient"
 	"futo-notes-server/internal/hostedauth"
+	"futo-notes-server/internal/hostedmetrics"
 	"futo-notes-server/internal/jobs"
 )
 
@@ -151,10 +146,13 @@ func run() error {
 		return err
 	}
 
-	meterProvider, meter, err := setupMetrics(cfg)
+	meterProvider, err := hostedmetrics.NewProvider(hostedmetrics.Export{
+		Endpoint: cfg.OTLPMetricsEndpoint, URLPath: cfg.OTLPMetricsURLPath, Interval: cfg.OTLPMetricsInterval,
+	}, serviceName, version)
 	if err != nil {
 		return fmt.Errorf("setting up metrics: %w", err)
 	}
+	meter := meterProvider.Meter(serviceName)
 	metrics, err := api.NewMetrics(meter, database)
 	if err != nil {
 		return fmt.Errorf("creating metrics: %w", err)
@@ -221,47 +219,4 @@ func run() error {
 	}
 	log.Info().Msg("shutdown complete")
 	return nil
-}
-
-// meterShutdown is the part of a meter provider shutdown needs.
-type meterShutdown interface {
-	Shutdown(context.Context) error
-}
-
-// noopShutdown stands in for the provider when metrics are off.
-type noopShutdown struct{}
-
-func (noopShutdown) Shutdown(context.Context) error { return nil }
-
-// setupMetrics returns an OTLP-exporting meter when OTLP_METRICS_ENDPOINT is
-// set, and a no-op meter otherwise.
-func setupMetrics(cfg config.Config) (meterShutdown, otelmetric.Meter, error) {
-	if cfg.OTLPMetricsEndpoint == "" {
-		return noopShutdown{}, noop.NewMeterProvider().Meter(serviceName), nil
-	}
-	opts := []otlpmetrichttp.Option{otlpmetrichttp.WithEndpoint(cfg.OTLPMetricsEndpoint), otlpmetrichttp.WithInsecure()}
-	if cfg.OTLPMetricsURLPath != "" {
-		opts = append(opts, otlpmetrichttp.WithURLPath(cfg.OTLPMetricsURLPath))
-	}
-	exporter, err := otlpmetrichttp.New(context.Background(), opts...)
-	if err != nil {
-		return nil, nil, err
-	}
-	host, _ := os.Hostname()
-	// Without service.instance.id every replica exports identical series,
-	// which the TSDB merges and reads as counter resets.
-	resource, err := sdkresource.Merge(sdkresource.Default(), sdkresource.NewSchemaless(
-		attribute.String("service.name", serviceName),
-		attribute.String("service.version", version),
-		attribute.String("service.instance.id", host),
-	))
-	if err != nil {
-		resource = sdkresource.Default()
-	}
-	provider := sdkmetric.NewMeterProvider(
-		sdkmetric.WithResource(resource),
-		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(exporter, sdkmetric.WithInterval(cfg.OTLPMetricsInterval))),
-	)
-	log.Info().Str("endpoint", cfg.OTLPMetricsEndpoint).Msg("OpenTelemetry metrics enabled")
-	return provider, provider.Meter(serviceName), nil
 }

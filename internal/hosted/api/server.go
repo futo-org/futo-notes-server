@@ -103,7 +103,7 @@ func (s *Server) router() chi.Router {
 		hlog.RemoteAddrHandler("remote_ip"),
 		hlog.UserAgentHandler("user_agent"),
 		hlog.AccessHandler(httputil.LogAccess),
-		s.metrics.middleware,
+		s.metrics.http.Middleware,
 		syncapi.RecoverPanic,
 		chimw.GetHead,
 	)
