@@ -16,6 +16,7 @@ as an override. */}}
   (list (dict "secretRef" (dict "name" (include "notes-common.fullname" .))))
   (.Values.extraEnvFrom | default (list))) }}
 {{- $_ := set .Values "env" (concat .Values.env (include "api.storeEnv" . | fromYamlArray)) }}
+{{- $_ := set .Values "env" (concat .Values.env (include "api.webBillingEnv" . | fromYamlArray)) }}
 {{- $_ := set .Values "volumes" (concat (.Values.volumes | default (list))
   (list (dict "name" "regions" "configMap" (dict "name" (include "api.regionsConfigMap" .))))) }}
 {{- $_ := set .Values "volumeMounts" (concat (.Values.volumeMounts | default (list))

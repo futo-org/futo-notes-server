@@ -146,6 +146,17 @@ play:
   rtdnAudience: ""
   rtdnServiceAccount: ""
 
+# Stripe, the web payment provider (docs/Hosted deployment.md, "Billing: web
+# provider"). Off while priceId is empty. On, the chart sets
+# BILLING_WEB_PROVIDER=stripe, and the Secret must hold STRIPE_SECRET_KEY and
+# STRIPE_WEBHOOK_SECRET. The publishable key is not secret: Stripe.js gets it
+# in the page.
+stripe:
+  # The $5/month plan's price id (price_...).
+  priceId: ""
+  # pk_live_... in prod, pk_test_... in staging (same mode as the secret key).
+  publishableKey: ""
+
 # Dev-only literal: the mock issuer's client secret. Prod's Secret (same name,
 # notes-api) arrives via an ExternalSecret with secretData nulled in the base
 # HelmRelease; it must hold OIDC_CLIENT_SECRET, API_SIGNING_KEY (the Ed25519
@@ -154,7 +165,8 @@ play:
 # `openssl rand -base64 32`), which derives each storage refresh token's
 # successor; see docs/Hosted deployment.md for rotating it. It may also hold
 # RESEND_API_KEY (a Resend sending key for emailFromAddress's domain); without
-# it the API sends no email.
+# it the API sends no email. With stripe.priceId set it must also hold
+# STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET.
 secretData:
   OIDC_CLIENT_SECRET: notes-dev-secret
 

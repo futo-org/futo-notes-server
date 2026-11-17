@@ -47,3 +47,19 @@ Secret. */}}
 {{- end }}
 {{- toYaml $env }}
 {{- end -}}
+
+{{- /* BILLING_WEB_PROVIDER and the Stripe settings, when stripe.priceId is
+set. The secret key and webhook secret come from the Secret. */}}
+{{- define "api.webBillingEnv" -}}
+{{- $env := list }}
+{{- with .Values.stripe }}
+{{- if .priceId }}
+{{- $env = list
+  (dict "name" "BILLING_WEB_PROVIDER" "value" "stripe")
+  (dict "name" "STRIPE_PRICE_ID" "value" .priceId)
+  (dict "name" "STRIPE_PUBLISHABLE_KEY" "value" .publishableKey)
+}}
+{{- end }}
+{{- end }}
+{{- toYaml $env }}
+{{- end -}}
