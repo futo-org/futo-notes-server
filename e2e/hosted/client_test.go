@@ -302,7 +302,7 @@ func (d *device) uploadBatch(grant storageGrant, ids []string, blobs [][]byte) [
 	for i, blob := range blobs {
 		body = blobframe.AppendUpload(body, ids[i], blob)
 	}
-	resp := d.do(request{method: http.MethodPost, url: grant.Region.Endpoint + "/blobs/batch", bearer: grant.AccessToken,
+	resp := d.do(request{method: http.MethodPost, url: grant.Region.Endpoint + "/blobs/batch-upload", bearer: grant.AccessToken,
 		body: bytes.NewReader(body), length: int64(len(body)), contentType: "application/octet-stream"})
 	d.expect("batch upload", resp, http.StatusOK)
 	var answer struct {

@@ -20,7 +20,7 @@ import (
 // uploadBatch posts body as a batch upload.
 func (e *env) uploadBatch(token string, body []byte) response {
 	e.t.Helper()
-	return e.do(http.MethodPost, "/blobs/batch", token, bytes.NewReader(body),
+	return e.do(http.MethodPost, "/blobs/batch-upload", token, bytes.NewReader(body),
 		map[string]string{"Content-Type": "application/octet-stream"})
 }
 
@@ -151,19 +151,21 @@ func TestBatchUploadValidation(t *testing.T) {
 	}
 }
 
-// The Content-Type decides between upload and fetch; its parameters do not
-// matter, and a fetch keeps working without one.
-func TestBatchDispatchesOnContentType(t *testing.T) {
+// Upload and fetch have their own paths: an upload body sent to the fetch
+// path is refused as a fetch, and stores nothing.
+func TestBatchUploadAndFetchPathsAreSeparate(t *testing.T) {
 	e := newEnv(t)
 	token := e.access(userA)
 	resp := e.do(http.MethodPost, "/blobs/batch", token, bytes.NewReader(blobframe.AppendUpload(nil, "f", []byte("x"))),
-		map[string]string{"Content-Type": "Application/Octet-Stream; charset=binary"})
-	if results := resp.batchResults(t); len(results) != 1 || results[0].Status != http.StatusCreated {
-		t.Fatalf("upload with Content-Type parameters: %s", resp.body)
+		map[string]string{"Content-Type": "application/octet-stream"})
+	if resp.status != http.StatusBadRequest {
+		t.Fatalf("upload frames posted to the fetch path = %d: %s", resp.status, resp.body)
 	}
-	resp = e.do(http.MethodPost, "/blobs/batch", token, strings.NewReader(`{"keys":["k"]}`), nil)
-	if resp.status != http.StatusOK || resp.header.Get("Content-Type") != "application/octet-stream" {
-		t.Fatalf("fetch without a Content-Type = %d %q: %s", resp.status, resp.header.Get("Content-Type"), resp.body)
+	if keys := e.store.keys(); len(keys) != 0 {
+		t.Fatalf("the fetch path stored %v", keys)
+	}
+	if results := e.uploadBatch(token, blobframe.AppendUpload(nil, "f", []byte("x"))).batchResults(t); len(results) != 1 || results[0].Status != http.StatusCreated {
+		t.Fatalf("batch upload: %+v", results)
 	}
 }
 

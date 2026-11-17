@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"mime"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -142,16 +141,6 @@ func singleRange(header string) string {
 		}
 	}
 	return header
-}
-
-// batchBlobs serves POST /blobs/batch: a batch upload when the body is
-// application/octet-stream, a batch download otherwise.
-func (s *Server) batchBlobs(w http.ResponseWriter, r *http.Request) {
-	if mediaType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); mediaType == "application/octet-stream" {
-		s.uploadBatch(w, r)
-		return
-	}
-	s.downloadBatch(w, r)
 }
 
 // BatchUploadResponse is the body of a batch upload: one result per frame,

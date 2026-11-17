@@ -22,7 +22,7 @@ type UploadFrame struct {
 }
 
 // ParseUpload decodes a batch upload request body (hosted storage
-// POST /blobs/batch with Content-Type application/octet-stream): 1 to
+// POST /blobs/batch-upload): 1 to
 // MaxUploadFrames frames, repeating to EOF, integers big-endian:
 //
 //	[u16 idLen][id utf8][u32 blobLen][blob bytes]

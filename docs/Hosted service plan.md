@@ -177,7 +177,8 @@ and the region's receipt signing key.
 |---|---|---|
 | `POST /blobs` | access JWT | Body: ciphertext, up to 100 MiB, `Content-Length` required. The server mints the key `<sub>/<uuidv7>` and writes it with `If-None-Match: *`. Returns `201 {key, size, receipt}`. |
 | `GET /blobs/{userId}/{blobId}` | access JWT | `userId` must equal `sub`. Streams the bytes and supports Range. |
-| `POST /blobs/batch` | access JWT | `Content-Type: application/octet-stream`: **batch upload**, 1–200 frames `[u16 idLen][id][u32 blobLen][blob]` in at most 32 MiB. Each frame is stored as `POST /blobs` stores a body, and the answer is `200 {"results": [{"id", "status", "body"}]}`, in order, holding what that single upload would answer (`201 {key, size, receipt}`, or the error body with its `code`). Frames fail independently; malformed framing fails the request. Any other `Content-Type`: **batch fetch**, today's frame format and limits |
+| `POST /blobs/batch-upload` | access JWT | **Batch upload**: 1–200 frames `[u16 idLen][id][u32 blobLen][blob]` in at most 32 MiB. Each frame is stored as `POST /blobs` stores a body, and the answer is `200 {"results": [{"id", "status", "body"}]}`, in order, holding what that single upload would answer (`201 {key, size, receipt}`, or the error body with its `code`). Frames fail independently; malformed framing fails the request. |
+| `POST /blobs/batch` | access JWT | **Batch fetch**, today's frame format and limits |
 | `DELETE /internal/blobs` | admin JWT | Deletes a list of keys. Already-gone keys are fine. |
 | `GET /internal/blobs?prefix=&older_than=` | admin JWT | Paged key listing, for reconciliation |
 | `DELETE /internal/users/{userId}` | admin JWT | Deletes a user's whole prefix |

@@ -93,7 +93,7 @@ second note
 third note</textarea></div>
     <div class="row"><button id="batch-build">Build batch frames</button><a id="batch-file" hidden download="batch.bin">batch.bin</a></div>
     <pre id="batch-curl" class="muted"></pre>
-    <div class="row"><textarea id="batch-uploaded" rows="3" placeholder="storage POST /blobs/batch answer"></textarea></div>
+    <div class="row"><textarea id="batch-uploaded" rows="3" placeholder="storage POST /blobs/batch-upload answer"></textarea></div>
     <div class="row">
       <button id="batch-claim">Claim batch (create all)</button>
       <button id="batch-retry">Send the same claim again</button>
@@ -321,7 +321,7 @@ $("batch-build").onclick = () => {
   link.href = URL.createObjectURL(new Blob(parts, { type: "application/octet-stream" }));
   link.hidden = false;
   $("batch-curl").textContent = "curl -H 'Authorization: Bearer " + (store.getItem("access") || "<access_token>") + "' \\\n" +
-    "  -H 'Content-Type: application/octet-stream' --data-binary @batch.bin " + (store.getItem("endpoint") || "<endpoint>") + "/blobs/batch";
+    "  -H 'Content-Type: application/octet-stream' --data-binary @batch.bin " + (store.getItem("endpoint") || "<endpoint>") + "/blobs/batch-upload";
 };
 let lastClaim = null;
 const claimBatch = () => call("POST", "/api/collections/" + $("collection").value + "/objects/batch", lastClaim);

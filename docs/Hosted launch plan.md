@@ -11,7 +11,7 @@ Status:
 |---|---|---|
 | S1 | A1–A5, A7 | Done, in MR !34 |
 | S2 | B1, B2, D | Done, in the MR stacked on !34 (`feat/hosted-vault-unlock-test-stack`) |
-| S3 | A6 | Done, stacked on the S2 MR. Storage batch upload shares `POST /blobs/batch` with batch fetch, chosen by `Content-Type` |
+| S3 | A6 | Done, stacked on the S2 MR. Storage batch upload is `POST /blobs/batch-upload`, next to batch fetch at `POST /blobs/batch` |
 | S4 | E | Not started |
 | S5 | C | Not started |
 
@@ -103,7 +103,7 @@ the token request, which is the Rust HTTP client's (`reqwest/…`).
 Without batching, each new object costs two round trips: upload to storage, then
 claim at the API. A first sync of a large vault pays that for every object. Add:
 
-- **Storage `POST /blobs/batch`.** Framed like the self-hosted
+- **Storage `POST /blobs/batch-upload`.** Framed like the self-hosted
   `blob-objects/batch` request (1–200 frames, 32 MiB cap), but each frame carries
   only blob bytes. It answers with one receipt per frame, in order, or a
   per-frame failure.

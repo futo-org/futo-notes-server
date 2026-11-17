@@ -199,14 +199,8 @@ paths:
     post:
       operationId: batchFetchBlobs
       tags: [blobs]
-      summary: Fetch, or upload, up to 200 blobs in one request
+      summary: Fetch up to 200 blobs in one request
       description: |
-        The request's `Content-Type` picks what it does: a body sent as
-        `application/octet-stream` is a **batch upload**, anything else a
-        **batch fetch**.
-
-        ## Batch fetch
-
         Same request, limits and frame format as the self-hosted
         `POST /api/blobs/batch`. One frame per requested key, in request
         order, integers big-endian:
@@ -228,9 +222,56 @@ paths:
         A storage failure after the `200` has been sent aborts the connection
         mid-body rather than emitting an error frame; clients see a truncated
         transfer and retry.
+      security:
+        - accessToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [keys]
+              properties:
+                keys:
+                  type: array
+                  minItems: 1
+                  maxItems: 200
+                  items:
+                    type: string
+                    maxLength: 128
+      responses:
+        "200":
+          description: The binary frame stream
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "400":
+          description: |
+            `invalid_request`: invalid JSON (`invalid json`), empty `keys`
+            (`keys must not be empty`), more than 200 keys (`too many keys
+            (max 200)`), a non-string key (`keys must be strings`), or a key
+            over 128 characters (`key too long (max 128 chars)`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          description: "`payload_too_large`: a body over 64 KiB"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
-        ## Batch upload
-
+  /blobs/batch-upload:
+    post:
+      operationId: batchUploadBlobs
+      tags: [blobs]
+      summary: Upload up to 200 blobs in one request
+      description: |
         The body concatenates 1–200 frames, repeating to EOF, integers
         big-endian. It is the self-hosted `blob-objects/batch` framing with
         only the blob left:
@@ -264,41 +305,19 @@ paths:
               type: string
               format: binary
               description: Batch upload frames
-          application/json:
-            schema:
-              type: object
-              required: [keys]
-              properties:
-                keys:
-                  type: array
-                  minItems: 1
-                  maxItems: 200
-                  items:
-                    type: string
-                    maxLength: 128
       responses:
         "200":
-          description: |
-            A fetch answers the binary frame stream; an upload answers one
-            result per frame as JSON.
+          description: One result per frame, in request order
           content:
-            application/octet-stream:
-              schema:
-                type: string
-                format: binary
             application/json:
               schema:
                 $ref: "#/components/schemas/BatchUploadResponse"
         "400":
           description: |
-            `invalid_request`. A fetch: invalid JSON (`invalid json`), empty
-            `keys` (`keys must not be empty`), more than 200 keys (`too many
-            keys (max 200)`), a non-string key (`keys must be strings`), or a
-            key over 128 characters (`key too long (max 128 chars)`). An
-            upload: malformed framing (`truncated id length`, `truncated id`,
-            `invalid id`, `truncated blob length`, `truncated blob`), no
-            frames (`batch must contain at least one frame`), or more than 200
-            (`too many frames (max 200)`).
+            `invalid_request`: malformed framing (`truncated id length`,
+            `truncated id`, `invalid id`, `truncated blob length`, `truncated
+            blob`), no frames (`batch must contain at least one frame`), or
+            more than 200 (`too many frames (max 200)`).
           content:
             application/json:
               schema:
@@ -306,12 +325,11 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "413":
-          description: "`payload_too_large`: a fetch body over 64 KiB, or an upload body over 32 MiB"
+          description: "`payload_too_large`: a body over 32 MiB"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
-
   /internal/blobs:
     delete:
       operationId: deleteBlobs

@@ -20,7 +20,7 @@ func blobEndpoints() []endpoint {
 	return []endpoint{
 		{http.MethodPost, "/blobs", "x", ""},
 		{http.MethodPost, "/blobs/batch", `{"keys":["k"]}`, ""},
-		{http.MethodPost, "/blobs/batch", string(blobframe.AppendUpload(nil, "f", []byte("x"))), "application/octet-stream"},
+		{http.MethodPost, "/blobs/batch-upload", string(blobframe.AppendUpload(nil, "f", []byte("x"))), "application/octet-stream"},
 		{http.MethodGet, "/blobs/" + userA + "/" + uuid.NewV7().String(), "", ""},
 	}
 }
