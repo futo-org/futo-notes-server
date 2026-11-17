@@ -214,7 +214,13 @@ test:hosted-stack:
     - job: build:binaries
       artifacts: true
   variables:
-    DOCKER_TLS_CERTDIR: /certs
+    # The job's own dind service, over plain TCP: the runner shares neither
+    # dind's client certificates nor a reachable host network with the job,
+    # and the host Docker socket it may mount would put the stack's
+    # containers out of the job's reach. The launcher reaches them at host
+    # "docker".
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
     GOTOOLCHAIN: auto
   before_script:
     - apk add --no-cache bash curl go
