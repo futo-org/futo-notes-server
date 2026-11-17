@@ -136,12 +136,12 @@ makes "one login" actually line up across services. No schema change needed.
 
 ## E2EE vault key under SSO
 
-**Decided (2026-11-17): a separate vault passphrase**, decoupled from the Zitadel
-login. After signing in with FUTO, a new device asks for the vault passphrase and
-unwraps the key exactly as today. No server change: the existing `key_salt`, `key_kdf`
-and `encrypted_vault_key` carry it. No recovery code or passkey for now, so a
-forgotten passphrase loses the vault. Adding another unlock method later needs
-several wrapped copies per vault, a new hosted-only endpoint.
+**Decided (2026-11-17): a vault passphrase separate from the Zitadel login, plus a
+recovery key and QR device pairing.** After signing in with FUTO, a new device
+unlocks with the passphrase, the recovery key, or a transfer from an already unlocked
+device. The apps already implement all three. The server stores the recovery envelope
+next to the key material and relays pairings. See
+[Hosted launch plan](Hosted%20launch%20plan.md) § B.
 
 Background: today the client wraps the vault key with a
 **PBKDF2-derived key from the user's vault password**; the server stores `key_salt`,

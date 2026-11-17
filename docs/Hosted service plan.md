@@ -211,8 +211,8 @@ client changes, tracked separately:
 - storage token refresh
 - direct upload and download
 - passing the receipt on create/update
-- unlocking the E2EE vault key under SSO with a separate vault passphrase (decided; see
-  `docs/MANAGED-LAUNCH.md`)
+- unlocking the E2EE vault key under SSO: passphrase, recovery key and QR pairing (decided; the
+  server half is in `docs/Hosted launch plan.md`)
 
 ## Confirmed defaults
 
