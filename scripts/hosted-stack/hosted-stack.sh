@@ -44,12 +44,17 @@ export HOSTED_STACK_MINIO_PORT=${HOSTED_STACK_MINIO_PORT:-19000}
 regions=(us-east eu-central ap-southeast)
 region_names=("US East" "EU Central" "Asia Pacific Southeast")
 
-# Under Docker-in-Docker (DOCKER_HOST=tcp://docker:2376 in GitLab CI) the
-# published ports are on the Docker host, not on loopback, so they must listen
-# beyond it.
+# Postgres and MinIO publish their ports on loopback. Under Docker-in-Docker
+# (DOCKER_HOST=tcp://docker:2376 in GitLab CI) the published ports are on the
+# Docker host instead, so they must listen beyond it. HOSTED_STACK_CONTAINER_HOST
+# publishes them on that address and reaches them there: a CI job that runs
+# beside its own containers on the host's Docker gives its bridge gateway.
 container_host=127.0.0.1
 export HOSTED_STACK_BIND=127.0.0.1
-if [[ ${DOCKER_HOST:-} =~ ^tcp://([^:/]+) ]]; then
+if [[ -n ${HOSTED_STACK_CONTAINER_HOST:-} ]]; then
+  container_host=$HOSTED_STACK_CONTAINER_HOST
+  HOSTED_STACK_BIND=$HOSTED_STACK_CONTAINER_HOST
+elif [[ ${DOCKER_HOST:-} =~ ^tcp://([^:/]+) ]]; then
   container_host=${BASH_REMATCH[1]}
   HOSTED_STACK_BIND=0.0.0.0
 fi
