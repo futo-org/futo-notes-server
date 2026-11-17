@@ -67,6 +67,8 @@ plain-http cookies). Every prod release sets the following.
 | `resendApiUrl` | `https://api.resend.com` (the default; `RESEND_API_URL`) |
 | `emailFromAddress` | the `From` of every email (`EMAIL_FROM_ADDRESS`). The default, `FUTO Notes <noreply@notes.futo.cloud>`, is a **placeholder**: confirm the sending domain, verify it in Resend, then set this. |
 | `postgresClusterName` | `notes-db` |
+| `stripe.priceId` | the $5/month plan's Stripe price id; turns Stripe on (see Billing: web provider) |
+| `stripe.publishableKey` | `pk_live_...` in prod, `pk_test_...` in staging |
 | `secretData` | `null` |
 | `env` | replaces the whole list: `API_PORT=3005`, `LOG_LEVEL=info`, `OTLP_METRICS_ENDPOINT`, `OTLP_METRICS_URL_PATH`. Drop the dev entries `COOKIE_SECURE=false` and `DRAIN_DELAY_MS=1000`: the defaults are a `Secure` cookie and 15 s. Never set `DEV_UI` (it serves `/dev`, which runs storage jobs on demand). |
 
@@ -83,6 +85,8 @@ keys are committed.
 | | `API_SIGNING_KEY` | One Ed25519 private key PEM (with `kid`): signs storage access and admin tokens. |
 | | `STORAGE_REFRESH_ROTATION_KEY` | 32 random bytes, base64 (`openssl rand -base64 32`): derives each storage refresh token's successor, `base64url(HMAC-SHA256(key, token))`, so an exchange whose response was lost can be repeated. The API refuses to start without it. |
 | | `RESEND_API_KEY` | A Resend API key with sending access for the `emailFromAddress` domain. Without it the API logs and skips every email (the lapse and purge notices), and starts anyway. |
+| | `STRIPE_SECRET_KEY` | With Stripe: the secret key (`sk_live_...`), or a restricted key (`rk_...`) with write access to Customers, Checkout Sessions, Subscriptions and Customer Portal sessions. Staging uses the sandbox's `sk_test_...`. The API refuses a live key while `DEV_UI` is on. |
+| | `STRIPE_WEBHOOK_SECRET` | With Stripe: the webhook endpoint's signing secret (`whsec_...`). |
 | `notes-storage-<region>` | `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | Credentials for the region's bucket: get, put, list and delete objects. |
 | | `API_PUBLIC_KEYS` | The public half of the API signing key, one PEM block per `kid` (several during rotation). Same value in every region. |
 | | `RECEIPT_SIGNING_KEY` | This region's Ed25519 private key PEM (with `kid`): signs upload receipts. |
@@ -102,18 +106,102 @@ Billing is on when any payment provider is configured: the capability
 document says `"billing": true`, writes from an account without a
 subscription answer `402 subscription_required`, and its storage tokens are
 read-only (`blobs.read`). With no provider, billing is off and nothing is
-gated. The App Store and Play providers have their own settings (next to
-this section once they land).
+gated. The App Store and Play providers have their own settings (below).
+
+The web provider is **Stripe**, selling one plan at $5/month.
 
 | Variable | Where | What |
 |---|---|---|
-| `BILLING_WEB_PROVIDER` | `env` | The web payment provider. Empty (the default) for none. `mock` is the dev and test-stack mock, whose checkout and portal are `/dev/billing` pages; the API refuses to start with it unless `DEV_UI=true`, so it never runs in production. The real provider (FUTOpay, Polar or Stripe) is not chosen yet; it will get its own value and settings. |
+| `BILLING_WEB_PROVIDER` | rendered by the chart | `stripe` when `stripe.priceId` is set. Empty (the default) for none. `mock` is the dev and test-stack mock, whose checkout and portal are `/dev/billing` pages; the API refuses to start with it unless `DEV_UI=true`, so it never runs in production. |
+| `STRIPE_PRICE_ID` | `stripe.priceId` | The plan's price (`price_...`). Required with `stripe`. |
+| `STRIPE_PUBLISHABLE_KEY` | `stripe.publishableKey` | Mounts the embedded checkout in the browser; not secret. Must be the same mode (live or test) as the secret key. Required with `stripe`. |
+| `STRIPE_SECRET_KEY` | Secret | **Secret.** See Secrets. Required with `stripe`. |
+| `STRIPE_WEBHOOK_SECRET` | Secret | **Secret.** See Secrets. Required with `stripe`. |
+| `STRIPE_API_URL` | tests only | Replaces `https://api.stripe.com`. Never in a chart. |
 | `BILLING_MOCK_WEBHOOK_SECRET` | dev and test stack only | With `mock`: the secret (16 characters or more) the mock signs its webhook deliveries with. Never in a chart. |
+
+How it works:
+
+- **Accounts are Stripe Customers keyed by OIDC `sub`.** The first checkout
+  finds the account's Customer by `metadata.sub` (Stripe's customer search)
+  or creates one. Every Checkout Session carries `client_reference_id` and
+  `subscription_data.metadata.sub` set to the `sub`, and webhooks and
+  refreshes find the account from the subscription's `metadata.sub`, or
+  else its Customer's. Nothing is ever matched by email; the email is only
+  copied onto the Customer for receipts.
+- **Checkout is embedded, never a redirect.** The dashboard's Subscribe
+  opens Stripe's embedded checkout inside the overview. The apps'
+  `POST /api/billing/checkout` answers a one-time link,
+  `<publicUrl>/billing/checkout/<token>` (HMAC-signed, names the account,
+  15 minutes, opens one checkout), to a page of ours that mounts the same
+  checkout without a dashboard session. The token key is derived from
+  `STRIPE_SECRET_KEY`, so rotating that key also voids outstanding links.
+- **Entitlement does not wait for the webhook.** When the checkout
+  completes, the page asks the server to confirm it: the server fetches the
+  Checkout Session, checks it is the caller's (`sub`), and applies its
+  subscription at once. Every later change (renewal, failed payment,
+  cancellation, deletion) arrives by webhook.
+- **The pages that host checkout** (the overview while unsubscribed, its
+  subscribe view, and `/billing/checkout/<token>`) load Stripe.js from
+  `js.stripe.com`, which Stripe forbids self-hosting, and are served a
+  Content-Security-Policy widened by exactly what Stripe documents for
+  Stripe.js and Checkout: `script-src` `js.stripe.com`, `*.js.stripe.com`,
+  `checkout.stripe.com`; `frame-src` the same plus `hooks.stripe.com`;
+  `connect-src` `api.stripe.com`, `checkout.stripe.com`; `img-src`
+  `*.stripe.com`. Every other page keeps the strict policy.
+- **The portal** (Manage subscription) is a Stripe Customer Portal session
+  that returns to `/dashboard`.
+
+Subscription states map to entitlements as follows:
+
+| Stripe `status` | Entitlement | Entitles |
+|---|---|---|
+| `active`, `trialing` | `active` until the period ends | yes |
+| `past_due` | `grace` until the current period ends | yes |
+| `unpaid`, `paused`, `incomplete` | `on_hold` | no |
+| `canceled`, `incomplete_expired` | `expired` | no |
+
+The period end is the subscription item's `current_period_end` (at the
+pinned API version, `2026-10-28.endive`, it lives on the items). A
+subscription renews unless `cancel_at_period_end` is set or `cancel_at`
+falls at or before the period's end.
 
 Providers notify the API at `POST <publicUrl>/api/billing/webhooks/{web,app_store,play}`.
 These routes skip session auth and are authenticated by each provider's
 signature, so the ingress must admit them from the provider (see Network
 paths). Each delivery's id is kept 30 days to drop retries.
+
+### Stripe dashboard setup
+
+Do this once per account (live for prod, the sandbox for staging):
+
+1. **Product and price.** A product "FUTO Notes Sync" with one recurring
+   price, $5.00 USD per month. Put the price id in `stripe.priceId`. A dev
+   copy, "FUTO Notes Sync (dev)" with lookup key
+   `futo-notes-sync-dev-monthly`, exists in the sandbox; the sandbox test
+   reuses it.
+2. **Webhook endpoint.** Developers, Webhooks, Add endpoint:
+   `https://notes.futo.cloud/api/billing/webhooks/web` (staging:
+   `https://notes-staging.apps.futo.network/api/billing/webhooks/web`),
+   listening to exactly `customer.subscription.created`,
+   `customer.subscription.updated` and `customer.subscription.deleted`. Its
+   signing secret goes in the Secret as `STRIPE_WEBHOOK_SECRET`. The
+   payload version does not matter: the server reads only the event id,
+   type and subscription id, and fetches the subscription itself.
+3. **Customer Portal.** Settings, Billing, Customer portal: allow cancelling
+   subscriptions (at the end of the period) and updating payment methods;
+   do **not** allow switching plans or changing quantities. Save it, which
+   also creates the default configuration the API's portal sessions use.
+4. **Checkout.** Embedded checkout needs nothing more. Turn Adaptive Pricing
+   off (Settings, Payments) if the plan should be charged in USD only; the
+   sandbox shows local currencies by default.
+5. **Tax.** Stripe Tax is out of scope for now: no tax is calculated or
+   collected.
+
+### Local development with the Stripe CLI
+
+See [DEVELOPMENT.md](DEVELOPMENT.md#stripe-sandbox): `stripe listen`
+forwards sandbox webhooks to `api:dev`.
 
 The billing jobs run in the 6-hourly maintenance group, under the job lock:
 
@@ -382,7 +470,9 @@ track (bookkeeping table `hosted_migrations`). The chart runs it as a Helm
 | API pods | each region's `endpoint`, path `/internal/*` | blob GC, orphan reconciliation and account purge. The API calls the same `endpoint` clients use. If the ingress restricts `/internal/*`, it must still admit the API's egress. These routes require an admin JWT either way. |
 | API pods | Zitadel issuer | discovery, code exchange and JWKS |
 | API pods | `resendApiUrl` (HTTPS, `POST /emails`) | lapse and purge emails, when `RESEND_API_KEY` is set |
-| payment providers | API `publicUrl`, path `/api/billing/webhooks/*` | subscription notifications; authenticated by the provider's signature, not a session |
+| API pods | `api.stripe.com` (HTTPS) | Stripe: customers, checkout and portal sessions, subscriptions |
+| browsers | `js.stripe.com`, `*.js.stripe.com`, `checkout.stripe.com`, `api.stripe.com`, `hooks.stripe.com` | Stripe.js and the embedded checkout, on the pages that host it |
+| payment providers | API `publicUrl`, path `/api/billing/webhooks/*` | subscription notifications; authenticated by the provider's signature, not a session. Stripe posts to `/api/billing/webhooks/web` from [its webhook IPs](https://docs.stripe.com/ips) |
 | API pods | `notes-db-rw` | Postgres, including `LISTEN/NOTIFY` for SSE across replicas |
 | storage pods | the region's S3 | blob bytes |
 | all pods | OTLP endpoint | metrics |

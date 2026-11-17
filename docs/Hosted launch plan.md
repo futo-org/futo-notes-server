@@ -13,7 +13,8 @@ Status:
 | S2 | B1, B2, D | Done, in the MR stacked on !34 (`feat/hosted-vault-unlock-test-stack`) |
 | S3 | A6 | Done, in the MR stacked on S2 (`feat/hosted-batch-and-mail`). Storage batch upload is `POST /blobs/batch-upload`, next to batch fetch at `POST /blobs/batch` |
 | S4 | E | Done, in the same MR: the sender, templates, stamps and dev stack. Billing (S5) calls it. |
-| S5 | C | Done, in the MR stacked on S3/S4 (`feat/hosted-billing`): the model, gating, endpoints, webhooks, the mock web provider, the lapse and purge jobs, the emails, the dashboard, `/dev`, and the App Store and Play providers. The real web adapter waits for the provider choice. |
+| S5 | C | Done, in the MR stacked on S3/S4 (`feat/hosted-billing`): the model, gating, endpoints, webhooks, the mock web provider, the lapse and purge jobs, the emails, the dashboard, `/dev`, and the App Store and Play providers. |
+| S7 | C2 (web) | Done, stacked on S5: the Stripe web provider, embedded checkout, matching by OIDC `sub` |
 
 ## Decisions (2026-11-17)
 
@@ -22,7 +23,9 @@ Status:
 | Vault unlock under SSO | A **vault passphrase**, separate from the Zitadel login, **plus a recovery key and QR device pairing**. The apps already implement all three. The server adds what the recovery key and pairing need (B1, B2). |
 | Redirect scheme | Release apps sign in through `tech.futo.notes`, dev builds through `tech.futo.notes.dev`. Desktop uses a loopback redirect (always allowed). |
 | Hostnames | Prod `https://notes.futo.cloud`, staging `https://notes-staging.apps.futo.network`. |
-| Payment providers | **Pluggable.** The web provider (FUTOpay, Polar or Stripe) is not chosen yet. App Store and Play are providers behind the same interface. |
+| Payment providers | **Pluggable.** The web provider is **Stripe**. App Store and Play are providers behind the same interface. |
+| Web customer matching | Each FUTO account is a Stripe Customer carrying `metadata.sub`, its OIDC `sub`; checkouts and subscriptions carry the same `sub`. **Never matched by email.** |
+| Web checkout | **Embedded** in our pages (Stripe embedded Checkout), never a redirect to a Stripe-hosted page. |
 | Store rails | Web, App Store and Play subscriptions **all ship at launch**. |
 | Price | One flat plan: **$5/month** on the web, **$5.75/month** in the App Store and Play. |
 | Lapse | The account turns **read-only** (writes get 402) and is **purged 90 days** after it lapses. |
@@ -243,14 +246,31 @@ type StoreProvider interface {
 }
 ```
 
-- **Web.** One web provider is configured: FUTOpay, Polar or Stripe, each an
-  adapter.
+- **Web.** One web provider is configured: Stripe (decided 2026-11-17).
 - **Stores.** App Store: StoreKit 2 signed transactions, the App Store Server API,
   and Server Notifications v2. Play: the Play Developer API `subscriptionsv2`,
   with acknowledgement within 3 days, and real-time developer notifications over
   Pub/Sub.
 - **Dev mocks.** Every adapter has a mock in the style of `cmd/mock-oidc`, and a
   `/dev` panel grants, lapses, refunds and expires subscriptions.
+
+- **As built (S7).** `internal/hosted/billing/stripe`, raw REST against
+  `api.stripe.com` pinned to API version `2026-10-28.endive`.
+  - **Contract change: web events carry the OIDC `sub`.** `Event.UserID` is
+    now `Event.Subject`; the store resolves it through `users.sub`, and an
+    unknown `sub` is acknowledged and logged. `Customer` gained `Subject`.
+    The mock web provider uses the same scheme.
+  - **Embedded checkout.** An optional `billing.EmbeddedCheckout` interface
+    (`PublishableKey`, `StartCheckout`, `CompleteCheckout`) sits beside
+    `WebProvider.CheckoutURL`, which redirecting providers (the mock) keep;
+    Stripe's `CheckoutURL` answers `ErrNotSupported`. The dashboard mounts
+    the checkout in place; `POST /api/billing/checkout` gives the apps a
+    one-time link to `/billing/checkout/<token>`, our own page.
+  - **Entitlement at completion.** The page confirms the Checkout Session
+    with the server, which checks its `sub` against the caller and applies
+    its subscription at once. Webhooks carry every later change.
+  - Status mapping, config and Stripe setup: `docs/Hosted deployment.md`,
+    "Billing: web provider".
 
 ### C3. Endpoints
 
@@ -272,8 +292,8 @@ account that never subscribed. A rail is `true` when its provider is
 configured; prices come from the stores' own SDKs and the web checkout, not
 from this response. Webhooks answer `200 {"duplicate": bool}`, `400
 invalid_delivery`, `404` for an unconfigured source, and `413` over 1 MiB.
-The web provider is `BILLING_WEB_PROVIDER` (empty or `mock`; the mock needs
-`DEV_UI`). The store providers register in `cmd/api/billing.go`.
+The web provider is `BILLING_WEB_PROVIDER` (empty, `mock` or `stripe`; the
+mock needs `DEV_UI`). The store providers register in `cmd/api/billing.go`.
 
 ### C4. Gating
 
@@ -348,7 +368,9 @@ As built (S5a):
 
 ### C7. Config
 
-- **Web provider:** its kind, plus its URL, key and webhook secret.
+- **Web provider:** its kind, plus its URL, key and webhook secret. As built:
+  `BILLING_WEB_PROVIDER=stripe`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`,
+  `STRIPE_PRICE_ID`, `STRIPE_PUBLISHABLE_KEY`.
 - **Apple:** bundle id, issuer, key id, `.p8` key, product ids, and whether to
   accept sandbox (App Review uses sandbox).
 - **Play:** package name, service account, product ids, and the RTDN audience and
@@ -410,6 +432,5 @@ throughout.
 
 ## Open questions
 
-1. The web provider: FUTOpay, Polar or Stripe. To be decided later; the design does
-   not depend on it.
+1. ~~The web provider.~~ Decided 2026-11-17: Stripe (S7).
 2. The `From` domain for email.

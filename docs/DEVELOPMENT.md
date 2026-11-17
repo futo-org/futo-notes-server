@@ -221,6 +221,54 @@ for them):
 | `POST /dev/jobs/account-purge` | account purge |
 | `POST /dev/jobs/reconciliation[?region=&user=&now=]` | orphan reconciliation, optionally in one region, under one user's prefix, and as of a later RFC 3339 `now` (S3 cannot backdate an upload) |
 
+### Stripe sandbox
+
+`api:dev` uses the mock web provider by default. To run against the Stripe
+sandbox instead, with its embedded checkout and real webhooks, keep the keys
+in files outside the repo and read them at start (never commit or paste
+them):
+
+```bash
+export BILLING_WEB_PROVIDER=stripe
+export STRIPE_SECRET_KEY="$(cat ~/.config/futo-notes/stripe-sandbox.key)"
+export STRIPE_PUBLISHABLE_KEY="$(cat ~/.config/futo-notes/stripe-sandbox.publishable-key)"
+export STRIPE_PRICE_ID=price_1UcsQVFxdnDGYMu2rc65ReEo   # "FUTO Notes Sync (dev)", $5/month
+export STRIPE_WEBHOOK_SECRET="$(stripe listen --print-secret)"
+mise run api:dev
+```
+
+In a second terminal, forward the sandbox's subscription events to it:
+
+```bash
+stripe listen --forward-to http://127.0.0.1:3005/api/billing/webhooks/web \
+  --events customer.subscription.created,customer.subscription.updated,customer.subscription.deleted
+```
+
+`stripe listen --print-secret` prints the same signing secret the listener
+signs with, for as long as the CLI stays logged in to that account. The
+Stripe CLI must be logged in to the sandbox (`stripe login`).
+
+Then sign in on the dashboard and press Subscribe, or use "Open checkout"
+on `/dev` for the page an app's link opens. Pay with `4242 4242 4242 4242`,
+any future expiry and any CVC. The account is entitled as soon as the
+checkout completes, before any webhook; `stripe listen` then shows
+`customer.subscription.created` arriving with `[200]`. To exercise later
+changes, use Manage subscription (the Customer Portal) to cancel at period
+end, or the sandbox dashboard to cancel at once; each arrives as
+`customer.subscription.updated` or `.deleted`.
+
+The provider's tests use an in-process fake of Stripe. One test,
+`TestSandbox`, talks to the sandbox when given a test key file:
+
+```bash
+STRIPE_TEST_SECRET_KEY_FILE=~/.config/futo-notes/stripe-sandbox.key \
+STRIPE_TEST_PUBLISHABLE_KEY_FILE=~/.config/futo-notes/stripe-sandbox.publishable-key \
+  go test -run TestSandbox -v ./internal/hosted/billing/stripe/
+```
+
+It creates customers and a subscription under a fresh test `sub` and deletes
+them when done.
+
 ### End-to-end scenario
 
 `e2e/hosted` builds `cmd/mock-oidc`, `cmd/storage` and `cmd/api`, runs them as
