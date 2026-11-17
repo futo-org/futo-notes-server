@@ -28,6 +28,7 @@ const (
 // size_bytes, which is validated but not used.
 type stagedBlobs struct{}
 
+// ReadCreate decodes {"blob_key", "size_bytes"}.
 func (stagedBlobs) ReadCreate(r *http.Request) (objects.Blob, error) {
 	var body struct {
 		BlobKey   *string `json:"blob_key"`
@@ -45,6 +46,7 @@ func (stagedBlobs) ReadCreate(r *http.Request) (objects.Blob, error) {
 	return objects.StagedBlob(*body.BlobKey), nil
 }
 
+// ReadUpdate decodes {"version", "blob_key", "size_bytes"}.
 func (stagedBlobs) ReadUpdate(r *http.Request) (int64, objects.Blob, error) {
 	var body struct {
 		Version   *int64  `json:"version"`

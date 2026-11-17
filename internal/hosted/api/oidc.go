@@ -25,7 +25,8 @@ import (
 )
 
 const (
-	callbackPath = "/api/auth/oidc/callback"
+	callbackRoute = "/auth/oidc/callback"
+	callbackPath  = "/api" + callbackRoute
 	// stateCookie binds a login to the browser that started it, so a
 	// callback URL lured into another browser cannot complete it there.
 	stateCookie = "oidc_state"

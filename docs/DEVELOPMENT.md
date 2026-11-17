@@ -127,8 +127,8 @@ Or run all three in containers (same host ports, so not both at once):
 docker compose -f compose.hosted.yml --profile services up -d --build
 ```
 
-Requests need tokens minted with `dev/hosted-keys/api.key.pem` (until the API
-exists, mint them in Go with `hostedauth.NewMinter`). The storage integration
+Requests need tokens minted with `dev/hosted-keys/api.key.pem`: get one from
+`mise run api:dev` (below) or mint it in Go with `hostedauth.NewMinter`. The storage integration
 tests run against MinIO when `S3_TEST_ENDPOINT` is set, which
 `mise run test:integration` does; they use bucket `notes-us-east` and a fresh
 user prefix per test.

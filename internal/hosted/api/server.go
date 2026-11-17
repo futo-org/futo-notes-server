@@ -112,7 +112,7 @@ func (s *Server) Handler() http.Handler {
 	r.Route("/api", func(api chi.Router) {
 		api.Get("/regions", s.handleRegions)
 		api.Get("/auth/oidc/start", s.handleOIDCStart)
-		api.Get(callbackPath[len("/api"):], s.handleOIDCCallback)
+		api.Get(callbackRoute, s.handleOIDCCallback)
 		api.Post("/auth/oidc/token", s.handleOIDCToken)
 		api.Post("/storage/token", s.handleStorageToken)
 
