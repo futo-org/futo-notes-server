@@ -274,14 +274,14 @@ func view(r *http.Request, nav string) dashboardView {
 	return dashboardView{SignedIn: true, User: p.Session.User, CSRF: token, HXHeaders: string(headers), Nav: nav}
 }
 
-// renderDashboard answers with page: the whole document, or for htmx just
-// the part inside #page.
-func renderDashboard(w http.ResponseWriter, r *http.Request, status int, page string, v dashboardView) {
+// renderDashboard answers 200 with page: the whole document, or for htmx
+// just the part inside #page.
+func renderDashboard(w http.ResponseWriter, r *http.Request, page string, v dashboardView) {
 	name := "layout"
 	if isHTMX(r) {
 		name = "fragment"
 	}
-	writeTemplate(w, r, status, page, name, v)
+	writeTemplate(w, r, http.StatusOK, page, name, v)
 }
 
 func writeTemplate(w http.ResponseWriter, r *http.Request, status int, page, name string, v any) {
@@ -332,7 +332,7 @@ func afterAction(w http.ResponseWriter, r *http.Request, path string, render fun
 
 // handleDashboardSignIn serves the signed-out page.
 func handleDashboardSignIn(w http.ResponseWriter, r *http.Request) {
-	renderDashboard(w, r, http.StatusOK, "sign-in", dashboardView{})
+	renderDashboard(w, r, "sign-in", dashboardView{})
 }
 
 // handleDashboardOverview serves the account overview, sending a user who
@@ -356,7 +356,7 @@ func (s *Server) renderOverview(w http.ResponseWriter, r *http.Request, a accoun
 	if region, ok := s.regions[a.RegionID]; ok {
 		v.Region = &region
 	}
-	renderDashboard(w, r, http.StatusOK, "overview", v)
+	renderDashboard(w, r, "overview", v)
 }
 
 // showOverview renders the caller's current overview after an action.
@@ -380,7 +380,7 @@ func (s *Server) handleDashboardRegion(w http.ResponseWriter, r *http.Request) {
 	}
 	v := view(r, "")
 	v.Regions = s.cfg.Regions
-	renderDashboard(w, r, http.StatusOK, "region", v)
+	renderDashboard(w, r, "region", v)
 }
 
 // handleDashboardChooseRegion is the dashboard's PUT /api/account/region.
@@ -422,7 +422,7 @@ func (s *Server) handleDashboardDevices(w http.ResponseWriter, r *http.Request) 
 		dashboardServerError(w, r, "listing sessions", err)
 		return
 	}
-	renderDashboard(w, r, http.StatusOK, "devices", v)
+	renderDashboard(w, r, "devices", v)
 }
 
 // handleDashboardRevoke is the dashboard's DELETE /api/sessions/{id}. It
@@ -468,7 +468,7 @@ func (s *Server) handleDashboardDeletePage(w http.ResponseWriter, r *http.Reques
 	v.Account = a
 	v.GraceDays = int(account.DeletionGrace / (24 * time.Hour))
 	v.ConfirmPhrase = confirmPhrase
-	renderDashboard(w, r, http.StatusOK, "delete", v)
+	renderDashboard(w, r, "delete", v)
 }
 
 // handleDashboardDelete is the dashboard's DELETE /api/account, once the
