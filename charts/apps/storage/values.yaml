@@ -46,7 +46,7 @@ resources:
   limits: { memory: 1Gi }
 
 image:
-  repository: registry.gitlab.futo.org/futo-notes/futo-notes-server/storage
+  repository: oci.futo.org/futo-notes/notes-storage
   # Empty defaults to the chart appVersion, which CI sets to the image tag it ships with.
   tag: ""
   pullPolicy: IfNotPresent
