@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -78,9 +79,7 @@ func Load() (Config, error) {
 	}
 
 	var err error
-	if cfg.LogLevel, err = zerolog.ParseLevel(getDefault("LOG_LEVEL", "info")); err != nil {
-		return Config{}, fmt.Errorf("LOG_LEVEL must be trace, debug, info, warn, error, fatal, panic or disabled, got %q", os.Getenv("LOG_LEVEL"))
-	}
+	cfg.LogLevel, _ = logLevel(os.Getenv("LOG_LEVEL"))
 	switch format := getDefault("LOG_FORMAT", "json"); format {
 	case "json":
 	case "pretty":
@@ -139,13 +138,36 @@ func DroppedEnvWarnings() []string {
 		{"TRUST_PROXY", "forwarded client addresses are not trusted; rate limiting uses the direct peer"},
 	}
 
-	warnings := make([]string, 0, len(replacements))
+	warnings := make([]string, 0, len(replacements)+1)
 	for _, replacement := range replacements {
 		if _, set := os.LookupEnv(replacement.name); set {
 			warnings = append(warnings, fmt.Sprintf("%s is ignored: %s", replacement.name, replacement.message))
 		}
 	}
+	if value := os.Getenv("LOG_LEVEL"); value != "" {
+		if _, ok := logLevel(value); !ok {
+			warnings = append(warnings, fmt.Sprintf("LOG_LEVEL is ignored: %q is not one of trace, debug, info, warn, error, fatal, panic, disabled or silent; logging at info", value))
+		}
+	}
 	return warnings
+}
+
+// logLevel maps LOG_LEVEL to a zerolog level, reporting whether value was
+// recognized. An unset or unrecognized value logs at info rather than failing
+// startup: the TypeScript server's pino levels (including "silent") were once
+// valid here, and an upgrade must not stop a self-hosted server from starting.
+func logLevel(value string) (zerolog.Level, bool) {
+	switch strings.ToLower(value) {
+	case "":
+		return zerolog.InfoLevel, true
+	case "silent":
+		return zerolog.Disabled, true
+	}
+	level, err := zerolog.ParseLevel(value)
+	if err != nil || level == zerolog.NoLevel {
+		return zerolog.InfoLevel, false
+	}
+	return level, true
 }
 
 func getDefault(key, fallback string) string {

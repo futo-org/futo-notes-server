@@ -64,7 +64,8 @@ func TestLogSettings(t *testing.T) {
 		{wantLevel: zerolog.InfoLevel},
 		{level: "debug", format: "json", wantLevel: zerolog.DebugLevel},
 		{level: "WARN", format: "pretty", wantLevel: zerolog.WarnLevel, wantPretty: true},
-		{level: "verbose", wantError: `LOG_LEVEL must be trace, debug, info, warn, error, fatal, panic or disabled, got "verbose"`},
+		{level: "verbose", wantLevel: zerolog.InfoLevel},
+		{level: "silent", wantLevel: zerolog.Disabled},
 		{format: "text", wantError: `LOG_FORMAT must be json or pretty, got "text"`},
 	} {
 		t.Setenv("LOG_LEVEL", tt.level)
@@ -151,5 +152,20 @@ func TestDroppedEnvWarnings(t *testing.T) {
 		return strings.Contains(warning, "BLOB_GC_ENABLED") || strings.Contains(warning, "LOG_LEVEL")
 	}) {
 		t.Fatalf("warnings %q include an honored setting", warnings)
+	}
+}
+
+func TestUnrecognizedLogLevelWarnsInsteadOfFailing(t *testing.T) {
+	t.Setenv("LOG_LEVEL", "verbose")
+	if !slices.ContainsFunc(DroppedEnvWarnings(), func(warning string) bool {
+		return strings.Contains(warning, `LOG_LEVEL is ignored: "verbose"`)
+	}) {
+		t.Fatalf("warnings %q do not report the unrecognized LOG_LEVEL", DroppedEnvWarnings())
+	}
+	t.Setenv("LOG_LEVEL", "silent")
+	if slices.ContainsFunc(DroppedEnvWarnings(), func(warning string) bool {
+		return strings.Contains(warning, "LOG_LEVEL")
+	}) {
+		t.Fatalf("warnings %q report the recognized LOG_LEVEL silent", DroppedEnvWarnings())
 	}
 }
