@@ -177,7 +177,7 @@ func (s *Server) streamBatch(r *http.Request, w io.Writer, userID string, keys [
 	enc := blobframe.NewEncoder(w, blobframe.MaxBatchBytes)
 	var sent int64
 	for _, key := range keys {
-		if !ownBlobKey(userID, key) {
+		if !ids.IsOwnBlobKey(userID, key) {
 			if err := enc.Missing(key); err != nil {
 				return sent, err
 			}
@@ -203,11 +203,6 @@ func (s *Server) streamBatch(r *http.Request, w io.Writer, userID string, keys [
 		}
 	}
 	return sent, nil
-}
-
-// ownBlobKey reports whether key is a blob key in userID's namespace.
-func ownBlobKey(userID, key string) bool {
-	return len(key) == len(userID)+37 && key[:len(userID)] == userID && key[len(userID)] == '/' && ids.IsUUID(key[len(userID)+1:])
 }
 
 func readLimitedBody(w http.ResponseWriter, r *http.Request, limit int64, tooLarge string) ([]byte, bool) {

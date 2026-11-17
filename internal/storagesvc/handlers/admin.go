@@ -55,7 +55,7 @@ func (s *Server) deleteBlobs(w http.ResponseWriter, r *http.Request) {
 	}
 	keys := make([]string, 0, len(request.Keys))
 	for _, key := range request.Keys {
-		if key == nil || !blobKey(*key) {
+		if key == nil || !ids.IsBlobKey(*key) {
 			httputil.WriteError(w, r, http.StatusBadRequest, "keys must be <userId>/<blobId>")
 			return
 		}
@@ -149,7 +149,7 @@ type DeleteUserResponse struct {
 
 func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
 	userID := chi.URLParam(r, "userId")
-	if !isUserID(userID) {
+	if !ids.IsUserID(userID) {
 		httputil.WriteError(w, r, http.StatusBadRequest, "invalid user id")
 		return
 	}
@@ -176,19 +176,7 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
 	httputil.WriteJSON(w, r, http.StatusOK, DeleteUserResponse{Deleted: len(keys), Done: !page.Truncated})
 }
 
-// isUserID accepts the canonical lowercase form only: keys are minted
-// from the token's sub, which is lowercase, and S3 keys are case-sensitive,
-// so an uppercase id would match nothing and look like an empty prefix.
-func isUserID(s string) bool {
-	return ids.IsUUID(s) && s == strings.ToLower(s)
-}
-
 func userPrefix(prefix string) bool {
 	id, ok := strings.CutSuffix(prefix, "/")
-	return ok && isUserID(id)
-}
-
-func blobKey(key string) bool {
-	userID, blobID, ok := strings.Cut(key, "/")
-	return ok && isUserID(userID) && ids.IsUUID(blobID)
+	return ok && ids.IsUserID(id)
 }

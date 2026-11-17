@@ -11,7 +11,7 @@ import (
 	"futo-notes-server/internal/blobframe"
 	"futo-notes-server/internal/blobs"
 	"futo-notes-server/internal/db"
-	"futo-notes-server/internal/objects"
+	"futo-notes-server/internal/ids"
 	"futo-notes-server/internal/syncapi"
 )
 
@@ -40,7 +40,7 @@ func handleUploadBlob(database *db.DB, store *blobs.Store) http.HandlerFunc {
 func blobKeyFrom(r *http.Request) (string, bool) {
 	userID := syncapi.SessionFrom(r).User.ID
 	key := r.PathValue("userId") + "/" + r.PathValue("blobId")
-	return key, objects.ValidBlobKey(userID, key)
+	return key, ids.IsOwnBlobKey(userID, key)
 }
 
 func handleDownloadBlob(store *blobs.Store) http.HandlerFunc {
@@ -128,7 +128,7 @@ func streamBlobBatch(w io.Writer, store *blobs.Store, userID string, keys []stri
 }
 
 func writeBlobFrame(enc *blobframe.Encoder, store *blobs.Store, userID, key string) error {
-	if !objects.ValidBlobKey(userID, key) {
+	if !ids.IsOwnBlobKey(userID, key) {
 		return enc.Missing(key)
 	}
 	file, err := store.Open(key)

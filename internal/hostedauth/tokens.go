@@ -39,6 +39,8 @@ import (
 	"uuid"
 
 	"github.com/golang-jwt/jwt/v5"
+
+	"futo-notes-server/internal/ids"
 )
 
 const (
@@ -128,7 +130,7 @@ func (m *Minter) MintAccess(region, userID string) (string, time.Time, error) {
 	if err := checkRegion(region); err != nil {
 		return "", time.Time{}, err
 	}
-	if !isUUID(userID) {
+	if !ids.IsUserID(userID) {
 		return "", time.Time{}, fmt.Errorf("user id %q is not a UUID", userID)
 	}
 	return m.mint(region, userID, ScopeBlobs, AccessTokenTTL)
@@ -187,7 +189,7 @@ func (v *Verifier) VerifyAccess(token string) (AccessToken, error) {
 	if err != nil {
 		return AccessToken{}, err
 	}
-	if !isUUID(c.Subject) {
+	if !ids.IsUserID(c.Subject) {
 		return AccessToken{}, invalid(errors.New("sub is not a UUID"))
 	}
 	return AccessToken{UserID: c.Subject, ExpiresAt: c.ExpiresAt.UTC()}, nil
@@ -234,7 +236,7 @@ func NewReceiptSigner(key SigningKey, region string, opts ...Option) (*ReceiptSi
 // Sign returns a 24h receipt saying userID stored size bytes at key. The key
 // must be "<userID>/<uuidv7>".
 func (s *ReceiptSigner) Sign(userID, key string, size int64) (string, error) {
-	if !isUUID(userID) {
+	if !ids.IsUserID(userID) {
 		return "", fmt.Errorf("user id %q is not a UUID", userID)
 	}
 	if err := checkBlobKey(userID, key); err != nil {
@@ -292,7 +294,7 @@ func (v *ReceiptVerifier) Verify(token, region string) (Receipt, error) {
 	if err := parse(token, &c, keys, region, APIIssuer, v.now); err != nil {
 		return Receipt{}, err
 	}
-	if !isUUID(c.Subject) {
+	if !ids.IsUserID(c.Subject) {
 		return Receipt{}, invalid(errors.New("sub is not a UUID"))
 	}
 	if err := checkBlobKey(c.Subject, c.Key); err != nil {
@@ -374,9 +376,4 @@ func checkBlobKey(userID, key string) error {
 		return fmt.Errorf("key %q does not end in a UUIDv7", key)
 	}
 	return nil
-}
-
-func isUUID(s string) bool {
-	id, err := uuid.Parse(s)
-	return err == nil && id.String() == s
 }

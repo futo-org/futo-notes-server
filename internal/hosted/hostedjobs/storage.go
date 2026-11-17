@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -144,7 +143,7 @@ func ReconcileOrphans(ctx context.Context, database *db.DB, storage *storageclie
 		result.Listed += len(blobs)
 		keys := make([]string, 0, len(blobs))
 		for _, b := range blobs {
-			if !isBlobKey(b.Key) {
+			if !ids.IsBlobKey(b.Key) {
 				result.Skipped++
 				log.Warn().Str("region", region).Str("key", b.Key).Msg("orphan reconciliation: skipping a key that is not a blob key")
 				continue
@@ -199,13 +198,6 @@ func ledgerKeys(ctx context.Context, database *db.DB, keys []string) (map[string
 		known[key] = true
 	}
 	return known, rows.Err()
-}
-
-// isBlobKey accepts the keys storage mints and its delete endpoint takes:
-// a lowercase user UUID, a slash, and a blob UUID.
-func isBlobKey(key string) bool {
-	owner, blob, ok := strings.Cut(key, "/")
-	return ok && ids.IsUUID(owner) && owner == strings.ToLower(owner) && ids.IsUUID(blob)
 }
 
 // PurgeResult reports what PurgeAccounts did.

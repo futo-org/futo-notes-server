@@ -121,12 +121,6 @@ func New(database *db.DB, publisher events.Publisher) *Store {
 // ValidMutationID reports whether id is a well-formed client Mutation ID.
 func ValidMutationID(id string) bool { return mutationIDPattern.MatchString(id) }
 
-// ValidBlobKey reports whether key is a blob key scoped to userID: the user's
-// UUID, a slash, and a blob UUID.
-func ValidBlobKey(userID, key string) bool {
-	return len(userID) == 36 && len(key) == 73 && key[:36] == userID && key[36] == '/' && ids.IsUUID(key[37:])
-}
-
 func scanObject(row db.Scanner) (Object, error) {
 	var o Object
 	var createdAt, updatedAt db.Time

@@ -35,7 +35,7 @@ func (stagedBlobs) ReadCreate(r *http.Request) (syncapi.BlobClaim, error) {
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		return syncapi.BlobClaim{}, errors.New("invalid json")
 	}
-	if body.BlobKey == nil || !objects.ValidBlobKey(syncapi.SessionFrom(r).User.ID, *body.BlobKey) {
+	if body.BlobKey == nil || !ids.IsOwnBlobKey(syncapi.SessionFrom(r).User.ID, *body.BlobKey) {
 		return syncapi.BlobClaim{}, errors.New("invalid blob_key")
 	}
 	if body.SizeBytes == nil || *body.SizeBytes < 0 {
@@ -57,7 +57,7 @@ func (stagedBlobs) ReadUpdate(r *http.Request) (int64, syncapi.BlobClaim, error)
 	if body.Version == nil || *body.Version < 1 {
 		return 0, syncapi.BlobClaim{}, errors.New("invalid version")
 	}
-	if body.BlobKey == nil || !objects.ValidBlobKey(syncapi.SessionFrom(r).User.ID, *body.BlobKey) {
+	if body.BlobKey == nil || !ids.IsOwnBlobKey(syncapi.SessionFrom(r).User.ID, *body.BlobKey) {
 		return 0, syncapi.BlobClaim{}, errors.New("invalid blob_key")
 	}
 	if body.SizeBytes == nil || *body.SizeBytes < 0 {

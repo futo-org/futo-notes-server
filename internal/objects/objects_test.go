@@ -20,20 +20,6 @@ func TestValidMutationID(t *testing.T) {
 	}
 }
 
-func TestValidBlobKey(t *testing.T) {
-	userID := "018f4b28-11aa-7d3e-9f0a-3c4d5e6f7a8b"
-	blobID := "018f4b2b-22bb-7e4f-8a1b-4d5e6f7a8b9c"
-	if !ValidBlobKey(userID, userID+"/"+blobID) {
-		t.Fatal("expected scoped UUID blob key to be valid")
-	}
-	if ValidBlobKey("short", strings.Repeat("x", 73)) {
-		t.Fatal("short user ID must not validate or panic")
-	}
-	if ValidBlobKey(userID, blobID+"/"+blobID) {
-		t.Fatal("key scoped to another user must be invalid")
-	}
-}
-
 func TestMutationResponseReplayEncoding(t *testing.T) {
 	fresh, err := json.Marshal(MutationResponse{Replayed: new(false)})
 	if err != nil {
