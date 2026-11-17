@@ -105,6 +105,22 @@ func TestVerifyMapsNotifications(t *testing.T) {
 	}
 }
 
+func TestVerifyWithoutAccountToken(t *testing.T) {
+	now := time.Now().Truncate(time.Millisecond)
+	f := newFixture(t, false)
+	payload := notificationPayload("SUBSCRIBED", "INITIAL_BUY", now, map[string]any{
+		"signedTransactionInfo": f.signer.sign(t, with(tx("Production", now), "appAccountToken", nil)),
+		"signedRenewalInfo":     f.signer.sign(t, renewalInfo(1, now)),
+	})
+	id, events, err := f.provider.Verify(context.Background(), delivery(f.signer.sign(t, payload)))
+	if err != nil || id != notificationID || len(events) != 1 {
+		t.Fatalf("id = %q, events = %+v, err = %v", id, events, err)
+	}
+	if ev := events[0]; ev.AccountToken != "" || ev.ExternalID != origID || ev.Status != billing.StatusActive {
+		t.Fatalf("event = %+v", ev)
+	}
+}
+
 func TestVerifyIgnores(t *testing.T) {
 	now := time.Now()
 	f := newFixture(t, false)

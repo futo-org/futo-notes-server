@@ -203,14 +203,14 @@ func statusCode(code int) (billing.Status, bool) {
 
 // Submit verifies a StoreKit 2 transaction (its jwsRepresentation in
 // p.Token) and confirms its subscription's current state with Apple. The
-// signed productId is authoritative; p.ProductID is not read.
+// signed productId is authoritative; p.ProductID is not read. The event's
+// AccountToken is the submitted transaction's appAccountToken, empty when it
+// has none: offer-code redemptions can carry none, and refusing them would
+// leave the transaction unfinished on the device forever.
 func (p *Provider) Submit(ctx context.Context, purchase billing.Purchase) (billing.Event, error) {
 	s, err := p.decode(purchase.Token, "")
 	if err != nil {
 		return billing.Event{}, fmt.Errorf("%w: %w", billing.ErrInvalidPurchase, err)
-	}
-	if s.tx.AppAccountToken == "" {
-		return billing.Event{}, fmt.Errorf("%w: transaction has no appAccountToken", billing.ErrInvalidPurchase)
 	}
 	base := p.cfg.ProductionURL
 	if s.tx.Environment == appleSandbox {

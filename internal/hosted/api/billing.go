@@ -255,7 +255,7 @@ func (s *Server) submitPurchase(w http.ResponseWriter, r *http.Request, source b
 	_, err = s.billing.Submit(r.Context(), principalFrom(r).Session.User.ID, ev)
 	if errors.Is(err, billing.ErrOwnedElsewhere) {
 		httputil.WriteError(w, r, http.StatusConflict, codeStoreSubscriptionElsewhere,
-			"This store subscription belongs to another FUTO account")
+			"This store subscription belongs to another FUTO account. Sign in with that account to use it.")
 		return
 	}
 	if err != nil {

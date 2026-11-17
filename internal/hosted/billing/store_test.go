@@ -200,6 +200,61 @@ func TestStoreBinding(t *testing.T) {
 	}
 }
 
+// A store event without an account token, such as an App Store offer-code
+// redemption, binds by its row, or else to the account submitting it.
+func TestStoreBindingWithoutAccountToken(t *testing.T) {
+	database := hostedtest.Postgres(t)
+	store := billing.NewStore(database)
+	now := time.Now()
+	owner, _ := newUser(t, database)
+	other, _ := newUser(t, database)
+	redeemed := storeEvent("", "orig_"+uuid.NewV7().String(), billing.StatusActive, now.Add(time.Hour), now)
+
+	// With no row, it binds to the submitter.
+	if applied, err := store.Submit(t.Context(), owner, redeemed); err != nil || applied.UserID != owner {
+		t.Fatalf("tokenless submit with no row = %+v, %v; want it bound to the submitter", applied, err)
+	}
+	if !state(t, store, owner).Entitled {
+		t.Fatal("a tokenless submit did not entitle the submitter")
+	}
+	// Its owner submits it again.
+	again := redeemed
+	again.EventAt = now.Add(time.Minute)
+	if applied, err := store.Submit(t.Context(), owner, again); err != nil || applied.UserID != owner {
+		t.Fatalf("tokenless submit by the row's owner = %+v, %v", applied, err)
+	}
+	// Another account cannot take it.
+	taken := redeemed
+	taken.EventAt = now.Add(2 * time.Minute)
+	taken.Status = billing.StatusExpired
+	if _, err := store.Submit(t.Context(), other, taken); !errors.Is(err, billing.ErrOwnedElsewhere) {
+		t.Fatalf("tokenless submit from another account = %v, want ErrOwnedElsewhere", err)
+	}
+	if !state(t, store, owner).Entitled || state(t, store, other).Entitled {
+		t.Fatal("a refused tokenless submit moved or changed the subscription")
+	}
+
+	// A tokenless notification follows the row; with no row it names no
+	// account, and a delivery acknowledges it as unknown.
+	notified := redeemed
+	notified.EventAt = now.Add(3 * time.Minute)
+	notified.Status = billing.StatusRevoked
+	if applied, err := store.Apply(t.Context(), notified); err != nil || applied.UserID != owner {
+		t.Fatalf("tokenless notification = %+v, %v; want it applied to the owner", applied, err)
+	}
+	if state(t, store, owner).Entitled {
+		t.Fatal("the tokenless revocation was not applied")
+	}
+	orphan := storeEvent("", "orig_"+uuid.NewV7().String(), billing.StatusActive, now.Add(time.Hour), now)
+	if _, err := store.Apply(t.Context(), orphan); !errors.Is(err, billing.ErrUnknownUser) {
+		t.Fatalf("tokenless notification with no row = %v, want ErrUnknownUser", err)
+	}
+	duplicate, unknown, err := store.ApplyDelivery(t.Context(), billing.SourceAppStore, "dlv_"+uuid.NewV7().String(), []billing.Event{orphan})
+	if err != nil || duplicate || len(unknown) != 1 || unknown[0].ExternalID != orphan.ExternalID {
+		t.Fatalf("tokenless delivery with no row = %t, %v, %v; want it acknowledged as unknown", duplicate, unknown, err)
+	}
+}
+
 func TestWebEventNeedsItsUser(t *testing.T) {
 	database := hostedtest.Postgres(t)
 	store := billing.NewStore(database)

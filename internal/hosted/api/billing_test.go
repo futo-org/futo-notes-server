@@ -395,6 +395,34 @@ func TestStorePurchases(t *testing.T) {
 	}
 }
 
+// An App Store purchase without an appAccountToken, such as an offer-code
+// redemption, binds to the first account to submit it and then stays there.
+func TestTokenlessStorePurchase(t *testing.T) {
+	h := newBillingHarness(t)
+	owner, _ := h.appLogin(h.newSub())
+	token, _ := h.appStore.sell("")
+	var b billingBody
+	owner.expect(http.MethodPost, "/api/billing/app-store/transactions", map[string]string{"signed_transaction": token}, http.StatusOK).json(t, &b)
+	if !b.Entitled || str(b.Source) != "app_store" {
+		t.Fatalf("after a tokenless App Store purchase = %+v", b)
+	}
+	owner.expect(http.MethodPost, "/api/billing/app-store/transactions", map[string]string{"signed_transaction": token}, http.StatusOK)
+
+	other, _ := h.appLogin(h.newSub())
+	res := other.do(http.MethodPost, "/api/billing/app-store/transactions", map[string]string{"signed_transaction": token})
+	expectHostedError(t, res, http.StatusConflict, "store_subscription_owned_elsewhere")
+	// The apps show this message, and outside the US store rules forbid it to
+	// point at the web.
+	var body errorBody
+	res.json(t, &body)
+	if want := "This store subscription belongs to another FUTO account. Sign in with that account to use it."; body.Message != want {
+		t.Fatalf("message = %q, want %q", body.Message, want)
+	}
+	if other.billing().Entitled || !owner.billing().Entitled {
+		t.Fatal("a refused tokenless submit moved the subscription")
+	}
+}
+
 func TestBillingWebhooks(t *testing.T) {
 	h := newBillingHarness(t)
 	subject := h.newSub()

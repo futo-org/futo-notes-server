@@ -16,7 +16,7 @@ import (
 var (
 	// ErrOwnedElsewhere reports a store subscription that belongs to another
 	// live account. It is never moved: the submitter must sign in to the
-	// owning account or subscribe on the web.
+	// owning account.
 	ErrOwnedElsewhere = errors.New("store subscription belongs to another account")
 	// ErrUnknownUser reports an event that names no account: a web event
 	// whose subject matches no account, or a store event whose account token matches no
@@ -72,7 +72,8 @@ func (s *Store) Apply(ctx context.Context, ev Event) (Applied, error) {
 // Submit records a store event an app submitted as userID. The subscription
 // binds to userID unless it already belongs to another account, by its row
 // or by an account token naming another live account: then it returns
-// ErrOwnedElsewhere and changes nothing.
+// ErrOwnedElsewhere and changes nothing. An event without an account token
+// binds by its row alone.
 func (s *Store) Submit(ctx context.Context, userID string, ev Event) (Applied, error) {
 	return s.inTx(ctx, func(tx *db.Tx) (Applied, error) { return apply(ctx, tx, ev, userID) })
 }
@@ -205,7 +206,7 @@ func (s *Store) Customer(ctx context.Context, userID string) (Customer, error) {
 // storeOwner returns the account a store event belongs to. A subscription
 // with a row stays with its owner. Without one, it binds to the submitter,
 // unless its account token names another live account; a webhook binds it
-// to the account its token names.
+// to the account its token names, and one without a token names no account.
 func storeOwner(ctx context.Context, tx *db.Tx, ev Event, rowOwner, submitter string) (string, error) {
 	tokenOwner := ""
 	if ids.IsUUID(ev.AccountToken) {

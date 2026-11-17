@@ -82,6 +82,24 @@ func TestSubmitSandbox(t *testing.T) {
 	}
 }
 
+// An offer-code redemption can carry no appAccountToken. It is accepted with
+// no account token, even when Apple's answer names one, so the store binds it
+// by its row or to the submitter.
+func TestSubmitWithoutAccountToken(t *testing.T) {
+	f := newFixture(t, false)
+	now := time.Now().Truncate(time.Millisecond)
+	f.production.set(origID, fakeAnswer{code: http.StatusOK, body: statusBody("Production", 1,
+		f.signer.sign(t, tx("Production", now)), f.signer.sign(t, renewalInfo(1, now)))})
+
+	ev, err := f.provider.Submit(context.Background(), billing.Purchase{Token: f.signer.sign(t, with(tx("Production", now), "appAccountToken", nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.AccountToken != "" || ev.ExternalID != origID || ev.Status != billing.StatusActive {
+		t.Fatalf("event = %+v", ev)
+	}
+}
+
 func TestSubmitRejects(t *testing.T) {
 	now := time.Now()
 	f := newFixture(t, true)
@@ -107,7 +125,6 @@ func TestSubmitRejects(t *testing.T) {
 		"unknown product":       f.signer.sign(t, with(good, "productId", "notes.lifetime")),
 		"xcode environment":     f.signer.sign(t, with(good, "environment", "Xcode")),
 		"family shared":         f.signer.sign(t, with(good, "inAppOwnershipType", "FAMILY_SHARED")),
-		"no appAccountToken":    f.signer.sign(t, with(good, "appAccountToken", nil)),
 		"unknown to apple":      f.signer.sign(t, good),
 	} {
 		_, err := f.provider.Submit(context.Background(), billing.Purchase{Token: token})
