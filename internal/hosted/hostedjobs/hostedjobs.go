@@ -55,8 +55,8 @@ func Maintenance(database *db.DB, storage *storageclient.Client, regions []strin
 // its advisory lock and at most once per its group's interval.
 func Run(ctx context.Context, database *db.DB, schedule jobs.Schedule, sessions, maintenance []jobs.Job, record RecordRun) {
 	jobs.RunJobs(ctx, schedule,
-		Locked(database, sessions, schedule.SessionInterval, record),
-		Locked(database, maintenance, schedule.MaintenanceInterval, record))
+		locked(database, sessions, schedule.SessionInterval, record),
+		locked(database, maintenance, schedule.MaintenanceInterval, record))
 }
 
 // dueAfter is how long after a job last started it may start again. Each
@@ -65,16 +65,16 @@ func Run(ctx context.Context, database *db.DB, schedule jobs.Schedule, sessions,
 // own next, on-time run and leave it to whichever replica ticks later.
 func dueAfter(interval time.Duration) time.Duration { return interval * 9 / 10 }
 
-// Locked wraps each job so that a run first takes the job's
+// locked wraps each job so that a run first takes the job's
 // pg_try_advisory_xact_lock, and is skipped when another replica holds it or
 // when the job started less than about interval ago on any replica. The lock
 // is held by a transaction left open for the run, so it is released when the
 // run ends or its connection dies; the start is recorded in the same
 // transaction, so a run whose replica dies is not counted.
-func Locked(database *db.DB, list []jobs.Job, interval time.Duration, record RecordRun) []jobs.Job {
-	locked := make([]jobs.Job, 0, len(list))
+func locked(database *db.DB, list []jobs.Job, interval time.Duration, record RecordRun) []jobs.Job {
+	wrapped := make([]jobs.Job, 0, len(list))
 	for _, job := range list {
-		locked = append(locked, jobs.Job{
+		wrapped = append(wrapped, jobs.Job{
 			Name: job.Name,
 			Run: func(ctx context.Context) (string, error) {
 				tx, err := database.BeginTx(ctx, nil)
@@ -112,5 +112,5 @@ func Locked(database *db.DB, list []jobs.Job, interval time.Duration, record Rec
 			},
 		})
 	}
-	return locked
+	return wrapped
 }

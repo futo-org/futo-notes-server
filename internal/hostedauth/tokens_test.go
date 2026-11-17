@@ -87,12 +87,12 @@ func forge(t *testing.T, method jwt.SigningMethod, key any, kid string, claims j
 
 func accessClaims() jwt.MapClaims {
 	return jwt.MapClaims{
-		"iss":   APIIssuer,
+		"iss":   apiIssuer,
 		"aud":   []string{testRegion},
 		"sub":   testUser,
-		"scope": ScopeBlobs,
+		"scope": scopeBlobs,
 		"iat":   testNow.Unix(),
-		"exp":   testNow.Add(AccessTokenTTL).Unix(),
+		"exp":   testNow.Add(accessTokenTTL).Unix(),
 	}
 }
 
@@ -102,8 +102,8 @@ func TestMintAccessVerifies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
-	if !exp.Equal(testNow.Add(AccessTokenTTL)) {
-		t.Errorf("expiry %v, want %v", exp, testNow.Add(AccessTokenTTL))
+	if !exp.Equal(testNow.Add(accessTokenTTL)) {
+		t.Errorf("expiry %v, want %v", exp, testNow.Add(accessTokenTTL))
 	}
 	got, err := mustVerifier(t, mustKeySet(t, key), testNow.Add(time.Hour)).VerifyAccess(token)
 	if err != nil {
@@ -112,8 +112,8 @@ func TestMintAccessVerifies(t *testing.T) {
 	if got != (AccessToken{UserID: testUser}) {
 		t.Errorf("got %+v, want user %s", got, testUser)
 	}
-	if claims := unverifiedClaims(t, token); !claims.ExpiresAt.Equal(testNow.Add(AccessTokenTTL)) {
-		t.Errorf("exp %v, want %v", claims.ExpiresAt, testNow.Add(AccessTokenTTL))
+	if claims := unverifiedClaims(t, token); !claims.ExpiresAt.Equal(testNow.Add(accessTokenTTL)) {
+		t.Errorf("exp %v, want %v", claims.ExpiresAt, testNow.Add(accessTokenTTL))
 	}
 }
 
@@ -127,7 +127,7 @@ func TestMintAdminVerifies(t *testing.T) {
 	if err := v.VerifyAdmin(token); err != nil {
 		t.Fatalf("verify: %v", err)
 	}
-	expired := mustVerifier(t, mustKeySet(t, key), testNow.Add(AdminTokenTTL+clockSkew+time.Second))
+	expired := mustVerifier(t, mustKeySet(t, key), testNow.Add(adminTokenTTL+clockSkew+time.Second))
 	if err := expired.VerifyAdmin(token); !errors.Is(err, jwt.ErrTokenExpired) {
 		t.Errorf("admin token past 5 min: got %v, want expired", err)
 	}
@@ -140,7 +140,7 @@ func TestMintRejectsBadInput(t *testing.T) {
 		"user uppercase uuid":  func() error { _, _, err := m.MintAccess(testRegion, strings.ToUpper(testUser)); return err },
 		"empty region":         func() error { _, _, err := m.MintAccess("", testUser); return err },
 		"region with slash":    func() error { _, _, err := m.MintAccess("us/east", testUser); return err },
-		"region is api issuer": func() error { _, err := m.MintAdmin(APIIssuer); return err },
+		"region is api issuer": func() error { _, err := m.MintAdmin(apiIssuer); return err },
 	}
 	for name, mint := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -185,7 +185,7 @@ func TestVerifyAccessRejects(t *testing.T) {
 		"several audiences":                   signed(func(c jwt.MapClaims) { c["aud"] = []string{testRegion, "eu-central"} }),
 		"wrong issuer":                        signed(func(c jwt.MapClaims) { c["iss"] = "eu-central" }),
 		"missing issuer":                      signed(func(c jwt.MapClaims) { delete(c, "iss") }),
-		"admin scope":                         signed(func(c jwt.MapClaims) { c["scope"] = ScopeAdmin }),
+		"admin scope":                         signed(func(c jwt.MapClaims) { c["scope"] = scopeAdmin }),
 		"missing scope":                       signed(func(c jwt.MapClaims) { delete(c, "scope") }),
 		"scope list":                          signed(func(c jwt.MapClaims) { c["scope"] = "blobs admin" }),
 		"sub not a uuid":                      signed(func(c jwt.MapClaims) { c["sub"] = "alice" }),
@@ -212,7 +212,7 @@ func TestVerifyAdminRejects(t *testing.T) {
 		t.Fatalf("mint access: %v", err)
 	}
 	adminClaims := func(mutate func(jwt.MapClaims)) string {
-		c := jwt.MapClaims{"iss": APIIssuer, "aud": []string{testRegion}, "scope": ScopeAdmin, "iat": testNow.Unix(), "exp": testNow.Add(AdminTokenTTL).Unix()}
+		c := jwt.MapClaims{"iss": apiIssuer, "aud": []string{testRegion}, "scope": scopeAdmin, "iat": testNow.Unix(), "exp": testNow.Add(adminTokenTTL).Unix()}
 		mutate(c)
 		return forge(t, jwt.SigningMethodEdDSA, key.key, key.kid, c)
 	}
@@ -224,7 +224,7 @@ func TestVerifyAdminRejects(t *testing.T) {
 		"access token":       access,
 		"other region":       otherRegion,
 		"admin with a sub":   adminClaims(func(c jwt.MapClaims) { c["sub"] = testUser }),
-		"blobs scope no sub": adminClaims(func(c jwt.MapClaims) { c["scope"] = ScopeBlobs }),
+		"blobs scope no sub": adminClaims(func(c jwt.MapClaims) { c["scope"] = scopeBlobs }),
 		"expired":            adminClaims(func(c jwt.MapClaims) { c["exp"] = testNow.Add(-time.Hour).Unix() }),
 	}
 	for name, token := range cases {
@@ -345,7 +345,7 @@ func TestReceiptVerifyRejects(t *testing.T) {
 	blobKey := testUser + "/" + testBlob
 	claims := func(mutate func(jwt.MapClaims)) jwt.MapClaims {
 		c := jwt.MapClaims{
-			"iss": testRegion, "aud": []string{APIIssuer}, "sub": testUser,
+			"iss": testRegion, "aud": []string{apiIssuer}, "sub": testUser,
 			"key": blobKey, "size": 10,
 			"iat": testNow.Unix(), "exp": testNow.Add(ReceiptTTL).Unix(),
 		}
@@ -426,7 +426,7 @@ func TestConstructorsRejectBadConfig(t *testing.T) {
 	if _, err := NewVerifier(mustKeySet(t, key), "US EAST"); err == nil {
 		t.Error("NewVerifier accepted an invalid region")
 	}
-	if _, err := NewReceiptSigner(key, APIIssuer); err == nil {
+	if _, err := NewReceiptSigner(key, apiIssuer); err == nil {
 		t.Error("NewReceiptSigner accepted the API issuer as a region")
 	}
 	if _, err := NewReceiptVerifier(nil); err == nil {

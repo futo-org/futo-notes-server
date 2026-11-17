@@ -18,15 +18,15 @@ import (
 
 // Token kinds, as reported to OnFailure.
 const (
-	KindAccess = "access"
-	KindAdmin  = "admin"
+	kindAccess = "access"
+	kindAdmin  = "admin"
 )
 
 // Failure reasons, as reported to OnFailure.
 const (
-	ReasonMissing = "missing"
-	ReasonExpired = "expired"
-	ReasonInvalid = "invalid"
+	reasonMissing = "missing"
+	reasonExpired = "expired"
+	reasonInvalid = "invalid"
 )
 
 // OnFailure is told about every rejected request.
@@ -45,13 +45,13 @@ func UserID(ctx context.Context) string {
 func Access(v *hostedauth.Verifier, onFailure OnFailure) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			token, ok := bearer(w, r, KindAccess, onFailure)
+			token, ok := bearer(w, r, kindAccess, onFailure)
 			if !ok {
 				return
 			}
 			access, err := v.VerifyAccess(token)
 			if err != nil {
-				reject(w, r, KindAccess, err, onFailure)
+				reject(w, r, kindAccess, err, onFailure)
 				return
 			}
 			// Mutate the request logger in place: the access log line is
@@ -69,12 +69,12 @@ func Access(v *hostedauth.Verifier, onFailure OnFailure) func(http.Handler) http
 func Admin(v *hostedauth.Verifier, onFailure OnFailure) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			token, ok := bearer(w, r, KindAdmin, onFailure)
+			token, ok := bearer(w, r, kindAdmin, onFailure)
 			if !ok {
 				return
 			}
 			if err := v.VerifyAdmin(token); err != nil {
-				reject(w, r, KindAdmin, err, onFailure)
+				reject(w, r, kindAdmin, err, onFailure)
 				return
 			}
 			next.ServeHTTP(w, r)
@@ -85,7 +85,7 @@ func Admin(v *hostedauth.Verifier, onFailure OnFailure) func(http.Handler) http.
 func bearer(w http.ResponseWriter, r *http.Request, kind string, onFailure OnFailure) (string, bool) {
 	token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if !ok || token == "" {
-		onFailure(r.Context(), kind, ReasonMissing)
+		onFailure(r.Context(), kind, reasonMissing)
 		httputil.WriteError(w, r, http.StatusUnauthorized, "Expected Bearer token")
 		return "", false
 	}
@@ -93,9 +93,9 @@ func bearer(w http.ResponseWriter, r *http.Request, kind string, onFailure OnFai
 }
 
 func reject(w http.ResponseWriter, r *http.Request, kind string, err error, onFailure OnFailure) {
-	reason := ReasonInvalid
+	reason := reasonInvalid
 	if errors.Is(err, jwt.ErrTokenExpired) {
-		reason = ReasonExpired
+		reason = reasonExpired
 	}
 	hlog.FromRequest(r).Info().Err(err).Str("token_kind", kind).Msg("rejected token")
 	onFailure(r.Context(), kind, reason)

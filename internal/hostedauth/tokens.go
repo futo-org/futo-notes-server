@@ -44,16 +44,16 @@ import (
 )
 
 const (
-	// APIIssuer is the iss of access and admin tokens and the aud of receipts.
-	APIIssuer = "notes-api"
-	// ScopeBlobs is the scope of access tokens.
-	ScopeBlobs = "blobs"
-	// ScopeAdmin is the scope of admin tokens.
-	ScopeAdmin = "admin"
-	// AccessTokenTTL is how long an access token stays valid.
-	AccessTokenTTL = 24 * time.Hour
-	// AdminTokenTTL is how long an admin token stays valid.
-	AdminTokenTTL = 5 * time.Minute
+	// apiIssuer is the iss of access and admin tokens and the aud of receipts.
+	apiIssuer = "notes-api"
+	// scopeBlobs is the scope of access tokens.
+	scopeBlobs = "blobs"
+	// scopeAdmin is the scope of admin tokens.
+	scopeAdmin = "admin"
+	// accessTokenTTL is how long an access token stays valid.
+	accessTokenTTL = 24 * time.Hour
+	// adminTokenTTL is how long an admin token stays valid.
+	adminTokenTTL = 5 * time.Minute
 	// ReceiptTTL is how long a receipt stays valid.
 	ReceiptTTL = 24 * time.Hour
 )
@@ -130,7 +130,7 @@ func (m *Minter) MintAccess(region, userID string) (string, time.Time, error) {
 	if !ids.IsUserID(userID) {
 		return "", time.Time{}, fmt.Errorf("user id %q is not a UUID", userID)
 	}
-	return m.mint(region, userID, ScopeBlobs, AccessTokenTTL)
+	return m.mint(region, userID, scopeBlobs, accessTokenTTL)
 }
 
 // MintAdmin signs a 5-minute admin token for region.
@@ -138,7 +138,7 @@ func (m *Minter) MintAdmin(region string) (string, error) {
 	if err := checkRegion(region); err != nil {
 		return "", err
 	}
-	token, _, err := m.mint(region, "", ScopeAdmin, AdminTokenTTL)
+	token, _, err := m.mint(region, "", scopeAdmin, adminTokenTTL)
 	return token, err
 }
 
@@ -146,7 +146,7 @@ func (m *Minter) mint(region, subject, scope string, ttl time.Duration) (string,
 	now := m.now()
 	exp := now.Add(ttl)
 	token, err := sign(m.key, scopedClaims{
-		Issuer:    APIIssuer,
+		Issuer:    apiIssuer,
 		Subject:   subject,
 		Audience:  jwt.ClaimStrings{region},
 		IssuedAt:  jwt.NewNumericDate(now),
@@ -182,7 +182,7 @@ func NewVerifier(keys KeySet, region string, opts ...Option) (*Verifier, error) 
 
 // VerifyAccess checks an access token and returns its user.
 func (v *Verifier) VerifyAccess(token string) (AccessToken, error) {
-	c, err := v.verify(token, ScopeBlobs)
+	c, err := v.verify(token, scopeBlobs)
 	if err != nil {
 		return AccessToken{}, err
 	}
@@ -194,7 +194,7 @@ func (v *Verifier) VerifyAccess(token string) (AccessToken, error) {
 
 // VerifyAdmin checks an admin token.
 func (v *Verifier) VerifyAdmin(token string) error {
-	c, err := v.verify(token, ScopeAdmin)
+	c, err := v.verify(token, scopeAdmin)
 	if err != nil {
 		return err
 	}
@@ -206,7 +206,7 @@ func (v *Verifier) VerifyAdmin(token string) error {
 
 func (v *Verifier) verify(token, scope string) (scopedClaims, error) {
 	var c scopedClaims
-	if err := parse(token, &c, v.keys, APIIssuer, v.region, v.now); err != nil {
+	if err := parse(token, &c, v.keys, apiIssuer, v.region, v.now); err != nil {
 		return scopedClaims{}, err
 	}
 	if c.Scope != scope {
@@ -246,7 +246,7 @@ func (s *ReceiptSigner) Sign(userID, key string, size int64) (string, error) {
 	return sign(s.key, receiptClaims{
 		Issuer:    s.region,
 		Subject:   userID,
-		Audience:  jwt.ClaimStrings{APIIssuer},
+		Audience:  jwt.ClaimStrings{apiIssuer},
 		IssuedAt:  jwt.NewNumericDate(now),
 		ExpiresAt: jwt.NewNumericDate(now.Add(ReceiptTTL)),
 		Key:       key,
@@ -288,7 +288,7 @@ func (v *ReceiptVerifier) Verify(token, region string) (Receipt, error) {
 		return Receipt{}, invalid(fmt.Errorf("unknown region %q", region))
 	}
 	var c receiptClaims
-	if err := parse(token, &c, keys, region, APIIssuer, v.now); err != nil {
+	if err := parse(token, &c, keys, region, apiIssuer, v.now); err != nil {
 		return Receipt{}, err
 	}
 	if !ids.IsUserID(c.Subject) {
@@ -357,7 +357,7 @@ func checkRegion(region string) error {
 	if len(region) > 63 || !regionPattern.MatchString(region) {
 		return fmt.Errorf("invalid region id %q", region)
 	}
-	if region == APIIssuer {
+	if region == apiIssuer {
 		return fmt.Errorf("region id %q collides with the API issuer", region)
 	}
 	return nil

@@ -131,7 +131,7 @@ func (s *Store) RedeemAppCode(ctx context.Context, code, codeVerifier, userAgent
 	switch {
 	case !expiresAt.After(s.now()):
 		failure = ErrInvalidCode
-	case !PKCEMatches(codeVerifier, challenge):
+	case !pkceMatches(codeVerifier, challenge):
 		failure = ErrCodeVerifier
 	}
 	if failure != nil {
@@ -172,9 +172,9 @@ func (s *Store) DeleteExpiredLogins(ctx context.Context) (int64, error) {
 	return deleted, nil
 }
 
-// PKCEMatches reports whether verifier is a well-formed RFC 7636
+// pkceMatches reports whether verifier is a well-formed RFC 7636
 // code_verifier whose S256 transform is challenge.
-func PKCEMatches(verifier, challenge string) bool {
+func pkceMatches(verifier, challenge string) bool {
 	if !verifierPattern.MatchString(verifier) {
 		return false
 	}
