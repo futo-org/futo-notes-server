@@ -308,7 +308,7 @@ func TestBlobGCDeletesExpiredBlobsFromStorage(t *testing.T) {
 		t.Fatalf("after a failed storage delete: stored %t, in ledger %t; want stored and forgotten", e.stored(stranded), e.inLedger(stranded))
 	}
 	later := e.lastModified(stranded).Add(hostedjobs.OrphanMinAge + time.Second)
-	if _, err := hostedjobs.ReconcileOrphans(ctx, e.database, e.client, testRegion, later); err != nil {
+	if _, err := hostedjobs.ReconcileOrphans(ctx, e.database, e.client, testRegion, "", later); err != nil {
 		t.Fatal(err)
 	}
 	if e.stored(stranded) {
@@ -334,7 +334,7 @@ func TestReconciliationDeletesOnlyOldOrphans(t *testing.T) {
 		t.Fatal("young orphan is not younger than the cutoff")
 	}
 
-	result, err := hostedjobs.ReconcileOrphans(ctx, e.database, e.client, testRegion, now)
+	result, err := hostedjobs.ReconcileOrphans(ctx, e.database, e.client, testRegion, "", now)
 	if err != nil || result.Listed != len(known)+1 || result.Deleted != 1 || result.Failed != 0 || result.Skipped != 0 {
 		t.Fatalf("reconciliation = %+v, %v", result, err)
 	}

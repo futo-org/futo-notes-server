@@ -22,6 +22,7 @@ import (
 	"futo-notes-server/internal/events"
 	"futo-notes-server/internal/hosted/account"
 	"futo-notes-server/internal/hosted/config"
+	"futo-notes-server/internal/hosted/storageclient"
 	"futo-notes-server/internal/hostedauth"
 	"futo-notes-server/internal/syncapi"
 )
@@ -34,7 +35,10 @@ type Options struct {
 	Database *db.DB
 	// Hub fans sync events out to this replica's streams; events.Listen
 	// feeds it from Postgres.
-	Hub     *events.Hub
+	Hub *events.Hub
+	// Storage reaches the regions' storage services; only the DEV_UI job
+	// triggers use it.
+	Storage *storageclient.Client
 	Metrics *Metrics
 	// Version is reported in the capability document.
 	Version string
@@ -53,6 +57,7 @@ type Server struct {
 	metrics   *Metrics
 	version   string
 	oidc      *oidcClient
+	storage   *storageclient.Client
 	draining  atomic.Bool
 }
 
@@ -80,6 +85,7 @@ func New(o Options) (*Server, error) {
 		metrics:   o.Metrics,
 		version:   o.Version,
 		oidc:      newOIDCClient(o.Config.OIDC, o.Config.PublicURL+callbackPath),
+		storage:   o.Storage,
 	}, nil
 }
 
@@ -142,6 +148,7 @@ func (s *Server) router() chi.Router {
 	s.dashboardRoutes(r)
 	if s.cfg.DevUI {
 		r.Get("/dev", handleDevUI)
+		s.devJobRoutes(r)
 		log.Info().Str("path", "/dev").Msg("dev UI enabled")
 	}
 	return r

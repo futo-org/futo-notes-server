@@ -72,6 +72,19 @@
       <button id="list">List objects</button>
     </div>
   </section>
+  <section class="card">
+    <h2>Jobs</h2>
+    <p class="muted">Runs a storage job now on this replica, outside its schedule and lock. Reconciliation deletes keys older than 48h
+      that the ledger does not know; <em>now</em> (RFC 3339) shifts its clock, and an empty user means every prefix.</p>
+    <div class="row">
+      <button data-job="/dev/jobs/blob-gc">Blob GC</button>
+      <button data-job="/dev/jobs/account-purge">Account purge</button>
+    </div>
+    <div class="row">
+      <input id="reconcile-user" placeholder="user id (optional)"><input id="reconcile-now" placeholder="now (optional)">
+      <button id="reconcile">Orphan reconciliation</button>
+    </div>
+  </section>
   <section class="card"><h2>Response</h2><pre id="out" class="muted">nothing yet</pre></section>
 </main>
 <script>
@@ -126,6 +139,13 @@ async function loadRegions() {
   for (const r of await res.json()) $("region").add(new Option(r.name + " (" + r.id + ")", r.id));
 }
 document.querySelectorAll("[data-get]").forEach((b) => b.onclick = () => call("GET", b.dataset.get));
+document.querySelectorAll("[data-job]").forEach((b) => b.onclick = () => call("POST", b.dataset.job));
+$("reconcile").onclick = () => {
+  const q = new URLSearchParams();
+  if ($("reconcile-user").value) q.set("user", $("reconcile-user").value.trim());
+  if ($("reconcile-now").value) q.set("now", $("reconcile-now").value.trim());
+  call("POST", "/dev/jobs/reconciliation?" + q);
+};
 $("app-login").onclick = appLogin;
 $("logout").onclick = async () => { await call("POST", "/api/auth/logout"); store.clear(); refreshWho(); };
 $("forget").onclick = () => { store.clear(); refreshWho(); };

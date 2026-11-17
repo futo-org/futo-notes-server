@@ -175,7 +175,7 @@ func run() error {
 	}
 
 	hub := events.NewHub()
-	server, err := api.New(api.Options{Config: cfg, Database: database, Hub: hub, Metrics: metrics, Version: version})
+	server, err := api.New(api.Options{Config: cfg, Database: database, Hub: hub, Storage: storage, Metrics: metrics, Version: version})
 	if err != nil {
 		return err
 	}

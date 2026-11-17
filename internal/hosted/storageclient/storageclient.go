@@ -126,12 +126,16 @@ type Blob struct {
 	LastModified time.Time `json:"last_modified"`
 }
 
-// ListBlobs lists region's blobs last modified before olderThan, in key
-// order, calling page with each non-empty page until the listing ends.
-func (c *Client) ListBlobs(ctx context.Context, region string, olderThan time.Time, page func([]Blob) error) error {
+// ListBlobs lists region's blobs under prefix ("" for all, or "<userId>/")
+// last modified before olderThan, in key order, calling page with each
+// non-empty page until the listing ends.
+func (c *Client) ListBlobs(ctx context.Context, region, prefix string, olderThan time.Time, page func([]Blob) error) error {
 	cursor := ""
 	for {
 		query := url.Values{"older_than": {olderThan.UTC().Format(time.RFC3339Nano)}}
+		if prefix != "" {
+			query.Set("prefix", prefix)
+		}
 		if cursor != "" {
 			query.Set("cursor", cursor)
 		}

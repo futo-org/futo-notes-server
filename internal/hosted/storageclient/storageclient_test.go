@@ -107,7 +107,7 @@ func TestListBlobsPagesUntilTheCursorIsNull(t *testing.T) {
 	})
 	var got []string
 	pagesSeen := 0
-	err := c.ListBlobs(t.Context(), region, olderThan, func(blobs []Blob) error {
+	err := c.ListBlobs(t.Context(), region, "", olderThan, func(blobs []Blob) error {
 		pagesSeen++
 		for _, b := range blobs {
 			got = append(got, b.Key)
@@ -121,13 +121,26 @@ func TestListBlobsPagesUntilTheCursorIsNull(t *testing.T) {
 	stuck, _ := newClient(t, nil, func(w http.ResponseWriter, _ *http.Request, _ int) {
 		_, _ = w.Write([]byte(`{"blobs":[],"next_cursor":"same"}`))
 	})
-	if err := stuck.ListBlobs(t.Context(), region, olderThan, func([]Blob) error { return nil }); err == nil {
+	if err := stuck.ListBlobs(t.Context(), region, "", olderThan, func([]Blob) error { return nil }); err == nil {
 		t.Fatal("a cursor that never advances listed forever or succeeded")
 	}
 
 	stop := errors.New("stop")
-	if err := c.ListBlobs(t.Context(), region, olderThan, func([]Blob) error { return stop }); !errors.Is(err, stop) {
+	if err := c.ListBlobs(t.Context(), region, "", olderThan, func([]Blob) error { return stop }); !errors.Is(err, stop) {
 		t.Fatalf("page error = %v, want it returned", err)
+	}
+}
+
+func TestListBlobsSendsThePrefix(t *testing.T) {
+	const prefix = "01a1e744-1d44-7ff3-83a1-e2dcd2e62496/"
+	c, f := newClient(t, nil, func(w http.ResponseWriter, r *http.Request, call int) {
+		if got := r.URL.Query().Get("prefix"); got != prefix {
+			t.Errorf("call %d: prefix %q, want %q", call, got, prefix)
+		}
+		_, _ = w.Write([]byte(`{"blobs":[],"next_cursor":null}`))
+	})
+	if err := c.ListBlobs(t.Context(), region, prefix, time.Now(), func([]Blob) error { return nil }); err != nil || f.calls.Load() != 1 {
+		t.Fatalf("listing a prefix: %d calls, err %v", f.calls.Load(), err)
 	}
 }
 

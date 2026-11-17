@@ -133,13 +133,14 @@ type ReconcileResult struct {
 	Failed  int
 }
 
-// ReconcileOrphans deletes region's keys that are at least OrphanMinAge old
-// at now and unknown to the ledger: uploads never claimed, and keys whose
-// storage delete failed after GC or account purge forgot them. A key the
-// ledger knows is never deleted, whatever its state.
-func ReconcileOrphans(ctx context.Context, database *db.DB, storage *storageclient.Client, region string, now time.Time) (ReconcileResult, error) {
+// ReconcileOrphans deletes region's keys under prefix ("" for the whole
+// region, or "<userId>/") that are at least OrphanMinAge old at now and
+// unknown to the ledger: uploads never claimed, and keys whose storage delete
+// failed after GC or account purge forgot them. A key the ledger knows is
+// never deleted, whatever its state.
+func ReconcileOrphans(ctx context.Context, database *db.DB, storage *storageclient.Client, region, prefix string, now time.Time) (ReconcileResult, error) {
 	var result ReconcileResult
-	err := storage.ListBlobs(ctx, region, now.Add(-OrphanMinAge), func(blobs []storageclient.Blob) error {
+	err := storage.ListBlobs(ctx, region, prefix, now.Add(-OrphanMinAge), func(blobs []storageclient.Blob) error {
 		result.Listed += len(blobs)
 		keys := make([]string, 0, len(blobs))
 		for _, b := range blobs {
@@ -328,7 +329,7 @@ func orphanReconciliation(database *db.DB, storage *storageclient.Client, region
 		var total ReconcileResult
 		var errs []error
 		for _, region := range regions {
-			result, err := ReconcileOrphans(ctx, database, storage, region, time.Now())
+			result, err := ReconcileOrphans(ctx, database, storage, region, "", time.Now())
 			total.Listed += result.Listed
 			total.Skipped += result.Skipped
 			total.Deleted += result.Deleted
