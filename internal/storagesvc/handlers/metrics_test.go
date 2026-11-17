@@ -50,11 +50,10 @@ func TestMetrics(t *testing.T) {
 		}
 	}
 
-	user := attribute.String("userId", userA)
-	if got := sum(t, byName["storage.uploaded_bytes"], user); got != 5 {
+	if got := sum(t, byName["storage.uploaded_bytes"]); got != 5 {
 		t.Errorf("uploaded bytes %d", got)
 	}
-	if got := sum(t, byName["storage.downloaded_bytes"], user); got != 10 {
+	if got := sum(t, byName["storage.downloaded_bytes"]); got != 10 {
 		t.Errorf("downloaded bytes %d (get + batch)", got)
 	}
 	if got := sum(t, byName["storage.receipts.signed"]); got != 1 {
@@ -69,20 +68,20 @@ func TestMetrics(t *testing.T) {
 	if got := sum(t, byName["storage.s3.errors"], attribute.String("operation", "put")); got != 1 {
 		t.Errorf("s3 put errors %d", got)
 	}
-	if got := sum(t, byName["http.server.request.count"], attribute.String("route", "/blobs/{userId}/{blobId}"), user); got != 1 {
+	if got := sum(t, byName["http.server.request.count"], attribute.String("route", "/blobs/{userId}/{blobId}")); got != 1 {
 		t.Errorf("get requests %d", got)
 	}
 	if got := sum(t, byName["http.server.request.errors"], attribute.String("route", "/blobs"), attribute.Int("status", 401)); got != 1 {
 		t.Errorf("401 uploads %d", got)
 	}
 
-	hist, ok := byName["http.server.request.duration"].(metricdata.Histogram[float64])
-	if !ok || len(hist.DataPoints) == 0 {
-		t.Fatalf("no duration histogram: %T", byName["http.server.request.duration"])
-	}
-	for _, dp := range hist.DataPoints {
-		if _, ok := dp.Attributes.Value("userId"); ok {
-			t.Fatalf("duration histogram carries a user id: %v", dp.Attributes)
+	for _, sm := range rm.ScopeMetrics {
+		for _, metric := range sm.Metrics {
+			for _, attrs := range dataPointAttributes(metric.Data) {
+				if _, ok := attrs.Value("userId"); ok {
+					t.Fatalf("%s carries a user id: %v", metric.Name, attrs)
+				}
+			}
 		}
 	}
 }
@@ -107,4 +106,19 @@ func sum(t *testing.T, data metricdata.Aggregation, want ...attribute.KeyValue) 
 		}
 	}
 	return total
+}
+
+func dataPointAttributes(data metricdata.Aggregation) []attribute.Set {
+	var sets []attribute.Set
+	switch d := data.(type) {
+	case metricdata.Sum[int64]:
+		for _, dp := range d.DataPoints {
+			sets = append(sets, dp.Attributes)
+		}
+	case metricdata.Histogram[float64]:
+		for _, dp := range d.DataPoints {
+			sets = append(sets, dp.Attributes)
+		}
+	}
+	return sets
 }

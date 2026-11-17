@@ -62,7 +62,7 @@ func (s *Server) uploadBlob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.Metrics.ReceiptSigned(r.Context())
-	s.Metrics.AddUploaded(r.Context(), userID, size)
+	s.Metrics.AddUploaded(r.Context(), size)
 	httputil.WriteJSON(w, r, http.StatusCreated, UploadResponse{Key: key, Size: size, Receipt: receipt})
 }
 
@@ -102,7 +102,7 @@ func (s *Server) getBlob(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(status)
 	n, err := io.Copy(w, obj.Body)
-	s.Metrics.AddDownloaded(r.Context(), userID, n)
+	s.Metrics.AddDownloaded(r.Context(), n)
 	if err != nil {
 		// The body falls short of its Content-Length, so the client sees a
 		// truncated transfer.
@@ -182,7 +182,7 @@ func (s *Server) batchBlobs(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.WriteHeader(http.StatusOK)
 	sent, err := s.streamBatch(r, w, userID, keys)
-	s.Metrics.AddDownloaded(r.Context(), userID, sent)
+	s.Metrics.AddDownloaded(r.Context(), sent)
 	if err != nil {
 		if clientGone(r) {
 			hlog.FromRequest(r).Warn().Err(err).Msg("blob batch aborted: client disconnected")

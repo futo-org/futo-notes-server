@@ -36,9 +36,9 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"uuid"
 
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/google/uuid"
 )
 
 const (
@@ -370,7 +370,7 @@ func checkBlobKey(userID, key string) error {
 		return fmt.Errorf("key %q is not under %q", key, userID+"/")
 	}
 	id, err := uuid.Parse(blob)
-	if err != nil || id.Version() != 7 || id.String() != blob {
+	if err != nil || id[6]>>4 != 7 || id.String() != blob {
 		return fmt.Errorf("key %q does not end in a UUIDv7", key)
 	}
 	return nil

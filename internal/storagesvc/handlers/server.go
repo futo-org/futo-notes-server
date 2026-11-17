@@ -79,9 +79,6 @@ func (s *Server) routes() chi.Router {
 
 	r.Group(func(r chi.Router) {
 		r.Use(auth.Access(s.Verifier, s.Metrics.AuthFailure))
-		if s.Metrics != nil {
-			r.Use(metrics.CaptureUser)
-		}
 		r.Post("/blobs", s.uploadBlob)
 		r.Post("/blobs/batch", s.batchBlobs)
 		r.Get("/blobs/{userId}/{blobId}", s.getBlob)

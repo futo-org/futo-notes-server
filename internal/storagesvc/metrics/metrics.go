@@ -128,20 +128,20 @@ func NewMetrics(meter otelmetric.Meter) (*Metrics, error) {
 	return &m, nil
 }
 
-// AddUploaded counts n bytes stored for userID.
-func (m *Metrics) AddUploaded(ctx context.Context, userID string, n int64) {
+// AddUploaded counts n bytes stored.
+func (m *Metrics) AddUploaded(ctx context.Context, n int64) {
 	if m == nil || n <= 0 {
 		return
 	}
-	m.uploadedBytes.Add(ctx, n, userOption(userID))
+	m.uploadedBytes.Add(ctx, n)
 }
 
-// AddDownloaded counts n blob bytes sent to userID.
-func (m *Metrics) AddDownloaded(ctx context.Context, userID string, n int64) {
+// AddDownloaded counts n blob bytes sent.
+func (m *Metrics) AddDownloaded(ctx context.Context, n int64) {
 	if m == nil || n <= 0 {
 		return
 	}
-	m.downloadedBytes.Add(ctx, n, userOption(userID))
+	m.downloadedBytes.Add(ctx, n)
 }
 
 // ObserveS3 implements storage.Observer.
@@ -176,10 +176,9 @@ func (m *Metrics) ReceiptSigned(ctx context.Context) {
 	m.receiptsSigned.Add(ctx, 1)
 }
 
-// Measurement options with bounded label sets are cached: building an
-// attribute set on every request allocates on the hot path. Options carrying a
-// user id are not, since a cache keyed by user would grow for the life of the
-// process.
+// Measurement options are cached: building an attribute set on every request
+// allocates on the hot path. Labels stay bounded (no user ids): a hosted
+// region serves every user, and per-user series would grow without limit.
 var (
 	operationAttrs sync.Map
 	authAttrs      sync.Map
@@ -195,17 +194,12 @@ func cached[K comparable](cache *sync.Map, key K, build func() attribute.Set) ot
 	return opt
 }
 
-func userOption(userID string) otelmetric.MeasurementOption {
-	return otelmetric.WithAttributeSet(attribute.NewSet(attribute.String("userId", userID)))
-}
-
 type httpKey struct {
 	method, route string
 	status        int
 }
 
-// httpOption labels the duration histogram. It is route-scoped only: a user
-// label would multiply every bucket series by the number of users.
+// httpOption labels the HTTP instruments by route pattern, never raw path.
 func httpOption(method, route string, status int) otelmetric.MeasurementOption {
 	return cached(&httpAttrs, httpKey{method, route, status}, func() attribute.Set {
 		return attribute.NewSet(
@@ -214,18 +208,4 @@ func httpOption(method, route string, status int) otelmetric.MeasurementOption {
 			attribute.Int("status", status),
 		)
 	})
-}
-
-// httpUserOption is httpOption plus the verified user, for the count and
-// error counters only.
-func httpUserOption(method, route string, status int, userID string) otelmetric.MeasurementOption {
-	if userID == "" {
-		return httpOption(method, route, status)
-	}
-	return otelmetric.WithAttributeSet(attribute.NewSet(
-		attribute.String("method", method),
-		attribute.String("route", route),
-		attribute.Int("status", status),
-		attribute.String("userId", userID),
-	))
 }

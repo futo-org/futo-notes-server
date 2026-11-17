@@ -1,7 +1,6 @@
 package metrics
 
 import (
-	"context"
 	"io"
 	"net/http"
 	"strings"
@@ -9,29 +8,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-
-	"futo-notes-server/internal/storagesvc/auth"
 )
-
-// userCapture carries the verified user out of the authenticated route group
-// to Middleware, which wraps the whole router (it must see auth failures too)
-// and so never sees the auth context on its own request.
-type userCapture struct {
-	user string
-}
-
-type captureKey struct{}
-
-// CaptureUser hands the request's verified user to Middleware. Mount it after
-// auth.Access.
-func CaptureUser(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if c, _ := r.Context().Value(captureKey{}).(*userCapture); c != nil {
-			c.user = auth.UserID(r.Context())
-		}
-		next.ServeHTTP(w, r)
-	})
-}
 
 // Middleware records HTTP duration, count and errors by chi route pattern.
 func Middleware(m *Metrics) func(http.Handler) http.Handler {
@@ -39,8 +16,6 @@ func Middleware(m *Metrics) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
 			ww := &statusWriter{ResponseWriter: w}
-			capture := &userCapture{}
-			r = r.WithContext(context.WithValue(r.Context(), captureKey{}, capture))
 
 			next.ServeHTTP(ww, r)
 
@@ -54,11 +29,11 @@ func Middleware(m *Metrics) func(http.Handler) http.Handler {
 					route = p
 				}
 			}
-			m.requestDuration.Record(r.Context(), time.Since(start).Seconds(), httpOption(r.Method, route, status))
-			countOpt := httpUserOption(r.Method, route, status, capture.user)
-			m.requestCount.Add(r.Context(), 1, countOpt)
+			opt := httpOption(r.Method, route, status)
+			m.requestDuration.Record(r.Context(), time.Since(start).Seconds(), opt)
+			m.requestCount.Add(r.Context(), 1, opt)
 			if status >= 400 {
-				m.requestErrors.Add(r.Context(), 1, countOpt)
+				m.requestErrors.Add(r.Context(), 1, opt)
 			}
 		})
 	}
