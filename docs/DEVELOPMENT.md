@@ -105,11 +105,10 @@ mise run docker:stop      # add -v to drop the Postgres volume
 The mock OIDC issuer (`cmd/mock-oidc`) logs in any subject. In a browser,
 `/authorize` shows a sign-in form; scripts can call `/test/authorize` with the
 same query plus `sub=` (optionally `email=`, `name=`) to get a code with no UI.
-PKCE (S256) is mandatory. ID tokens carry `auth_time`: the form always
-authenticates afresh, while `/test/authorize` reuses the subject's last
-authentication unless `max_age` says it is too old (`max_age=0` never reuses
-it). Its `auth_time=<unix seconds>` forces the claim, to test a provider that
-ignores `max_age`. Go tests can run it in-process with
+PKCE (S256) is mandatory. ID tokens carry `auth_time`: both the form and
+`/test/authorize` record a fresh sign-in, so it is the time of the request.
+`/test/authorize`'s `auth_time=<unix seconds>` forces the claim, to test a
+provider that answers with an old SSO session or ignores `max_age`. Go tests can run it in-process with
 `mockoidctest.Start`.
 
 Token keys are Ed25519 PEM blocks with a `kid` header; `mise run keygen -kid
