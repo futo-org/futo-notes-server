@@ -42,7 +42,7 @@ func TestParseDefaults(t *testing.T) {
 	if cfg.Port != 3015 || cfg.RegionID != "us-east" || cfg.S3Region != "us-east-1" || cfg.S3ForcePathStyle {
 		t.Fatalf("cfg %+v", cfg)
 	}
-	if cfg.DrainDelay != 15*time.Second || cfg.ShutdownTimeout != 60*time.Second || cfg.OTLPMetricsInterval != 15*time.Second {
+	if cfg.DrainDelay != 15*time.Second || cfg.ShutdownTimeout != 120*time.Second || cfg.OTLPMetricsInterval != 15*time.Second {
 		t.Fatalf("durations %v %v %v", cfg.DrainDelay, cfg.ShutdownTimeout, cfg.OTLPMetricsInterval)
 	}
 	if cfg.LogLevel != zerolog.InfoLevel || cfg.LogPretty || cfg.OTLPMetricsEndpoint != "" {

@@ -73,7 +73,7 @@ func Parse(getenv func(string) string) (Config, error) {
 		APIPublicKeys:       p.keySet("API_PUBLIC_KEYS"),
 		ReceiptSigningKey:   p.signingKey("RECEIPT_SIGNING_KEY"),
 		DrainDelay:          p.durationMS("DRAIN_DELAY_MS", 15*time.Second, 0),
-		ShutdownTimeout:     p.durationMS("SHUTDOWN_TIMEOUT_MS", 60*time.Second, 0),
+		ShutdownTimeout:     p.durationMS("SHUTDOWN_TIMEOUT_MS", 120*time.Second, 0),
 		OTLPMetricsEndpoint: getenv("OTLP_METRICS_ENDPOINT"),
 		OTLPMetricsURLPath:  getenv("OTLP_METRICS_URL_PATH"),
 		// time.NewTicker panics on zero, so unlike the drain settings zero
