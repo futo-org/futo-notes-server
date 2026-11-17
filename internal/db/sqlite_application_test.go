@@ -111,7 +111,7 @@ func TestSQLiteApplicationLifecycle(t *testing.T) {
 	}
 	objectStore := objects.New(database, publisher)
 	createdObject, err := objectStore.Create(ctx,
-		objects.Mutation{UserID: user.ID, CollectionID: collection.ID, MutationID: "create-sqlite"}, firstBlob)
+		objects.Mutation{UserID: user.ID, CollectionID: collection.ID, MutationID: "create-sqlite"}, objects.StagedBlob(firstBlob))
 	if err != nil {
 		t.Fatalf("Create() = %#v, %v", createdObject, err)
 	}
@@ -130,7 +130,7 @@ func TestSQLiteApplicationLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	updated, err := objectStore.Update(ctx, objects.Mutation{UserID: user.ID, CollectionID: collection.ID,
-		ObjectID: createdObject.Object.ID, MutationID: "update-sqlite"}, secondBlob, 2)
+		ObjectID: createdObject.Object.ID, MutationID: "update-sqlite"}, objects.StagedBlob(secondBlob), 2)
 	if err != nil {
 		t.Fatalf("Update() = %#v, %v", updated, err)
 	}

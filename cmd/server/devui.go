@@ -12,6 +12,7 @@ import (
 	"futo-notes-server/internal/blobs"
 	"futo-notes-server/internal/db"
 	"futo-notes-server/internal/jobs"
+	"futo-notes-server/internal/syncapi"
 )
 
 //go:embed devui.html
@@ -52,12 +53,12 @@ func handleDevJob[T any](run func(context.Context) (T, error)) http.HandlerFunc 
 	return func(w http.ResponseWriter, r *http.Request) {
 		result, err := run(r.Context())
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, struct {
+			syncapi.WriteJSON(w, http.StatusInternalServerError, struct {
 				Result T      `json:"result"`
 				Error  string `json:"error"`
 			}{Result: result, Error: err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, result)
+		syncapi.WriteJSON(w, http.StatusOK, result)
 	}
 }

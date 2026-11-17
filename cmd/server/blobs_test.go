@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/binary"
 	"fmt"
 	"net/http"
@@ -15,6 +14,7 @@ import (
 
 	"futo-notes-server/internal/auth"
 	"futo-notes-server/internal/blobs"
+	"futo-notes-server/internal/syncapi"
 )
 
 const (
@@ -179,7 +179,7 @@ func TestStreamBlobBatchSkipsUnframeableFile(t *testing.T) {
 func batchRequest(store *blobs.Store, body string) *httptest.ResponseRecorder {
 	r := httptest.NewRequest(http.MethodPost, "/api/blobs/batch", strings.NewReader(body))
 	session := &auth.Session{ID: "session", User: auth.User{ID: fuzzUser}}
-	r = r.WithContext(context.WithValue(r.Context(), sessionCtxKey{}, session))
+	r = r.WithContext(syncapi.WithSession(r.Context(), session))
 	w := httptest.NewRecorder()
 	handleBatchFetchBlobs(store)(w, r)
 	return w

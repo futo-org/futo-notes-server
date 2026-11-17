@@ -49,7 +49,7 @@ func TestObjectMutationLifecycle(t *testing.T) {
 	mutation := func(objectID, mutationID string) objects.Mutation {
 		return objects.Mutation{UserID: userID, CollectionID: collectionID, ObjectID: objectID, MutationID: mutationID}
 	}
-	created, err := objectStore.Create(ctx, mutation("", "create-1"), firstKey)
+	created, err := objectStore.Create(ctx, mutation("", "create-1"), objects.StagedBlob(firstKey))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +58,7 @@ func TestObjectMutationLifecycle(t *testing.T) {
 	}
 	objectID := created.Object.ID
 	waitForObjectNotification(t, listener, userID, collectionID, 1)
-	replayed, err := objectStore.Create(ctx, mutation("", "create-1"), firstKey)
+	replayed, err := objectStore.Create(ctx, mutation("", "create-1"), objects.StagedBlob(firstKey))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +71,7 @@ func TestObjectMutationLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	updated, err := objectStore.Update(ctx, mutation(objectID, "update-1"), secondKey, 2)
+	updated, err := objectStore.Update(ctx, mutation(objectID, "update-1"), objects.StagedBlob(secondKey), 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,7 @@ func TestObjectMutationLifecycle(t *testing.T) {
 		t.Fatalf("unexpected update: %#v", updated)
 	}
 	waitForObjectNotification(t, listener, userID, collectionID, 2)
-	_, err = objectStore.Update(ctx, mutation(objectID, "update-stale"), firstKey, 2)
+	_, err = objectStore.Update(ctx, mutation(objectID, "update-stale"), objects.StagedBlob(firstKey), 2)
 	if conflict, ok := errors.AsType[*objects.ConflictError](err); !ok || conflict.Conflict.CurrentVersion != 2 {
 		t.Fatalf("unexpected conflict: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestObjectMutationLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tombstoneUpdate, err := objectStore.Update(ctx, mutation(objectID, "update-2"), thirdKey, 4)
+	tombstoneUpdate, err := objectStore.Update(ctx, mutation(objectID, "update-2"), objects.StagedBlob(thirdKey), 4)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +229,7 @@ func TestDeleteRetainsBlobForReclamation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	created, err := objectStore.Create(ctx, objects.Mutation{UserID: userID, CollectionID: collectionID, MutationID: "create-folder"}, key)
+	created, err := objectStore.Create(ctx, objects.Mutation{UserID: userID, CollectionID: collectionID, MutationID: "create-folder"}, objects.StagedBlob(key))
 	if err != nil {
 		t.Fatalf("unexpected create: %v", err)
 	}

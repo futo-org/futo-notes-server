@@ -4,7 +4,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -28,11 +27,10 @@ import (
 	"futo-notes-server/internal/db"
 	"futo-notes-server/internal/events"
 	"futo-notes-server/internal/jobs"
+	"futo-notes-server/internal/syncapi"
 )
 
 const (
-	serverName = "futo-notes"
-
 	// readHeaderTimeout bounds how long a client may take to send request
 	// headers. There is deliberately no read or write timeout: sync event
 	// streams and large blob transfers are long-lived.
@@ -47,63 +45,6 @@ const (
 // Overridden by release builds with -X main.serverVersion=<tag>.
 var serverVersion = "0.1.0"
 
-// capability is the discovery document served at GET /. Clients call it once
-// when adding a server, to learn which login flow to drive and whether
-// retry-safe mutations exist.
-type capability struct {
-	Name        string      `json:"name"`
-	Version     string      `json:"version"`
-	AuthMode    string      `json:"auth_mode"`
-	Signup      string      `json:"signup"`
-	Billing     bool        `json:"billing"`
-	MutationIDs mutationIDs `json:"mutation_ids"`
-}
-
-// mutationIDs describes the server's Mutation-Id support in the capability
-// document.
-type mutationIDs struct {
-	Supported                bool   `json:"supported"`
-	Required                 bool   `json:"required"`
-	RetentionDays            int    `json:"retention_days"`
-	SuccessfulCreateOutcomes string `json:"successful_create_outcomes"`
-}
-
-// errorResponse is the JSON body of every API error.
-type errorResponse struct {
-	Error string `json:"error"`
-}
-
-func writeError(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, errorResponse{Error: msg})
-}
-
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(v); err != nil {
-		log.Error().Err(err).Msg("writing JSON response")
-	}
-}
-
-func handleCapability(authMode string) http.HandlerFunc {
-	document := capability{
-		Name:     serverName,
-		Version:  serverVersion,
-		AuthMode: authMode,
-		Signup:   "closed",
-		Billing:  false,
-		MutationIDs: mutationIDs{
-			Supported:                true,
-			Required:                 false,
-			RetentionDays:            30,
-			SuccessfulCreateOutcomes: "durable",
-		},
-	}
-	return func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, document)
-	}
-}
-
 // healthStatus is the body of GET /health.
 type healthStatus struct {
 	Status string `json:"status"`
@@ -115,10 +56,10 @@ func handleHealth(database *db.DB) http.HandlerFunc {
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 		defer cancel()
 		if err := database.PingContext(ctx); err != nil {
-			writeJSON(w, http.StatusServiceUnavailable, healthStatus{Status: "degraded", DB: "unreachable"})
+			syncapi.WriteJSON(w, http.StatusServiceUnavailable, healthStatus{Status: "degraded", DB: "unreachable"})
 			return
 		}
-		writeJSON(w, http.StatusOK, healthStatus{Status: "ok", DB: "connected"})
+		syncapi.WriteJSON(w, http.StatusOK, healthStatus{Status: "ok", DB: "connected"})
 	}
 }
 
@@ -135,28 +76,28 @@ func routes(cfg config.Config, database *db.DB, blobStore *blobs.Store, eventHub
 		endpoints.Post(strings.TrimPrefix(passwordLoginPath, "/api"),
 			rateLimited(auth.NewRateLimiter(), handlePasswordLogin(cfg, database)))
 	}
-	handleGet(endpoints, "/auth", handleCurrentUser)
-	endpoints.Post("/auth/logout", handleLogout(database))
-	endpoints.Post("/collections", handleClaimCollection(database))
-	handleGet(endpoints, "/collections", handleListCollections(database))
-	handleGet(endpoints, "/collections/{id}", handleGetCollection(database))
-	endpoints.Delete("/collections/{id}", handleDeleteCollection(database))
-	handleGet(endpoints, "/collections/{id}/key", handleGetCollectionKey(database))
-	endpoints.Put("/collections/{id}/key", handlePutCollectionKey(database))
-	handleGet(endpoints, "/collections/{id}/objects", handleListObjects(database))
-	endpoints.Post("/collections/{id}/objects", handleCreateObject(database, publisher))
-	handleGet(endpoints, "/collections/{id}/objects/{objectId}", handleGetObject(database))
-	endpoints.Put("/collections/{id}/objects/{objectId}", handleUpdateObject(database, publisher))
-	endpoints.Delete("/collections/{id}/objects/{objectId}", handleDeleteObject(database, publisher))
+	handleGet(endpoints, "/auth", syncapi.HandleCurrentUser)
+	endpoints.Post("/auth/logout", syncapi.HandleLogout(database))
+	endpoints.Post("/collections", syncapi.HandleClaimCollection(database))
+	handleGet(endpoints, "/collections", syncapi.HandleListCollections(database))
+	handleGet(endpoints, "/collections/{id}", syncapi.HandleGetCollection(database))
+	endpoints.Delete("/collections/{id}", syncapi.HandleDeleteCollection(database))
+	handleGet(endpoints, "/collections/{id}/key", syncapi.HandleGetCollectionKey(database))
+	endpoints.Put("/collections/{id}/key", syncapi.HandlePutCollectionKey(database))
+	handleGet(endpoints, "/collections/{id}/objects", syncapi.HandleListObjects(database))
+	endpoints.Post("/collections/{id}/objects", syncapi.HandleCreateObject(database, publisher, stagedBlobs{}))
+	handleGet(endpoints, "/collections/{id}/objects/{objectId}", syncapi.HandleGetObject(database))
+	endpoints.Put("/collections/{id}/objects/{objectId}", syncapi.HandleUpdateObject(database, publisher, stagedBlobs{}))
+	endpoints.Delete("/collections/{id}/objects/{objectId}", syncapi.HandleDeleteObject(database, publisher))
 	endpoints.Post("/collections/{id}/blob-objects", handleCreateBlobObject(database, blobStore, publisher))
 	endpoints.Put("/collections/{id}/blob-objects/{objectId}", handleUpdateBlobObject(database, blobStore, publisher))
 	endpoints.Post("/collections/{id}/blob-objects/batch", handleBatchBlobObjects(database, blobStore, publisher))
-	handleGet(endpoints, "/collections/{id}/create-mutations/{mutationId}", handleRecoverCreate(database))
+	handleGet(endpoints, "/collections/{id}/create-mutations/{mutationId}", syncapi.HandleRecoverCreate(database))
 	endpoints.Post("/blobs", handleUploadBlob(database, blobStore))
 	endpoints.Post("/blobs/batch", handleBatchFetchBlobs(blobStore))
 	handleGet(endpoints, "/blobs/{userId}/{blobId}", handleDownloadBlob(blobStore))
 	endpoints.Delete("/blobs/{userId}/{blobId}", handleDeleteBlob(database, blobStore))
-	handleGet(endpoints, "/sync/events", handleSyncEvents(eventHub))
+	handleGet(endpoints, "/sync/events", syncapi.HandleSyncEvents(eventHub))
 
 	router := chi.NewRouter()
 	router.Use(
@@ -165,12 +106,12 @@ func routes(cfg config.Config, database *db.DB, blobStore *blobs.Store, eventHub
 		hlog.RemoteAddrHandler("remote_ip"),
 		hlog.UserAgentHandler("user_agent"),
 		hlog.AccessHandler(logAccess),
-		recoverPanic,
+		syncapi.RecoverPanic,
 		matchServeMux,
 	)
 	router.NotFound(http.NotFound)
 	router.MethodNotAllowed(serveMuxMethodNotAllowed(router))
-	handleGet(router, "/", handleCapability(string(cfg.AuthMode)))
+	handleGet(router, "/", syncapi.HandleCapability(syncapi.NewCapability(serverVersion, string(cfg.AuthMode), "closed")))
 	handleGet(router, "/health", handleHealth(database))
 	router.Mount("/api", api)
 	if cfg.DevUI {

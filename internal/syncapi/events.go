@@ -1,4 +1,4 @@
-package main
+package syncapi
 
 import (
 	"encoding/json"
@@ -13,7 +13,9 @@ import (
 
 const syncPingInterval = 25 * time.Second
 
-func handleSyncEvents(hub *events.Hub) http.HandlerFunc {
+// HandleSyncEvents serves GET /api/sync/events, the server-sent event stream
+// of the caller's collection changes.
+func HandleSyncEvents(hub *events.Hub) http.HandlerFunc {
 	return handleSyncEventsWithInterval(hub, syncPingInterval)
 }
 
@@ -25,7 +27,7 @@ func handleSyncEventsWithInterval(hub *events.Hub, pingInterval time.Duration) h
 
 		// Subscribe before sending ready so a mutation cannot land between the
 		// client's initial pull and registration with the hub.
-		sub := hub.Subscribe(sessionFrom(r).User.ID)
+		sub := hub.Subscribe(SessionFrom(r).User.ID)
 		defer hub.Unsubscribe(sub)
 
 		controller := http.NewResponseController(w)

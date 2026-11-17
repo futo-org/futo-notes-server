@@ -1,4 +1,4 @@
-package main
+package syncapi
 
 import (
 	"bytes"
@@ -12,8 +12,7 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// captureLogs sends log output to the returned buffer. Requests log through
-// the logger in their context, which routes() puts there from log.Logger.
+// captureLogs sends log output to the returned buffer.
 func captureLogs(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	previous := log.Logger
@@ -30,7 +29,7 @@ func TestServerError(t *testing.T) {
 	request = request.WithContext(log.Logger.WithContext(request.Context()))
 	response := httptest.NewRecorder()
 
-	serverError(response, request, "loading things", errors.New("database unavailable"))
+	ServerError(response, request, "loading things", errors.New("database unavailable"))
 
 	if response.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500", response.Code)
@@ -54,7 +53,7 @@ func TestServerError(t *testing.T) {
 
 func TestRecoverPanic(t *testing.T) {
 	logs := captureLogs(t)
-	handler := recoverPanic(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+	handler := RecoverPanic(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		panic("broken handler")
 	}))
 	request := httptest.NewRequest(http.MethodPut, "/api/things/1?version=2", nil)
@@ -88,7 +87,7 @@ func TestRecoverPanic(t *testing.T) {
 }
 
 func TestRecoverPanicPropagatesAbortHandler(t *testing.T) {
-	handler := recoverPanic(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+	handler := RecoverPanic(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		panic(http.ErrAbortHandler)
 	}))
 
@@ -104,7 +103,7 @@ func TestRecoverPanicPropagatesAbortHandler(t *testing.T) {
 }
 
 func TestRecoverPanicPassesThrough(t *testing.T) {
-	handler := recoverPanic(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := RecoverPanic(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("X-Test", "untouched")
 		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write([]byte("created"))

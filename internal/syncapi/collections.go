@@ -1,4 +1,4 @@
-package main
+package syncapi
 
 import (
 	"bytes"
@@ -33,78 +33,83 @@ type keyConflictResponse struct {
 	Error      string                  `json:"error"`
 }
 
-func handleClaimCollection(database *db.DB) http.HandlerFunc {
+// HandleClaimCollection serves POST /api/collections.
+func HandleClaimCollection(database *db.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		c, created, err := collections.Claim(r.Context(), database, sessionFrom(r).User.ID)
+		c, created, err := collections.Claim(r.Context(), database, SessionFrom(r).User.ID)
 		if err != nil {
-			serverError(w, r, "claiming collection", err)
+			ServerError(w, r, "claiming collection", err)
 			return
 		}
 		status := http.StatusOK
 		if created {
 			status = http.StatusCreated
 		}
-		writeJSON(w, status, collectionResponse{Collection: c})
+		WriteJSON(w, status, collectionResponse{Collection: c})
 	}
 }
 
-func handleListCollections(database *db.DB) http.HandlerFunc {
+// HandleListCollections serves GET /api/collections.
+func HandleListCollections(database *db.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		cs, err := collections.List(r.Context(), database, sessionFrom(r).User.ID)
+		cs, err := collections.List(r.Context(), database, SessionFrom(r).User.ID)
 		if err != nil {
-			serverError(w, r, "listing collections", err)
+			ServerError(w, r, "listing collections", err)
 			return
 		}
-		writeJSON(w, http.StatusOK, collectionsResponse{Collections: cs})
+		WriteJSON(w, http.StatusOK, collectionsResponse{Collections: cs})
 	}
 }
 
-func handleGetCollection(database *db.DB) http.HandlerFunc {
+// HandleGetCollection serves GET /api/collections/{id}.
+func HandleGetCollection(database *db.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		c, err := collections.Get(r.Context(), database, sessionFrom(r).User.ID, r.PathValue("id"))
+		c, err := collections.Get(r.Context(), database, SessionFrom(r).User.ID, r.PathValue("id"))
 		if errors.Is(err, collections.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "not found")
+			WriteError(w, http.StatusNotFound, "not found")
 			return
 		}
 		if err != nil {
-			serverError(w, r, "getting collection", err)
+			ServerError(w, r, "getting collection", err)
 			return
 		}
-		writeJSON(w, http.StatusOK, collectionResponse{Collection: c})
+		WriteJSON(w, http.StatusOK, collectionResponse{Collection: c})
 	}
 }
 
-func handleDeleteCollection(database *db.DB) http.HandlerFunc {
+// HandleDeleteCollection serves DELETE /api/collections/{id}.
+func HandleDeleteCollection(database *db.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		err := collections.Delete(r.Context(), database, sessionFrom(r).User.ID, r.PathValue("id"))
+		err := collections.Delete(r.Context(), database, SessionFrom(r).User.ID, r.PathValue("id"))
 		if errors.Is(err, collections.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "not found")
+			WriteError(w, http.StatusNotFound, "not found")
 			return
 		}
 		if err != nil {
-			serverError(w, r, "deleting collection", err)
+			ServerError(w, r, "deleting collection", err)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
-func handleGetCollectionKey(database *db.DB) http.HandlerFunc {
+// HandleGetCollectionKey serves GET /api/collections/{id}/key.
+func HandleGetCollectionKey(database *db.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		key, claimed, err := collections.GetKey(r.Context(), database, sessionFrom(r).User.ID, r.PathValue("id"))
+		key, claimed, err := collections.GetKey(r.Context(), database, SessionFrom(r).User.ID, r.PathValue("id"))
 		if errors.Is(err, collections.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "not found")
+			WriteError(w, http.StatusNotFound, "not found")
 			return
 		}
 		if err != nil {
-			serverError(w, r, "getting collection key", err)
+			ServerError(w, r, "getting collection key", err)
 			return
 		}
 		var resp keyResponse
 		if claimed {
 			resp.Key = &key
 		}
-		writeJSON(w, http.StatusOK, resp)
+		WriteJSON(w, http.StatusOK, resp)
 	}
 }
 
@@ -115,7 +120,9 @@ func isJSONObject(raw json.RawMessage) bool {
 	return len(trimmed) > 0 && trimmed[0] == '{'
 }
 
-func handlePutCollectionKey(database *db.DB) http.HandlerFunc {
+// HandlePutCollectionKey serves PUT /api/collections/{id}/key: a first claim,
+// or a rotation when previous_key_updated_at is present.
+func HandlePutCollectionKey(database *db.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			KeySalt              *string         `json:"key_salt"`
@@ -124,23 +131,23 @@ func handlePutCollectionKey(database *db.DB) http.HandlerFunc {
 			PreviousKeyUpdatedAt *string         `json:"previous_key_updated_at"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid json")
+			WriteError(w, http.StatusBadRequest, "invalid json")
 			return
 		}
 		if body.KeySalt == nil || *body.KeySalt == "" {
-			writeError(w, http.StatusBadRequest, "key_salt is required")
+			WriteError(w, http.StatusBadRequest, "key_salt is required")
 			return
 		}
 		if body.EncryptedVaultKey == nil || *body.EncryptedVaultKey == "" {
-			writeError(w, http.StatusBadRequest, "encrypted_vault_key is required")
+			WriteError(w, http.StatusBadRequest, "encrypted_vault_key is required")
 			return
 		}
 		if body.KeyKDF == nil || !isJSONObject(body.KeyKDF) {
-			writeError(w, http.StatusBadRequest, "key_kdf must be an object")
+			WriteError(w, http.StatusBadRequest, "key_kdf must be an object")
 			return
 		}
 		if body.PreviousKeyUpdatedAt != nil && *body.PreviousKeyUpdatedAt == "" {
-			writeError(w, http.StatusBadRequest, "previous_key_updated_at must be non-empty when present")
+			WriteError(w, http.StatusBadRequest, "previous_key_updated_at must be non-empty when present")
 			return
 		}
 
@@ -150,20 +157,20 @@ func handlePutCollectionKey(database *db.DB) http.HandlerFunc {
 			EncryptedVaultKey: *body.EncryptedVaultKey,
 		}
 		key, err := collections.PutKey(r.Context(), database,
-			sessionFrom(r).User.ID, r.PathValue("id"), in, body.PreviousKeyUpdatedAt)
+			SessionFrom(r).User.ID, r.PathValue("id"), in, body.PreviousKeyUpdatedAt)
 		if conflict, ok := errors.AsType[*collections.KeyConflictError](err); ok {
-			writeJSON(w, http.StatusConflict, keyConflictResponse{CurrentKey: conflict.Current, Error: "key conflict"})
+			WriteJSON(w, http.StatusConflict, keyConflictResponse{CurrentKey: conflict.Current, Error: "key conflict"})
 			return
 		}
 		switch {
 		case errors.Is(err, collections.ErrNotFound):
-			writeError(w, http.StatusNotFound, "not found")
+			WriteError(w, http.StatusNotFound, "not found")
 		case errors.Is(err, collections.ErrNoCurrentKey):
-			writeError(w, http.StatusBadRequest, "no existing key to rotate")
+			WriteError(w, http.StatusBadRequest, "no existing key to rotate")
 		case err != nil:
-			serverError(w, r, "putting collection key", err)
+			ServerError(w, r, "putting collection key", err)
 		default:
-			writeJSON(w, http.StatusOK, keyResponse{Key: &key})
+			WriteJSON(w, http.StatusOK, keyResponse{Key: &key})
 		}
 	}
 }

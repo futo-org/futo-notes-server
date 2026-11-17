@@ -15,6 +15,7 @@ import (
 	"futo-notes-server/internal/blobs"
 	"futo-notes-server/internal/db"
 	"futo-notes-server/internal/objects"
+	"futo-notes-server/internal/syncapi"
 )
 
 // maxBlobBytes caps one blob upload body at 100 MiB. A protocol limit, not
@@ -49,19 +50,19 @@ func handleUploadBlob(database *db.DB, store *blobs.Store) http.HandlerFunc {
 			return
 		}
 
-		key, err := blobs.Stage(r.Context(), database, store, sessionFrom(r).User.ID, body)
+		key, err := blobs.Stage(r.Context(), database, store, syncapi.SessionFrom(r).User.ID, body)
 		if err != nil {
-			serverError(w, r, "staging blob", err)
+			syncapi.ServerError(w, r, "staging blob", err)
 			return
 		}
-		writeJSON(w, http.StatusCreated, uploadBlobResponse{Key: key})
+		syncapi.WriteJSON(w, http.StatusCreated, uploadBlobResponse{Key: key})
 	}
 }
 
 // blobKeyFrom rebuilds the storage key from the path. A key naming another
 // user, or a malformed one, is reported as absent rather than forbidden.
 func blobKeyFrom(r *http.Request) (string, bool) {
-	userID := sessionFrom(r).User.ID
+	userID := syncapi.SessionFrom(r).User.ID
 	key := r.PathValue("userId") + "/" + r.PathValue("blobId")
 	return key, objects.ValidBlobKey(userID, key)
 }
@@ -70,7 +71,7 @@ func handleDownloadBlob(store *blobs.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		key, ok := blobKeyFrom(r)
 		if !ok {
-			writeError(w, http.StatusNotFound, "not found")
+			syncapi.WriteError(w, http.StatusNotFound, "not found")
 			return
 		}
 		// Disk is what the client can actually read: the ledger state decides
@@ -78,16 +79,16 @@ func handleDownloadBlob(store *blobs.Store) http.HandlerFunc {
 		file, err := store.Open(key)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
-				writeError(w, http.StatusNotFound, "not found")
+				syncapi.WriteError(w, http.StatusNotFound, "not found")
 				return
 			}
-			serverError(w, r, "opening blob", err)
+			syncapi.ServerError(w, r, "opening blob", err)
 			return
 		}
 		defer file.Close()
 		info, err := file.Stat()
 		if err != nil {
-			serverError(w, r, "stating blob", err)
+			syncapi.ServerError(w, r, "stating blob", err)
 			return
 		}
 		w.Header().Set("Content-Type", "application/octet-stream")
@@ -99,16 +100,16 @@ func handleDeleteBlob(database *db.DB, store *blobs.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		key, ok := blobKeyFrom(r)
 		if !ok {
-			writeError(w, http.StatusNotFound, "not found")
+			syncapi.WriteError(w, http.StatusNotFound, "not found")
 			return
 		}
-		deleted, err := blobs.Delete(r.Context(), database, store, sessionFrom(r).User.ID, key)
+		deleted, err := blobs.Delete(r.Context(), database, store, syncapi.SessionFrom(r).User.ID, key)
 		if err != nil {
-			serverError(w, r, "deleting blob", err)
+			syncapi.ServerError(w, r, "deleting blob", err)
 			return
 		}
 		if !deleted {
-			writeError(w, http.StatusConflict, "blob is in use")
+			syncapi.WriteError(w, http.StatusConflict, "blob is in use")
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -117,7 +118,7 @@ func handleDeleteBlob(database *db.DB, store *blobs.Store) http.HandlerFunc {
 
 func handleBatchFetchBlobs(store *blobs.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		body, ok := readLimitedBody(w, r, maxBatchFetchBody, "request too large")
+		body, ok := syncapi.ReadLimitedBody(w, r, maxBatchFetchBody, "request too large")
 		if !ok {
 			return
 		}
@@ -127,25 +128,25 @@ func handleBatchFetchBlobs(store *blobs.Store) http.HandlerFunc {
 			Keys []*string `json:"keys"`
 		}
 		if err := json.Unmarshal(body, &request); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid json")
+			syncapi.WriteError(w, http.StatusBadRequest, "invalid json")
 			return
 		}
 		if len(request.Keys) == 0 {
-			writeError(w, http.StatusBadRequest, "keys must not be empty")
+			syncapi.WriteError(w, http.StatusBadRequest, "keys must not be empty")
 			return
 		}
 		if len(request.Keys) > maxBatchFetchKeys {
-			writeError(w, http.StatusBadRequest, fmt.Sprintf("too many keys (max %d)", maxBatchFetchKeys))
+			syncapi.WriteError(w, http.StatusBadRequest, fmt.Sprintf("too many keys (max %d)", maxBatchFetchKeys))
 			return
 		}
 		keys := make([]string, 0, len(request.Keys))
 		for _, key := range request.Keys {
 			if key == nil {
-				writeError(w, http.StatusBadRequest, "keys must be strings")
+				syncapi.WriteError(w, http.StatusBadRequest, "keys must be strings")
 				return
 			}
 			if utf8.RuneCountInString(*key) > maxBatchKeyChars {
-				writeError(w, http.StatusBadRequest, fmt.Sprintf("key too long (max %d chars)", maxBatchKeyChars))
+				syncapi.WriteError(w, http.StatusBadRequest, fmt.Sprintf("key too long (max %d chars)", maxBatchKeyChars))
 				return
 			}
 			keys = append(keys, *key)
@@ -153,7 +154,7 @@ func handleBatchFetchBlobs(store *blobs.Store) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.WriteHeader(http.StatusOK)
-		if err := streamBlobBatch(w, store, sessionFrom(r).User.ID, keys); err != nil {
+		if err := streamBlobBatch(w, store, syncapi.SessionFrom(r).User.ID, keys); err != nil {
 			hlog.FromRequest(r).Error().Err(err).Str("method", r.Method).Str("path", r.URL.Path).Msg("streaming blob batch")
 			// The status line is already out, so there is no error frame to
 			// send. Drop the connection and let the client retry a transfer it

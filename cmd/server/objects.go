@@ -5,9 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
-	"strconv"
 	"unicode/utf8"
 
 	"github.com/rs/zerolog/hlog"
@@ -17,245 +15,64 @@ import (
 	"futo-notes-server/internal/events"
 	"futo-notes-server/internal/ids"
 	"futo-notes-server/internal/objects"
+	"futo-notes-server/internal/syncapi"
 )
 
 const (
 	maxBatchBytes   = 32 << 20
 	maxBatchEntries = 200
-	maxPullLimit    = 1000
 )
 
-func mutationID(r *http.Request) (string, bool) {
-	values := r.Header.Values("Mutation-Id")
-	if len(values) == 0 {
-		return "", true
+// stagedBlobs reads the blob of an object create or update as the self-hosted
+// server names it: a blob_key the caller staged with POST /api/blobs, and its
+// size_bytes, which is validated but not used.
+type stagedBlobs struct{}
+
+func (stagedBlobs) ReadCreate(r *http.Request) (objects.Blob, error) {
+	var body struct {
+		BlobKey   *string `json:"blob_key"`
+		SizeBytes *int64  `json:"size_bytes"`
 	}
-	if len(values) != 1 {
-		return "", false
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		return objects.Blob{}, errors.New("invalid json")
 	}
-	return values[0], objects.ValidMutationID(values[0])
+	if body.BlobKey == nil || !objects.ValidBlobKey(syncapi.SessionFrom(r).User.ID, *body.BlobKey) {
+		return objects.Blob{}, errors.New("invalid blob_key")
+	}
+	if body.SizeBytes == nil || *body.SizeBytes < 0 {
+		return objects.Blob{}, errors.New("invalid size_bytes")
+	}
+	return objects.StagedBlob(*body.BlobKey), nil
 }
 
-func parseNonnegative(value string) (int64, bool) {
-	n, err := strconv.ParseInt(value, 10, 64)
-	return n, err == nil && n >= 0
-}
-
-func parsePositive(value string) (int64, bool) {
-	n, ok := parseNonnegative(value)
-	return n, ok && n > 0
-}
-
-// writeObjectError answers with the response an objects failure maps to.
-// Anything that is not a domain failure is logged under action and answered
-// with a 500.
-func writeObjectError(w http.ResponseWriter, r *http.Request, action string, err error) {
-	if conflict, ok := errors.AsType[*objects.ConflictError](err); ok {
-		writeJSON(w, http.StatusConflict, conflict.Conflict)
-		return
+func (stagedBlobs) ReadUpdate(r *http.Request) (int64, objects.Blob, error) {
+	var body struct {
+		Version   *int64  `json:"version"`
+		BlobKey   *string `json:"blob_key"`
+		SizeBytes *int64  `json:"size_bytes"`
 	}
-	switch {
-	case errors.Is(err, objects.ErrNotFound):
-		writeError(w, http.StatusNotFound, "not found")
-	case errors.Is(err, objects.ErrBlobNotStaged):
-		writeError(w, http.StatusConflict, "blob is not staged")
-	case errors.Is(err, objects.ErrMutationMismatch):
-		writeError(w, http.StatusConflict, "Mutation-Id reused for different intent")
-	case errors.Is(err, objects.ErrMutationPending):
-		writeError(w, http.StatusConflict, "mutation still in progress")
-	default:
-		serverError(w, r, action, err)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		return 0, objects.Blob{}, errors.New("invalid json")
 	}
-}
-
-// listObjectsResponse keeps the key order a sorted map gave the wire.
-// HasMore and NextCursor are present only for a limited pull.
-type listObjectsResponse struct {
-	HasMore    *bool            `json:"hasMore,omitempty"`
-	NextCursor *int64           `json:"nextCursor,omitempty"`
-	Objects    []objects.Object `json:"objects"`
-}
-
-type objectResponse struct {
-	Object objects.Object `json:"object"`
-}
-
-func handleListObjects(database *db.DB) http.HandlerFunc {
-	store := objects.New(database, nil)
-	return func(w http.ResponseWriter, r *http.Request) {
-		var since int64
-		if value := r.URL.Query().Get("sinceVersion"); value != "" {
-			var ok bool
-			since, ok = parseNonnegative(value)
-			if !ok {
-				writeError(w, http.StatusBadRequest, "invalid sinceVersion")
-				return
-			}
-		}
-		var limit *int
-		if value := r.URL.Query().Get("limit"); value != "" {
-			n, err := strconv.Atoi(value)
-			if err != nil || n < 1 {
-				writeError(w, http.StatusBadRequest, "invalid limit")
-				return
-			}
-			limit = new(min(n, maxPullLimit))
-		}
-
-		rows, hasMore, err := store.List(r.Context(), sessionFrom(r).User.ID, r.PathValue("id"), since, limit)
-		if err != nil {
-			writeObjectError(w, r, "listing objects", err)
-			return
-		}
-		response := listObjectsResponse{Objects: rows}
-		if limit != nil {
-			next := since
-			if len(rows) > 0 {
-				next = rows[len(rows)-1].ChangeSeq
-			}
-			response.HasMore, response.NextCursor = &hasMore, &next
-		}
-		writeJSON(w, http.StatusOK, response)
+	if body.Version == nil || *body.Version < 1 {
+		return 0, objects.Blob{}, errors.New("invalid version")
 	}
-}
-
-func handleGetObject(database *db.DB) http.HandlerFunc {
-	store := objects.New(database, nil)
-	return func(w http.ResponseWriter, r *http.Request) {
-		o, err := store.Get(r.Context(), sessionFrom(r).User.ID, r.PathValue("id"), r.PathValue("objectId"))
-		if err != nil {
-			writeObjectError(w, r, "getting object", err)
-			return
-		}
-		writeJSON(w, http.StatusOK, objectResponse{Object: o})
+	if body.BlobKey == nil || !objects.ValidBlobKey(syncapi.SessionFrom(r).User.ID, *body.BlobKey) {
+		return 0, objects.Blob{}, errors.New("invalid blob_key")
 	}
-}
-
-func handleCreateObject(database *db.DB, publisher events.Publisher) http.HandlerFunc {
-	store := objects.New(database, publisher)
-	return func(w http.ResponseWriter, r *http.Request) {
-		mID, ok := mutationID(r)
-		if !ok {
-			writeError(w, http.StatusBadRequest, "invalid Mutation-Id")
-			return
-		}
-		var body struct {
-			BlobKey   *string `json:"blob_key"`
-			SizeBytes *int64  `json:"size_bytes"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid json")
-			return
-		}
-		userID := sessionFrom(r).User.ID
-		if body.BlobKey == nil || !objects.ValidBlobKey(userID, *body.BlobKey) {
-			writeError(w, http.StatusBadRequest, "invalid blob_key")
-			return
-		}
-		if body.SizeBytes == nil || *body.SizeBytes < 0 {
-			writeError(w, http.StatusBadRequest, "invalid size_bytes")
-			return
-		}
-		m := objects.Mutation{UserID: userID, CollectionID: r.PathValue("id"), MutationID: mID}
-		response, err := store.Create(r.Context(), m, *body.BlobKey)
-		if err != nil {
-			writeObjectError(w, r, "creating object", err)
-			return
-		}
-		writeJSON(w, http.StatusCreated, response)
+	if body.SizeBytes == nil || *body.SizeBytes < 0 {
+		return 0, objects.Blob{}, errors.New("invalid size_bytes")
 	}
-}
-
-func handleUpdateObject(database *db.DB, publisher events.Publisher) http.HandlerFunc {
-	store := objects.New(database, publisher)
-	return func(w http.ResponseWriter, r *http.Request) {
-		mID, ok := mutationID(r)
-		if !ok {
-			writeError(w, http.StatusBadRequest, "invalid Mutation-Id")
-			return
-		}
-		var body struct {
-			Version   *int64  `json:"version"`
-			BlobKey   *string `json:"blob_key"`
-			SizeBytes *int64  `json:"size_bytes"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid json")
-			return
-		}
-		userID := sessionFrom(r).User.ID
-		if body.Version == nil || *body.Version < 1 {
-			writeError(w, http.StatusBadRequest, "invalid version")
-			return
-		}
-		if body.BlobKey == nil || !objects.ValidBlobKey(userID, *body.BlobKey) {
-			writeError(w, http.StatusBadRequest, "invalid blob_key")
-			return
-		}
-		if body.SizeBytes == nil || *body.SizeBytes < 0 {
-			writeError(w, http.StatusBadRequest, "invalid size_bytes")
-			return
-		}
-		m := objects.Mutation{UserID: userID, CollectionID: r.PathValue("id"), ObjectID: r.PathValue("objectId"), MutationID: mID}
-		response, err := store.Update(r.Context(), m, *body.BlobKey, *body.Version)
-		if err != nil {
-			writeObjectError(w, r, "updating object", err)
-			return
-		}
-		writeJSON(w, http.StatusOK, response)
-	}
-}
-
-func handleDeleteObject(database *db.DB, publisher events.Publisher) http.HandlerFunc {
-	store := objects.New(database, publisher)
-	return func(w http.ResponseWriter, r *http.Request) {
-		mID, ok := mutationID(r)
-		if !ok {
-			writeError(w, http.StatusBadRequest, "invalid Mutation-Id")
-			return
-		}
-		var expected *int64
-		if value := r.URL.Query().Get("version"); value != "" {
-			version, ok := parsePositive(value)
-			if !ok {
-				writeError(w, http.StatusBadRequest, "invalid version")
-				return
-			}
-			expected = &version
-		}
-		m := objects.Mutation{UserID: sessionFrom(r).User.ID, CollectionID: r.PathValue("id"),
-			ObjectID: r.PathValue("objectId"), MutationID: mID}
-		response, err := store.Delete(r.Context(), m, expected)
-		if err != nil {
-			writeObjectError(w, r, "deleting object", err)
-			return
-		}
-		writeJSON(w, http.StatusOK, response)
-	}
-}
-
-// readLimitedBody reads at most limit bytes of the request body. A longer
-// body is answered with 413 and tooLarge as the message.
-func readLimitedBody(w http.ResponseWriter, r *http.Request, limit int64, tooLarge string) ([]byte, bool) {
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
-	if err == nil {
-		return body, true
-	}
-	if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
-		writeError(w, http.StatusRequestEntityTooLarge, tooLarge)
-	} else {
-		writeError(w, http.StatusBadRequest, "could not read body")
-	}
-	return nil, false
+	return *body.Version, objects.StagedBlob(*body.BlobKey), nil
 }
 
 func readBlobBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
-	body, ok := readLimitedBody(w, r, maxBlobBytes, "blob too large")
+	body, ok := syncapi.ReadLimitedBody(w, r, maxBlobBytes, "blob too large")
 	if !ok {
 		return nil, false
 	}
 	if len(body) == 0 {
-		writeError(w, http.StatusBadRequest, "empty body")
+		syncapi.WriteError(w, http.StatusBadRequest, "empty body")
 		return nil, false
 	}
 	return body, true
@@ -264,16 +81,16 @@ func readBlobBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
 func handleCreateBlobObject(database *db.DB, blobStore *blobs.Store, publisher events.Publisher) http.HandlerFunc {
 	store := objects.New(database, publisher)
 	return func(w http.ResponseWriter, r *http.Request) {
-		mID, ok := mutationID(r)
+		mID, ok := syncapi.MutationID(r)
 		if !ok {
-			writeError(w, http.StatusBadRequest, "invalid Mutation-Id")
+			syncapi.WriteError(w, http.StatusBadRequest, "invalid Mutation-Id")
 			return
 		}
 		body, ok := readBlobBody(w, r)
 		if !ok {
 			return
 		}
-		userID := sessionFrom(r).User.ID
+		userID := syncapi.SessionFrom(r).User.ID
 		// The Mutation ID is claimed before any ciphertext is staged, so
 		// recovery reports a pending create rather than a missing one while
 		// this request commits, and a replay of a completed create answers
@@ -281,74 +98,57 @@ func handleCreateBlobObject(database *db.DB, blobStore *blobs.Store, publisher e
 		reservation, err := store.ReserveCreate(r.Context(),
 			objects.Mutation{UserID: userID, CollectionID: r.PathValue("id"), MutationID: mID})
 		if err != nil {
-			writeObjectError(w, r, "reserving inline create mutation", err)
+			syncapi.WriteObjectError(w, r, "reserving inline create mutation", err)
 			return
 		}
 		if reservation.Replay != nil {
-			writeJSON(w, http.StatusCreated, *reservation.Replay)
+			syncapi.WriteJSON(w, http.StatusCreated, *reservation.Replay)
 			return
 		}
 		key, err := blobs.Stage(r.Context(), database, blobStore, userID, body)
 		if err != nil {
-			serverError(w, r, "staging inline create blob", err)
+			syncapi.ServerError(w, r, "staging inline create blob", err)
 			return
 		}
-		response, err := store.CreateReserved(r.Context(), reservation, key)
+		response, err := store.CreateReserved(r.Context(), reservation, objects.StagedBlob(key))
 		if err != nil {
-			writeObjectError(w, r, "creating inline blob object", err)
+			syncapi.WriteObjectError(w, r, "creating inline blob object", err)
 			return
 		}
-		writeJSON(w, http.StatusCreated, response)
+		syncapi.WriteJSON(w, http.StatusCreated, response)
 	}
 }
 
 func handleUpdateBlobObject(database *db.DB, blobStore *blobs.Store, publisher events.Publisher) http.HandlerFunc {
 	store := objects.New(database, publisher)
 	return func(w http.ResponseWriter, r *http.Request) {
-		mID, ok := mutationID(r)
+		mID, ok := syncapi.MutationID(r)
 		if !ok {
-			writeError(w, http.StatusBadRequest, "invalid Mutation-Id")
+			syncapi.WriteError(w, http.StatusBadRequest, "invalid Mutation-Id")
 			return
 		}
-		version, ok := parsePositive(r.URL.Query().Get("version"))
+		version, ok := syncapi.ParsePositive(r.URL.Query().Get("version"))
 		if !ok {
-			writeError(w, http.StatusBadRequest, "invalid version")
+			syncapi.WriteError(w, http.StatusBadRequest, "invalid version")
 			return
 		}
 		body, ok := readBlobBody(w, r)
 		if !ok {
 			return
 		}
-		userID := sessionFrom(r).User.ID
+		userID := syncapi.SessionFrom(r).User.ID
 		key, err := blobs.Stage(r.Context(), database, blobStore, userID, body)
 		if err != nil {
-			serverError(w, r, "staging inline update blob", err)
+			syncapi.ServerError(w, r, "staging inline update blob", err)
 			return
 		}
 		m := objects.Mutation{UserID: userID, CollectionID: r.PathValue("id"), ObjectID: r.PathValue("objectId"), MutationID: mID}
-		response, err := store.Update(r.Context(), m, key, version)
+		response, err := store.Update(r.Context(), m, objects.StagedBlob(key), version)
 		if err != nil {
-			writeObjectError(w, r, "updating inline blob object", err)
+			syncapi.WriteObjectError(w, r, "updating inline blob object", err)
 			return
 		}
-		writeJSON(w, http.StatusOK, response)
-	}
-}
-
-func handleRecoverCreate(database *db.DB) http.HandlerFunc {
-	store := objects.New(database, nil)
-	return func(w http.ResponseWriter, r *http.Request) {
-		mID := r.PathValue("mutationId")
-		if !objects.ValidMutationID(mID) {
-			writeError(w, http.StatusBadRequest, "invalid Mutation-Id")
-			return
-		}
-		response, err := store.RecoverCreate(r.Context(), sessionFrom(r).User.ID, r.PathValue("id"), mID)
-		if err != nil {
-			writeObjectError(w, r, "recovering create mutation", err)
-			return
-		}
-		writeJSON(w, http.StatusOK, response)
+		syncapi.WriteJSON(w, http.StatusOK, response)
 	}
 }
 
@@ -462,18 +262,18 @@ var batchInternalError = batchStatusResult{Error: "internal server error", Statu
 func handleBatchBlobObjects(database *db.DB, blobStore *blobs.Store, publisher events.Publisher) http.HandlerFunc {
 	store := objects.New(database, publisher)
 	return func(w http.ResponseWriter, r *http.Request) {
-		body, ok := readLimitedBody(w, r, maxBatchBytes, "request too large")
+		body, ok := syncapi.ReadLimitedBody(w, r, maxBatchBytes, "request too large")
 		if !ok {
 			return
 		}
 		entries, err := parseBatch(body)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
+			syncapi.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		userID, collectionID := sessionFrom(r).User.ID, r.PathValue("id")
+		userID, collectionID := syncapi.SessionFrom(r).User.ID, r.PathValue("id")
 		if err := store.CheckCollection(r.Context(), userID, collectionID); err != nil {
-			writeObjectError(w, r, "checking collection for blob object batch", err)
+			syncapi.WriteObjectError(w, r, "checking collection for blob object batch", err)
 			return
 		}
 		apply := batchApplier{database: database, objects: store, blobs: blobStore, userID: userID, collectionID: collectionID}
@@ -481,7 +281,7 @@ func handleBatchBlobObjects(database *db.DB, blobStore *blobs.Store, publisher e
 		for _, entry := range entries {
 			results = append(results, apply.entry(r, entry))
 		}
-		writeJSON(w, http.StatusOK, batchResponse{Results: results})
+		syncapi.WriteJSON(w, http.StatusOK, batchResponse{Results: results})
 	}
 }
 
@@ -526,9 +326,9 @@ func (b batchApplier) entry(r *http.Request, entry batchEntry) any {
 	}
 	var response objects.MutationResponse
 	if entry.Operation == opCreate {
-		response, err = b.objects.CreateReserved(r.Context(), reservation, key)
+		response, err = b.objects.CreateReserved(r.Context(), reservation, objects.StagedBlob(key))
 	} else {
-		response, err = b.objects.Update(r.Context(), m, key, int64(entry.Version))
+		response, err = b.objects.Update(r.Context(), m, objects.StagedBlob(key), int64(entry.Version))
 	}
 	if err != nil {
 		result, unexpected := batchFailure(err)

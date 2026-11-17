@@ -1,4 +1,4 @@
-package main
+package syncapi
 
 // Golden bytes for every JSON shape that crosses the wire. Go 1.27 swaps
 // encoding/json's implementation for v2, which is claimed to preserve v1
@@ -48,59 +48,51 @@ func TestResponseWireFormat(t *testing.T) {
 	}{{
 		name: "capability",
 		write: func(w http.ResponseWriter) {
-			handleCapability("password")(w, httptest.NewRequest(http.MethodGet, "/", nil))
+			HandleCapability(NewCapability("0.1.0", "password", "closed"))(w, httptest.NewRequest(http.MethodGet, "/", nil))
 		},
 		want: `{"name":"futo-notes","version":"0.1.0","auth_mode":"password","signup":"closed","billing":false,"mutation_ids":{"supported":true,"required":false,"retention_days":30,"successful_create_outcomes":"durable"}}`,
 	}, {
-		name:  "health ok",
-		write: func(w http.ResponseWriter) { writeJSON(w, 200, healthStatus{Status: "ok", DB: "connected"}) },
-		want:  `{"status":"ok","db":"connected"}`,
-	}, {
-		name:  "health degraded",
-		write: func(w http.ResponseWriter) { writeJSON(w, 503, healthStatus{Status: "degraded", DB: "unreachable"}) },
-		want:  `{"status":"degraded","db":"unreachable"}`,
-	}, {
 		name:  "error",
-		write: func(w http.ResponseWriter) { writeError(w, 404, "not found") },
+		write: func(w http.ResponseWriter) { WriteError(w, 404, "not found") },
 		want:  `{"error":"not found"}`,
 	}, {
 		// The 401 body clients key off to distinguish a dead session from
 		// missing credentials.
 		name: "invalid session",
 		write: func(w http.ResponseWriter) {
-			writeJSON(w, 401, map[string]string{"error": "session expired or invalid", "code": "invalid_session"})
+			WriteJSON(w, 401, map[string]string{"error": "session expired or invalid", "code": "invalid_session"})
 		},
 		want: `{"code":"invalid_session","error":"session expired or invalid"}`,
 	}, {
 		name:  "current user",
-		write: func(w http.ResponseWriter) { writeJSON(w, 200, map[string]any{"user": testUser}) },
+		write: func(w http.ResponseWriter) { WriteJSON(w, 200, map[string]any{"user": testUser}) },
 		want:  `{"user":{"id":"0195e2a1-0000-7000-8000-000000000001","email":"local@futo-notes.local","name":"FUTO Notes"}}`,
 	}, {
 		name: "login",
 		write: func(w http.ResponseWriter) {
-			writeJSON(w, 200, map[string]any{"user": testUser, "token": strings.Repeat("ab", 32)})
+			WriteJSON(w, 200, map[string]any{"user": testUser, "token": strings.Repeat("ab", 32)})
 		},
 		want: `{"token":"abababababababababababababababababababababababababababababababab","user":{"id":"0195e2a1-0000-7000-8000-000000000001","email":"local@futo-notes.local","name":"FUTO Notes"}}`,
 	}, {
 		name:  "collection",
-		write: func(w http.ResponseWriter) { writeJSON(w, 201, collectionResponse{Collection: testCollection}) },
+		write: func(w http.ResponseWriter) { WriteJSON(w, 201, collectionResponse{Collection: testCollection}) },
 		want:  `{"collection":{"id":"0195e2a1-0000-7000-8000-000000000002","user_id":"0195e2a1-0000-7000-8000-000000000001","current_version":"42","created_at":"2026-02-03T04:05:06Z"}}`,
 	}, {
 		name: "collections empty",
 		write: func(w http.ResponseWriter) {
-			writeJSON(w, 200, collectionsResponse{Collections: []collections.Collection{}})
+			WriteJSON(w, 200, collectionsResponse{Collections: []collections.Collection{}})
 		},
 		want: `{"collections":[]}`,
 	}, {
 		name: "collections nil slice",
 		write: func(w http.ResponseWriter) {
-			writeJSON(w, 200, collectionsResponse{})
+			WriteJSON(w, 200, collectionsResponse{})
 		},
 		want: `{"collections":null}`,
 	}, {
 		name: "collections list",
 		write: func(w http.ResponseWriter) {
-			writeJSON(w, 200, collectionsResponse{Collections: []collections.Collection{testCollection}})
+			WriteJSON(w, 200, collectionsResponse{Collections: []collections.Collection{testCollection}})
 		},
 		want: `{"collections":[{"id":"0195e2a1-0000-7000-8000-000000000002","user_id":"0195e2a1-0000-7000-8000-000000000001","current_version":"42","created_at":"2026-02-03T04:05:06Z"}]}`,
 	}, {
@@ -108,23 +100,23 @@ func TestResponseWireFormat(t *testing.T) {
 		// key_updated_at must render with nanoseconds because it is the
 		// rotation token the client echoes back.
 		name:  "key",
-		write: func(w http.ResponseWriter) { writeJSON(w, 200, keyResponse{Key: &testKey}) },
+		write: func(w http.ResponseWriter) { WriteJSON(w, 200, keyResponse{Key: &testKey}) },
 		want:  `{"key":{"key_salt":"c2FsdA==","key_kdf":{"name":"scrypt","N":16384},"encrypted_vault_key":"ZW5jcnlwdGVk","key_updated_at":"2026-02-03T04:05:06.123456789Z"}}`,
 	}, {
 		name:  "key unclaimed",
-		write: func(w http.ResponseWriter) { writeJSON(w, 200, keyResponse{}) },
+		write: func(w http.ResponseWriter) { WriteJSON(w, 200, keyResponse{}) },
 		want:  `{"key":null}`,
 	}, {
 		name: "key conflict",
 		write: func(w http.ResponseWriter) {
-			writeJSON(w, 409, keyConflictResponse{CurrentKey: testKey, Error: "key conflict"})
+			WriteJSON(w, 409, keyConflictResponse{CurrentKey: testKey, Error: "key conflict"})
 		},
 		want: `{"currentKey":{"key_salt":"c2FsdA==","key_kdf":{"name":"scrypt","N":16384},"encrypted_vault_key":"ZW5jcnlwdGVk","key_updated_at":"2026-02-03T04:05:06.123456789Z"},"error":"key conflict"}`,
 	}, {
 		// v1 escapes <, > and & in strings and inside RawMessage.
 		name: "html escaping",
 		write: func(w http.ResponseWriter) {
-			writeJSON(w, 200, keyResponse{Key: &collections.KeyMaterial{
+			WriteJSON(w, 200, keyResponse{Key: &collections.KeyMaterial{
 				KeySalt:           "a<b>c&d",
 				KeyKDF:            json.RawMessage(`{"note":"<x&y>"}`),
 				EncryptedVaultKey: "e",
@@ -148,7 +140,7 @@ func TestResponseWireFormat(t *testing.T) {
 	}
 }
 
-// putKeyBody mirrors the request body decoded by handlePutCollectionKey. The
+// putKeyBody mirrors the request body decoded by HandlePutCollectionKey. The
 // pointer fields carry meaning: previous_key_updated_at absent or null is a
 // claim, present is a rotation.
 type putKeyBody struct {
@@ -276,27 +268,5 @@ func TestPutKeyBodyDecoding(t *testing.T) {
 			}
 			tc.check(t, b)
 		})
-	}
-}
-
-func TestLoginBodyDecoding(t *testing.T) {
-	var body struct {
-		Password string `json:"password"`
-	}
-	if err := json.NewDecoder(strings.NewReader(`{"password":"hunter2"}`)).Decode(&body); err != nil {
-		t.Fatal(err)
-	}
-	if body.Password != "hunter2" {
-		t.Fatalf("Password = %q, want hunter2", body.Password)
-	}
-
-	// An absent password is a 400 from the empty-string check, not a decode
-	// error.
-	body.Password = ""
-	if err := json.NewDecoder(strings.NewReader(`{}`)).Decode(&body); err != nil {
-		t.Fatalf("empty object: %v", err)
-	}
-	if body.Password != "" {
-		t.Fatalf("Password = %q, want empty", body.Password)
 	}
 }

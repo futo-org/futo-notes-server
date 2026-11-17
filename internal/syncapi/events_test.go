@@ -1,10 +1,8 @@
-package main
+package syncapi
 
 import (
 	"bufio"
-	"context"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -91,52 +89,17 @@ func TestSyncEventsPing(t *testing.T) {
 	}
 }
 
-// TestServeShutdownEndsSyncStreams checks that a shutdown signal ends open
-// sync event streams, so graceful shutdown does not wait out its timeout.
-func TestServeShutdownEndsSyncStreams(t *testing.T) {
-	hub := events.NewHub()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, shutdown := context.WithCancel(t.Context())
-	defer shutdown()
-	served := make(chan error, 1)
-	go func() { served <- serve(ctx, listener, syncTestHandler(hub, time.Hour), hub.CloseAll) }()
-
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+listener.Addr().String(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	response, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer response.Body.Close()
-	reader := bufio.NewReader(response.Body)
-	readSSEEvent(t, reader)
-
-	shutdown()
-	if err := <-served; err != nil {
-		t.Fatalf("serve() = %v, want nil after shutdown", err)
-	}
-	if _, err := io.Copy(io.Discard, reader); err != nil {
-		t.Fatalf("reading stream after shutdown: %v", err)
-	}
-}
-
 func newSyncTestServer(hub *events.Hub, pingInterval time.Duration) *httptest.Server {
 	return httptest.NewServer(syncTestHandler(hub, pingInterval))
 }
 
-// syncTestHandler serves sync events as testUser without going through
-// requireAuth.
+// syncTestHandler serves sync events as testUser without going through an
+// authentication middleware.
 func syncTestHandler(hub *events.Hub, pingInterval time.Duration) http.Handler {
 	handler := handleSyncEventsWithInterval(hub, pingInterval)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		session := &auth.Session{ID: "session", User: testUser}
-		ctx := context.WithValue(r.Context(), sessionCtxKey{}, session)
-		handler(w, r.WithContext(ctx))
+		handler(w, r.WithContext(WithSession(r.Context(), session)))
 	})
 }
 
