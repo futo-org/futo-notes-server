@@ -25,6 +25,9 @@
 #   HOSTED_STACK_OIDC_PORT      8192
 #   HOSTED_STACK_POSTGRES_PORT  15532
 #   HOSTED_STACK_MINIO_PORT     19000
+# The API runs with DEV_UI and the mock web payment provider, so billing is
+# on: a test user writes only once subscribed, through the mock checkout
+# (POST /api/billing/checkout, then POST the URL it returns).
 # HOSTED_STACK_DIR holds the stack's state and its service logs
 # (logs/<service>.log), by default $TMPDIR/futo-notes-hosted-stack. Give every
 # command the same one.
@@ -249,6 +252,9 @@ up() {
     API_SIGNING_KEY="$(cat "$keys/api.key.pem")"
     STORAGE_REFRESH_ROTATION_KEY="$(cat "$keys/storage-refresh-rotation.key")"
     COOKIE_SECURE=false
+    DEV_UI=true
+    BILLING_WEB_PROVIDER=mock
+    BILLING_MOCK_WEBHOOK_SECRET=test-only-mock-webhook-secret
     DRAIN_DELAY_MS=0
     LOG_LEVEL=debug
   )

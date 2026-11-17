@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#MISE description="Run the hosted API on the host (:3005) against compose Postgres, mock-oidc and mock-resend, with the dev keys"
+#MISE description="Run the hosted API on the host (:3005) against compose Postgres, mock-oidc and mock-resend, with the dev keys and the mock web payment provider"
 #MISE dir="{{config_root}}"
 # Needs `mise run docker:start` first. Runs on the host rather than in compose
 # because the mock issuer is http://localhost:8092, a name the API must
@@ -29,6 +29,10 @@ export RESEND_API_URL="${RESEND_API_URL:-http://localhost:8093}"
 export RESEND_API_KEY="${RESEND_API_KEY:-re_dev_mock}"
 export COOKIE_SECURE="${COOKIE_SECURE:-false}"
 export DEV_UI="${DEV_UI:-true}"
+# The mock web payment provider: its checkout and portal are /dev/billing
+# pages. Set BILLING_WEB_PROVIDER= (empty) to run with billing off.
+export BILLING_WEB_PROVIDER="${BILLING_WEB_PROVIDER-mock}"
+export BILLING_MOCK_WEBHOOK_SECRET="${BILLING_MOCK_WEBHOOK_SECRET:-dev-mock-webhook-secret}"
 export OTLP_METRICS_ENDPOINT="${OTLP_METRICS_ENDPOINT:-localhost:8428}"
 export OTLP_METRICS_URL_PATH="${OTLP_METRICS_URL_PATH:-/opentelemetry/v1/metrics}"
 export DRAIN_DELAY_MS="${DRAIN_DELAY_MS:-0}"

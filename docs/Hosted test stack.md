@@ -75,7 +75,18 @@ macOS, not Windows.
    steps are choosing a region, getting a storage token, uploading, and
    creating objects with the receipt, as in `docs/openapi-hosted.yaml`.
    `TestReleasedStack` in `e2e/hosted/released_test.go` walks them in Go.
-4. **Down.** `hosted-stack.sh down`, with the same `HOSTED_STACK_DIR`. It stops
+4. **Subscribe.** Billing is on (`"billing": true` in `GET /`), with the mock
+   web payment provider, so a new account reads but cannot write: writes
+   answer `402 subscription_required` and storage tokens are read-only
+   (uploads get `403 write_not_allowed`). To subscribe a test user,
+   `POST /api/billing/checkout` with its session and then `POST` the `url`
+   it returns, as is: the mock completes the checkout and tells the API
+   through its signed webhook, as a real provider would. Exchange the
+   storage refresh token again afterwards for a token that may upload.
+   `GET /api/billing` shows the subscription. The API also runs with
+   `DEV_UI`, whose `/dev/billing/*` routes lapse, expire or refund it and
+   move the lapse clock (see `/dev`).
+5. **Down.** `hosted-stack.sh down`, with the same `HOSTED_STACK_DIR`. It stops
    the processes `up` started (only if they still run the binary it started)
    and removes the Compose project `futo-notes-hosted-stack` with its data. A
    failed `up` cleans up after itself, after printing each service's log tail.
