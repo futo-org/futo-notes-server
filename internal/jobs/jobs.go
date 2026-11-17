@@ -14,20 +14,37 @@ import (
 	"time"
 
 	"futo-notes-server/internal/blobs"
-	appdb "futo-notes-server/internal/db"
+	"futo-notes-server/internal/db"
+	"futo-notes-server/internal/ids"
 )
 
-const reconciliationLimit = 500
-const garbageCollectionBatchSize = 500
+const (
+	// reconciliationLimit caps how many files one reconciliation pass adopts.
+	reconciliationLimit = 500
+	// garbageCollectionBatchSize is how many blob keys one GC query selects.
+	garbageCollectionBatchSize = 500
 
+	// pendingMutationLifetime is how long a pending (status 102) mutation
+	// result is kept.
+	pendingMutationLifetime = 24 * time.Hour
+	// mutationResultLifetime is how long any other expirable mutation result
+	// is kept.
+	mutationResultLifetime = 30 * 24 * time.Hour
+	// stagedBlobLifetime is how long a blob stays staged before GC removes it.
+	stagedBlobLifetime = 24 * time.Hour
+	// retainedBlobLifetime is how long a blob stays retained before GC
+	// removes it.
+	retainedBlobLifetime = 365 * 24 * time.Hour
+)
+
+// SessionReapResult reports what ReapSessions deleted.
 type SessionReapResult struct {
 	Reaped int64 `json:"reaped"`
 }
 
-var clock = time.Now
-
-func ReapSessions(ctx context.Context, database *appdb.DB) (SessionReapResult, error) {
-	result, err := database.ExecContext(ctx, `DELETE FROM sessions WHERE expires_at < $1`, appdb.Timestamp(clock()))
+// ReapSessions deletes expired sessions.
+func ReapSessions(ctx context.Context, database *db.DB) (SessionReapResult, error) {
+	result, err := database.ExecContext(ctx, `DELETE FROM sessions WHERE expires_at < $1`, db.Timestamp(time.Now()))
 	if err != nil {
 		return SessionReapResult{}, err
 	}
@@ -35,6 +52,8 @@ func ReapSessions(ctx context.Context, database *appdb.DB) (SessionReapResult, e
 	return SessionReapResult{Reaped: reaped}, err
 }
 
+// ReconciliationResult reports what ReconcileStorage adopted and skipped.
+// CapHit is set when the pass stopped at its adoption limit.
 type ReconciliationResult struct {
 	Adopted int  `json:"adopted"`
 	Skipped int  `json:"skipped"`
@@ -45,7 +64,7 @@ var errReconciliationCap = errors.New("storage reconciliation cap reached")
 
 // ReconcileStorage adopts files that have no authoritative blob_ledger row.
 // A missing storage directory is equivalent to an empty one on a fresh server.
-func ReconcileStorage(ctx context.Context, database *appdb.DB, store *blobs.Store) (ReconciliationResult, error) {
+func ReconcileStorage(ctx context.Context, database *db.DB, store *blobs.Store) (ReconciliationResult, error) {
 	var result ReconciliationResult
 	err := filepath.WalkDir(store.Dir, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -71,7 +90,7 @@ func ReconcileStorage(ctx context.Context, database *appdb.DB, store *blobs.Stor
 		}
 		key := filepath.ToSlash(relative)
 		owner, _, ok := strings.Cut(key, "/")
-		if !ok || !validUUID(owner) {
+		if !ok || !ids.IsUUID(owner) {
 			result.Skipped++
 			slog.Info("storage reconciliation: skipping file", "key", key, "reason", "invalid owner")
 			return nil
@@ -81,7 +100,7 @@ func ReconcileStorage(ctx context.Context, database *appdb.DB, store *blobs.Stor
 		if err != nil {
 			return err
 		}
-		defer tx.Rollback()
+		defer tx.Discard()
 		var ownerExists bool
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM users WHERE id = $1)`, owner).Scan(&ownerExists); err != nil {
 			return err
@@ -95,16 +114,13 @@ func ReconcileStorage(ctx context.Context, database *appdb.DB, store *blobs.Stor
 			return nil
 		}
 		var inserted int
-		now := appdb.Timestamp(clock())
+		now := db.Timestamp(time.Now())
 		err = tx.QueryRowContext(ctx, `INSERT INTO blob_ledger
 			(blob_key, user_id, size_bytes, state, created_at, state_changed_at)
 			VALUES ($1, $2, $3, 'staged', $4, $4)
 			ON CONFLICT (blob_key) DO NOTHING RETURNING 1`, key, owner, info.Size(), now).Scan(&inserted)
 		if errors.Is(err, sql.ErrNoRows) {
-			if err := tx.Commit(); err != nil {
-				return err
-			}
-			return nil
+			return tx.Commit()
 		}
 		if err != nil {
 			return err
@@ -130,18 +146,23 @@ func ReconcileStorage(ctx context.Context, database *appdb.DB, store *blobs.Stor
 	return result, err
 }
 
+// MutationExpiryResult reports how many unfinished and finished mutation
+// results ExpireMutationResults deleted.
 type MutationExpiryResult struct {
 	PendingExpired int64 `json:"pending_expired"`
 	OtherExpired   int64 `json:"other_expired"`
 }
 
-func ExpireMutationResults(ctx context.Context, database *appdb.DB) (MutationExpiryResult, error) {
+// ExpireMutationResults deletes pending mutation results older than
+// pendingMutationLifetime and other results older than mutationResultLifetime.
+// Successful and ambiguous legacy create results are never expired.
+func ExpireMutationResults(ctx context.Context, database *db.DB) (MutationExpiryResult, error) {
 	var result MutationExpiryResult
-	now := clock().UTC()
+	now := time.Now()
 	pending, err := database.ExecContext(ctx, `
 		DELETE FROM mutation_results
 		WHERE created_at < $1
-		  AND result->>'status' IN ('102', 'pending')`, appdb.Timestamp(now.Add(-24*time.Hour)))
+		  AND result->>'status' IN ('102', 'pending')`, db.Timestamp(now.Add(-pendingMutationLifetime)))
 	if err != nil {
 		return result, err
 	}
@@ -162,7 +183,7 @@ func ExpireMutationResults(ctx context.Context, database *appdb.DB) (MutationExp
 				AND (result->>'error' IS NULL OR result->>'error' NOT IN
 					('not found', 'version conflict', 'blob is not staged',
 					 'Mutation-Id reused for different intent')))
-		  ))`, appdb.Timestamp(now.Add(-30*24*time.Hour)))
+		  ))`, db.Timestamp(now.Add(-mutationResultLifetime)))
 	if err != nil {
 		return result, err
 	}
@@ -170,6 +191,8 @@ func ExpireMutationResults(ctx context.Context, database *appdb.DB) (MutationExp
 	return result, err
 }
 
+// BlobGCResult reports how many ledger rows and files GarbageCollectBlobs
+// removed.
 type BlobGCResult struct {
 	RowsPurged   int `json:"rows_purged"`
 	FilesRemoved int `json:"files_removed"`
@@ -177,7 +200,7 @@ type BlobGCResult struct {
 
 // GarbageCollectBlobs deletes the authoritative row before its file. If the
 // file deletion fails, reconciliation will adopt it again for a later pass.
-func GarbageCollectBlobs(ctx context.Context, database *appdb.DB, store *blobs.Store) (BlobGCResult, error) {
+func GarbageCollectBlobs(ctx context.Context, database *db.DB, store *blobs.Store) (BlobGCResult, error) {
 	var result BlobGCResult
 	var removalErrors []error
 
@@ -202,7 +225,7 @@ func GarbageCollectBlobs(ctx context.Context, database *appdb.DB, store *blobs.S
 			purgedThisPass++
 			result.RowsPurged++
 
-			existed, err := blobFileExists(store, key)
+			existed, err := store.Exists(key)
 			if err != nil {
 				removalErrors = append(removalErrors, fmt.Errorf("stating blob %q: %w", key, err))
 				continue
@@ -225,15 +248,17 @@ func GarbageCollectBlobs(ctx context.Context, database *appdb.DB, store *blobs.S
 	}
 }
 
-func eligibleBlobKeys(ctx context.Context, database *appdb.DB) ([]string, error) {
-	now := clock().UTC()
+// eligibleBlobKeys returns up to garbageCollectionBatchSize keys whose ledger
+// rows may be purged.
+func eligibleBlobKeys(ctx context.Context, database *db.DB) ([]string, error) {
+	stagedBefore, retainedBefore := blobExpiryCutoffs(time.Now())
 	rows, err := database.QueryContext(ctx, `
 		SELECT blob_key FROM blob_ledger
 		WHERE (state = 'staged' AND state_changed_at < $2)
 		   OR (state = 'retained' AND state_changed_at < $3)
 		   OR state = 'purgeable'
 		ORDER BY blob_key
-		LIMIT $1`, garbageCollectionBatchSize, appdb.Timestamp(now.Add(-24*time.Hour)), appdb.Timestamp(now.Add(-365*24*time.Hour)))
+		LIMIT $1`, garbageCollectionBatchSize, stagedBefore, retainedBefore)
 	if err != nil {
 		return nil, err
 	}
@@ -250,15 +275,23 @@ func eligibleBlobKeys(ctx context.Context, database *appdb.DB) ([]string, error)
 	return keys, rows.Err()
 }
 
-func purgeBlobRow(ctx context.Context, database *appdb.DB, key string) (bool, error) {
+// blobExpiryCutoffs returns the timestamps before which staged and retained
+// blobs are eligible for garbage collection.
+func blobExpiryCutoffs(now time.Time) (stagedBefore, retainedBefore string) {
+	return db.Timestamp(now.Add(-stagedBlobLifetime)), db.Timestamp(now.Add(-retainedBlobLifetime))
+}
+
+// purgeBlobRow deletes key's ledger row if it is still eligible and not locked
+// by another server, and reports whether it did.
+func purgeBlobRow(ctx context.Context, database *db.DB, key string) (bool, error) {
 	tx, err := database.BeginTx(ctx, nil)
 	if err != nil {
 		return false, err
 	}
-	defer tx.Rollback()
+	defer tx.Discard()
 
 	var lockedKey string
-	now := clock().UTC()
+	stagedBefore, retainedBefore := blobExpiryCutoffs(time.Now())
 	err = tx.QueryRowContext(ctx, `
 		SELECT blob_key FROM blob_ledger
 		WHERE blob_key = $1 AND (
@@ -266,7 +299,7 @@ func purgeBlobRow(ctx context.Context, database *appdb.DB, key string) (bool, er
 			OR (state = 'retained' AND state_changed_at < $3)
 			OR state = 'purgeable'
 		)
-		`+database.Dialect().ForUpdateSkipLocked(), key, appdb.Timestamp(now.Add(-24*time.Hour)), appdb.Timestamp(now.Add(-365*24*time.Hour))).Scan(&lockedKey)
+		`+database.Dialect().ForUpdateSkipLocked(), key, stagedBefore, retainedBefore).Scan(&lockedKey)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -276,39 +309,5 @@ func purgeBlobRow(ctx context.Context, database *appdb.DB, key string) (bool, er
 	if _, err := tx.ExecContext(ctx, `DELETE FROM blob_ledger WHERE blob_key = $1`, lockedKey); err != nil {
 		return false, err
 	}
-	if err := tx.Commit(); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-func blobFileExists(store *blobs.Store, key string) (bool, error) {
-	_, err := os.Stat(filepath.Join(store.Dir, filepath.FromSlash(key)))
-	switch {
-	case err == nil:
-		return true, nil
-	case errors.Is(err, os.ErrNotExist):
-		return false, nil
-	default:
-		return false, err
-	}
-}
-
-func validUUID(value string) bool {
-	if len(value) != 36 {
-		return false
-	}
-	for i, char := range []byte(value) {
-		switch i {
-		case 8, 13, 18, 23:
-			if char != '-' {
-				return false
-			}
-		default:
-			if !(char >= '0' && char <= '9' || char >= 'a' && char <= 'f' || char >= 'A' && char <= 'F') {
-				return false
-			}
-		}
-	}
-	return true
+	return true, tx.Commit()
 }

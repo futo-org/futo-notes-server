@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -13,8 +12,8 @@ import (
 	"futo-notes-server/internal/auth"
 	"futo-notes-server/internal/blobs"
 	"futo-notes-server/internal/collections"
-	"futo-notes-server/internal/config"
 	"futo-notes-server/internal/db"
+	"futo-notes-server/internal/dbtest"
 	"futo-notes-server/internal/events"
 	"futo-notes-server/internal/jobs"
 	"futo-notes-server/internal/objects"
@@ -22,19 +21,9 @@ import (
 )
 
 func TestMigratePostgresToSQLitePreservesApplicationState(t *testing.T) {
-	sourceURL := os.Getenv("MIGRATION_TEST_DATABASE_URL")
-	if sourceURL == "" {
-		t.Skip("MIGRATION_TEST_DATABASE_URL is not set")
-	}
+	sourceURL := dbtest.PostgresURL(t, "MIGRATION_TEST_DATABASE_URL")
+	source := dbtest.Postgres(t, "MIGRATION_TEST_DATABASE_URL")
 	ctx := context.Background()
-	source, err := db.Open(config.Config{DatabaseURL: sourceURL})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer source.Close()
-	if _, err := db.Migrate(ctx, source); err != nil {
-		t.Fatal(err)
-	}
 
 	runID := uuid.NewV7().String()
 	user, err := auth.UpsertUserByEmail(ctx, source, "migration-"+runID+"@example.invalid", "Migration Fixture")
@@ -42,20 +31,18 @@ func TestMigratePostgresToSQLitePreservesApplicationState(t *testing.T) {
 		t.Fatal(err)
 	}
 	configKey := "migration-test-" + runID
-	defer func() {
-		_, _ = source.ExecContext(context.Background(), `DELETE FROM server_config WHERE key = $1`, configKey)
-		_, _ = source.ExecContext(context.Background(), `DELETE FROM users WHERE id = $1`, user.ID)
-	}()
+	dbtest.CleanupExec(t, source, `DELETE FROM users WHERE id = $1`, user.ID)
+	dbtest.CleanupExec(t, source, `DELETE FROM server_config WHERE key = $1`, configKey)
 
 	collection, created, err := collections.Claim(ctx, source, user.ID)
 	if err != nil || !created {
 		t.Fatalf("Claim() = %#v, %t, %v", collection, created, err)
 	}
 	wantKDF := json.RawMessage(`{"z":1,"a":2,"z":3}`)
-	if outcome, _, err := collections.PutKey(ctx, source, user.ID, collection.ID, collections.KeyInput{
+	if _, err := collections.PutKey(ctx, source, user.ID, collection.ID, collections.KeyInput{
 		KeySalt: "migration-salt", KeyKDF: wantKDF, EncryptedVaultKey: "migration-wrapped-key",
-	}, nil); err != nil || outcome != collections.PutKeyOK {
-		t.Fatalf("PutKey() = %v, %v", outcome, err)
+	}, nil); err != nil {
+		t.Fatalf("PutKey() = %v", err)
 	}
 	token, err := auth.CreateSession(ctx, source, user.ID)
 	if err != nil {
@@ -66,8 +53,9 @@ func TestMigratePostgresToSQLitePreservesApplicationState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	createdObject, err := objects.Create(ctx, source, events.PostgresPublisher{}, user.ID, collection.ID, "migration-create", blobKey)
-	if err != nil || createdObject.Code != objects.OK {
+	createdObject, err := objects.New(source, events.PostgresPublisher{}).Create(ctx,
+		objects.Mutation{UserID: user.ID, CollectionID: collection.ID, MutationID: "migration-create"}, blobKey)
+	if err != nil {
 		t.Fatalf("Create() = %#v, %v", createdObject, err)
 	}
 	if _, err := source.ExecContext(ctx, `INSERT INTO server_config (key, value) VALUES ($1, $2)`, configKey, "migration-value"); err != nil {
@@ -83,20 +71,17 @@ func TestMigratePostgresToSQLitePreservesApplicationState(t *testing.T) {
 		t.Fatalf("migration summary did not report verification:\n%s", summary.String())
 	}
 
-	target, err := db.Open(config.Config{
-		DatabaseURL: "sqlite:" + targetPath,
-		BlobDir:     store.Dir,
-	})
+	target, err := db.Open("sqlite:"+targetPath, db.Options{BlobDir: store.Dir})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer target.Close()
-	if session, err := auth.ValidateSession(ctx, target, token); err != nil || session == nil || session.User.ID != user.ID {
+	if session, err := auth.ValidateSession(ctx, target, token); err != nil || session.User.ID != user.ID {
 		t.Fatalf("ValidateSession() = %#v, %v", session, err)
 	}
-	found, key, err := collections.GetKey(ctx, target, user.ID, collection.ID)
-	if err != nil || !found || key == nil {
-		t.Fatalf("GetKey() = %t, %#v, %v", found, key, err)
+	key, claimed, err := collections.GetKey(ctx, target, user.ID, collection.ID)
+	if err != nil || !claimed {
+		t.Fatalf("GetKey() = %#v, %t, %v", key, claimed, err)
 	}
 	var wantKDFValue, gotKDFValue any
 	if err := json.Unmarshal(wantKDF, &wantKDFValue); err != nil {
@@ -108,12 +93,12 @@ func TestMigratePostgresToSQLitePreservesApplicationState(t *testing.T) {
 	if !reflect.DeepEqual(gotKDFValue, wantKDFValue) {
 		t.Fatalf("key KDF = %s, want semantic JSON %s", key.KeyKDF, wantKDF)
 	}
-	gotObject, err := objects.Get(ctx, target, user.ID, collection.ID, createdObject.Response.Object.ID)
-	if err != nil || gotObject == nil || gotObject.BlobKey == nil || *gotObject.BlobKey != blobKey {
+	gotObject, err := objects.New(target, nil).Get(ctx, user.ID, collection.ID, createdObject.Object.ID)
+	if err != nil || gotObject.BlobKey == nil || *gotObject.BlobKey != blobKey {
 		t.Fatalf("Get() = %#v, %v", gotObject, err)
 	}
-	recovered, err := objects.RecoverCreate(ctx, target, user.ID, collection.ID, "migration-create")
-	if err != nil || recovered.Code != objects.OK || recovered.Response.Object.ID != createdObject.Response.Object.ID {
+	recovered, err := objects.New(target, nil).RecoverCreate(ctx, user.ID, collection.ID, "migration-create")
+	if err != nil || recovered.Object.ID != createdObject.Object.ID {
 		t.Fatalf("RecoverCreate() = %#v, %v", recovered, err)
 	}
 	var configValue string
@@ -128,7 +113,7 @@ func TestMigratePostgresToSQLitePreservesApplicationState(t *testing.T) {
 	if _, err := jobs.ExpireMutationResults(ctx, target); err != nil {
 		t.Fatalf("running retention after migration: %v", err)
 	}
-	if sourceObject, err := objects.Get(ctx, source, user.ID, collection.ID, createdObject.Response.Object.ID); err != nil || sourceObject == nil {
+	if sourceObject, err := objects.New(source, nil).Get(ctx, user.ID, collection.ID, createdObject.Object.ID); err != nil {
 		t.Fatalf("source was modified: object=%#v err=%v", sourceObject, err)
 	}
 }

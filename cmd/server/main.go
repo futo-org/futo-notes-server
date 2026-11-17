@@ -1,13 +1,20 @@
+// Command server runs the FUTO Notes sync server. With the migrate-to-sqlite
+// subcommand it instead copies a Postgres database into SQLite and exits.
 package main
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"futo-notes-server/internal/auth"
@@ -20,6 +27,16 @@ import (
 
 const (
 	serverName = "futo-notes"
+
+	// readHeaderTimeout bounds how long a client may take to send request
+	// headers. There is deliberately no read or write timeout: sync event
+	// streams and large blob transfers are long-lived.
+	readHeaderTimeout = 10 * time.Second
+	// shutdownTimeout bounds how long in-flight requests may finish after a
+	// shutdown signal before their connections are closed.
+	shutdownTimeout = 10 * time.Second
+	// migrationTimeout bounds startup schema migrations.
+	migrationTimeout = 60 * time.Second
 )
 
 // Overridden by release builds with -X main.serverVersion=<tag>.
@@ -37,6 +54,8 @@ type capability struct {
 	MutationIDs mutationIDs `json:"mutation_ids"`
 }
 
+// mutationIDs describes the server's Mutation-Id support in the capability
+// document.
 type mutationIDs struct {
 	Supported                bool   `json:"supported"`
 	Required                 bool   `json:"required"`
@@ -44,8 +63,13 @@ type mutationIDs struct {
 	SuccessfulCreateOutcomes string `json:"successful_create_outcomes"`
 }
 
+// errorResponse is the JSON body of every API error.
+type errorResponse struct {
+	Error string `json:"error"`
+}
+
 func writeError(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, map[string]string{"error": msg})
+	writeJSON(w, status, errorResponse{Error: msg})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -57,7 +81,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 func handleCapability(authMode string) http.HandlerFunc {
-	cap := capability{
+	document := capability{
 		Name:     serverName,
 		Version:  serverVersion,
 		AuthMode: authMode,
@@ -70,11 +94,12 @@ func handleCapability(authMode string) http.HandlerFunc {
 			SuccessfulCreateOutcomes: "durable",
 		},
 	}
-	return func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, cap)
+	return func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, document)
 	}
 }
 
+// healthStatus is the body of GET /health.
 type healthStatus struct {
 	Status string `json:"status"`
 	DB     string `json:"db"`
@@ -94,11 +119,11 @@ func handleHealth(database *db.DB) http.HandlerFunc {
 
 func routes(cfg config.Config, database *db.DB, blobStore *blobs.Store, eventHub *events.Hub, publisher events.Publisher) http.Handler {
 	api := http.NewServeMux()
-	if cfg.AuthMode == "dev" {
-		api.HandleFunc("POST /api/auth/dev/login", handleDevLogin(cfg, database))
-	}
-	if cfg.AuthMode == "password" {
-		api.HandleFunc("POST /api/auth/password/login",
+	switch cfg.AuthMode {
+	case config.AuthModeDev:
+		api.HandleFunc("POST "+devLoginPath, handleDevLogin(cfg, database))
+	case config.AuthModePassword:
+		api.HandleFunc("POST "+passwordLoginPath,
 			rateLimited(auth.NewRateLimiter(), handlePasswordLogin(cfg, database)))
 	}
 	api.HandleFunc("GET /api/auth", handleCurrentUser)
@@ -130,7 +155,7 @@ func routes(cfg config.Config, database *db.DB, blobStore *blobs.Store, eventHub
 	})
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /{$}", handleCapability(cfg.AuthMode))
+	mux.HandleFunc("GET /{$}", handleCapability(string(cfg.AuthMode)))
 	mux.HandleFunc("GET /health", handleHealth(database))
 	mux.Handle("/api/", requireAuth(cfg, database, api))
 	if cfg.DevUI {
@@ -149,44 +174,97 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "migrate-to-sqlite" {
 		os.Exit(runMigrateToSQLite(os.Args[2:], os.Stdout, os.Stderr))
 	}
+	if err := run(); err != nil {
+		slog.Error("server failed", "err", err)
+		os.Exit(1)
+	}
+}
+
+// run starts the server and blocks until SIGINT or SIGTERM has shut it down
+// or it fails.
+func run() error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	// After the first signal, restore default handling so a second one
+	// terminates a shutdown that is taking too long.
+	context.AfterFunc(ctx, stop)
 
 	cfg, err := config.Load()
 	if err != nil {
-		slog.Error("loading config", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("loading config: %w", err)
 	}
 	for _, warning := range config.DroppedEnvWarnings() {
-		slog.Warn(warning)
+		slog.Warn("ignoring legacy setting", "warning", warning)
 	}
 
-	database, err := db.Open(cfg)
+	database, err := db.Open(cfg.DatabaseURL, db.Options{
+		BlobDir:         cfg.BlobDir,
+		AllowFresh:      cfg.AllowFreshDatabase,
+		PoolMax:         cfg.DBPoolMax,
+		PoolIdleTimeout: cfg.DBPoolIdleTimeout,
+	})
 	if err != nil {
-		slog.Error("opening database", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("opening database: %w", err)
 	}
+	defer database.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	applied, err := db.Migrate(ctx, database)
+	migrateCtx, cancel := context.WithTimeout(ctx, migrationTimeout)
+	applied, err := db.Migrate(migrateCtx, database)
 	cancel()
 	if err != nil {
-		slog.Error("applying database migrations", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("applying database migrations: %w", err)
 	}
 	if len(applied) > 0 {
 		slog.Info("applied database migrations", "count", len(applied), "migrations", strings.Join(applied, ", "))
 	}
+
+	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.Port))
+	if err != nil {
+		return fmt.Errorf("listening: %w", err)
+	}
+
 	blobStore := &blobs.Store{Dir: cfg.BlobDir}
 	eventHub := events.NewHub()
 	publisher := events.NewPublisher(database.Dialect(), eventHub)
-	if database.Dialect().Engine() == db.Postgres {
-		go events.Listen(context.Background(), cfg.DatabaseURL, eventHub)
-	}
-	go jobs.Run(context.Background(), database, blobStore, jobs.DefaultSchedule, cfg.BlobGCEnabled)
 
-	addr := fmt.Sprintf(":%d", cfg.Port)
-	slog.Info("listening", "addr", addr)
-	if err := http.ListenAndServe(addr, routes(cfg, database, blobStore, eventHub, publisher)); err != nil {
-		slog.Error("serving HTTP", "err", err)
-		os.Exit(1)
+	// Background work stops with the server, before the database closes.
+	var background sync.WaitGroup
+	defer background.Wait()
+	ctx, cancelBackground := context.WithCancel(ctx)
+	defer cancelBackground()
+	if database.Dialect().Engine() == db.Postgres {
+		background.Go(func() { events.Listen(ctx, cfg.DatabaseURL, eventHub) })
 	}
+	background.Go(func() { jobs.Run(ctx, database, blobStore, jobs.DefaultSchedule, cfg.BlobGCEnabled) })
+
+	slog.Info("listening", "addr", listener.Addr().String())
+	return serve(ctx, listener, routes(cfg, database, blobStore, eventHub, publisher), eventHub.CloseAll)
+}
+
+// serve answers HTTP requests on listener until ctx is done, then shuts down
+// gracefully: it stops accepting connections, calls endStreams so open sync
+// event streams return, and waits up to shutdownTimeout for in-flight requests
+// before closing the connections that remain.
+func serve(ctx context.Context, listener net.Listener, handler http.Handler, endStreams func()) error {
+	server := &http.Server{Handler: handler, ReadHeaderTimeout: readHeaderTimeout}
+	server.RegisterOnShutdown(endStreams)
+
+	served := make(chan error, 1)
+	go func() { served <- server.Serve(listener) }()
+	select {
+	case err := <-served:
+		return fmt.Errorf("serving HTTP: %w", err)
+	case <-ctx.Done():
+	}
+
+	slog.Info("shutting down")
+	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		return errors.Join(fmt.Errorf("shutting down HTTP server: %w", err), server.Close())
+	}
+	if err := <-served; !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("serving HTTP: %w", err)
+	}
+	return nil
 }

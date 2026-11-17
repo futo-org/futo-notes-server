@@ -4,12 +4,15 @@ package events
 import (
 	"context"
 	"encoding/json"
-	"sort"
+	"slices"
+	"strings"
 	"sync"
 
 	"futo-notes-server/internal/db"
 )
 
+// Channel is the Postgres NOTIFY channel that carries Notifications between
+// server processes.
 const Channel = "notes_changes"
 
 // Notification is the payload sent through Postgres. UserID is used only for
@@ -29,9 +32,12 @@ type Change struct {
 // Publisher queues a sync doorbell in the mutation transaction. Both
 // implementations deliver only after the corresponding work commits.
 type Publisher interface {
-	Publish(context.Context, *db.Tx, string, string, int64) error
+	Publish(ctx context.Context, tx *db.Tx, userID, collectionID string, currentVersion int64) error
 }
 
+// NewPublisher returns the Publisher for dialect: SQLite delivers to hub in
+// process after commit, Postgres sends a NOTIFY that Listen relays to every
+// server's hub.
 func NewPublisher(dialect db.Dialect, hub *Hub) Publisher {
 	if dialect.Engine() == db.SQLite {
 		return SQLitePublisher{Hub: hub}
@@ -39,8 +45,11 @@ func NewPublisher(dialect db.Dialect, hub *Hub) Publisher {
 	return PostgresPublisher{}
 }
 
+// PostgresPublisher publishes with pg_notify, which Postgres delivers only if
+// the transaction commits.
 type PostgresPublisher struct{}
 
+// Publish queues a NOTIFY on Channel inside tx.
 func (PostgresPublisher) Publish(ctx context.Context, tx *db.Tx, userID, collectionID string, currentVersion int64) error {
 	payload, err := json.Marshal(Notification{
 		UserID:         userID,
@@ -54,8 +63,11 @@ func (PostgresPublisher) Publish(ctx context.Context, tx *db.Tx, userID, collect
 	return err
 }
 
+// SQLitePublisher publishes directly to an in-process Hub. SQLite has a
+// single server process, so no cross-process channel is needed.
 type SQLitePublisher struct{ Hub *Hub }
 
+// Publish delivers the notification to Hub once tx commits.
 func (p SQLitePublisher) Publish(_ context.Context, tx *db.Tx, userID, collectionID string, currentVersion int64) error {
 	notification := Notification{UserID: userID, CollectionID: collectionID, CurrentVersion: currentVersion}
 	tx.AfterCommit(func() { p.Hub.Publish(notification) })
@@ -68,6 +80,7 @@ type Hub struct {
 	subscribers map[string]map[*Subscription]struct{}
 }
 
+// NewHub returns a Hub with no subscribers.
 func NewHub() *Hub {
 	return &Hub{subscribers: make(map[string]map[*Subscription]struct{})}
 }
@@ -82,6 +95,8 @@ type Subscription struct {
 	closed  bool
 }
 
+// Subscribe registers a subscription for userID's notifications. The caller
+// must Unsubscribe it when done.
 func (h *Hub) Subscribe(userID string) *Subscription {
 	sub := &Subscription{
 		userID:  userID,
@@ -180,6 +195,6 @@ func (s *Subscription) Drain() ([]Change, bool) {
 		changes = append(changes, Change{CollectionID: collectionID, CurrentVersion: currentVersion})
 	}
 	clear(s.pending)
-	sort.Slice(changes, func(i, j int) bool { return changes[i].CollectionID < changes[j].CollectionID })
+	slices.SortFunc(changes, func(a, b Change) int { return strings.Compare(a.CollectionID, b.CollectionID) })
 	return changes, true
 }

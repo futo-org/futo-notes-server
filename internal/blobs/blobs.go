@@ -21,8 +21,14 @@ type Store struct {
 	Dir string
 }
 
+// path returns the file that holds key.
+func (s *Store) path(key string) string {
+	return filepath.Join(s.Dir, filepath.FromSlash(key))
+}
+
+// Put writes data under key, creating its directory as needed.
 func (s *Store) Put(key string, data []byte) error {
-	full := filepath.Join(s.Dir, filepath.FromSlash(key))
+	full := s.path(key)
 	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 		return err
 	}
@@ -46,14 +52,28 @@ func Stage(ctx context.Context, database *db.DB, store *Store, userID string, da
 	return key, nil
 }
 
+// Open opens the blob stored under key for reading.
 func (s *Store) Open(key string) (*os.File, error) {
-	return os.Open(filepath.Join(s.Dir, filepath.FromSlash(key)))
+	return os.Open(s.path(key))
+}
+
+// Exists reports whether a blob file is stored under key.
+func (s *Store) Exists(key string) (bool, error) {
+	_, err := os.Stat(s.path(key))
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, os.ErrNotExist):
+		return false, nil
+	default:
+		return false, err
+	}
 }
 
 // Remove reports success when the file is already gone, so callers can treat
 // deletion as idempotent.
 func (s *Store) Remove(key string) error {
-	err := os.Remove(filepath.Join(s.Dir, filepath.FromSlash(key)))
+	err := os.Remove(s.path(key))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -77,7 +97,7 @@ func Delete(ctx context.Context, database *db.DB, store *Store, userID, key stri
 	if err != nil {
 		return false, err
 	}
-	defer tx.Rollback()
+	defer tx.Discard()
 
 	// Keyed on blob_key alone. The namespace prefix already establishes who
 	// owns the key, and a row recorded against a different user_id — which

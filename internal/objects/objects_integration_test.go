@@ -5,40 +5,23 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"os"
 	"testing"
 	"time"
 
 	"futo-notes-server/internal/blobs"
-	databasepkg "futo-notes-server/internal/db"
+	"futo-notes-server/internal/dbtest"
 	"futo-notes-server/internal/events"
 	"futo-notes-server/internal/objects"
 	"uuid"
 
 	"github.com/jackc/pgx/v5"
-	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 func TestObjectMutationLifecycle(t *testing.T) {
-	databaseURL := os.Getenv("OBJECTS_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("OBJECTS_TEST_DATABASE_URL is not set")
-	}
-	rawDatabase, err := sql.Open("pgx", databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dialect, err := databasepkg.ParseDialect(databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	database := databasepkg.Wrap(rawDatabase, dialect)
-	defer database.Close()
-	ctx := context.Background()
-	publisher := events.PostgresPublisher{}
-	if _, err := databasepkg.Migrate(ctx, database); err != nil {
-		t.Fatal(err)
-	}
+	databaseURL := dbtest.PostgresURL(t, "OBJECTS_TEST_DATABASE_URL")
+	database := dbtest.Postgres(t, "OBJECTS_TEST_DATABASE_URL")
+	ctx := t.Context()
+	objectStore := objects.New(database, events.PostgresPublisher{})
 	listener, err := pgx.Connect(ctx, databaseURL)
 	if err != nil {
 		t.Fatal(err)
@@ -53,7 +36,7 @@ func TestObjectMutationLifecycle(t *testing.T) {
 		VALUES ($1, $2, 'objects test', $3)`, userID, "objects-test-"+userID, userID+"@example.invalid"); err != nil {
 		t.Fatal(err)
 	}
-	defer database.ExecContext(ctx, `DELETE FROM users WHERE id = $1`, userID)
+	dbtest.CleanupExec(t, database, `DELETE FROM users WHERE id = $1`, userID)
 	if _, err := database.ExecContext(ctx, `INSERT INTO collections (id, user_id) VALUES ($1, $2)`, collectionID, userID); err != nil {
 		t.Fatal(err)
 	}
@@ -63,19 +46,23 @@ func TestObjectMutationLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	created, err := objects.Create(ctx, database, publisher, userID, collectionID, "create-1", firstKey)
+	mutation := func(objectID, mutationID string) objects.Mutation {
+		return objects.Mutation{UserID: userID, CollectionID: collectionID, ObjectID: objectID, MutationID: mutationID}
+	}
+	created, err := objectStore.Create(ctx, mutation("", "create-1"), firstKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if created.Code != objects.OK || created.Response.Object.Version != "1" || created.Response.CollectionVersion != 1 {
+	if created.Object.Version != 1 || created.CollectionVersion != 1 {
 		t.Fatalf("unexpected create: %#v", created)
 	}
+	objectID := created.Object.ID
 	waitForObjectNotification(t, listener, userID, collectionID, 1)
-	replayed, err := objects.Create(ctx, database, publisher, userID, collectionID, "create-1", firstKey)
+	replayed, err := objectStore.Create(ctx, mutation("", "create-1"), firstKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if replayed.Response.Replayed == nil || !*replayed.Response.Replayed || replayed.Response.Object.ID != created.Response.Object.ID {
+	if replayed.Replayed == nil || !*replayed.Replayed || replayed.Object.ID != objectID {
 		t.Fatalf("unexpected replay: %#v", replayed)
 	}
 	assertNoObjectNotification(t, listener, userID, collectionID)
@@ -84,64 +71,54 @@ func TestObjectMutationLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	updated, err := objects.Update(ctx, database, publisher, userID, collectionID, created.Response.Object.ID, "update-1", secondKey, 2)
+	updated, err := objectStore.Update(ctx, mutation(objectID, "update-1"), secondKey, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updated.Code != objects.OK || updated.Response.Object.Version != "2" || updated.Response.CollectionVersion != 2 {
+	if updated.Object.Version != 2 || updated.CollectionVersion != 2 {
 		t.Fatalf("unexpected update: %#v", updated)
 	}
 	waitForObjectNotification(t, listener, userID, collectionID, 2)
-	conflict, err := objects.Update(ctx, database, publisher, userID, collectionID, created.Response.Object.ID, "update-stale", firstKey, 2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if conflict.Code != objects.VersionConflict || conflict.Conflict.CurrentVersion != 2 {
-		t.Fatalf("unexpected conflict: %#v", conflict)
+	_, err = objectStore.Update(ctx, mutation(objectID, "update-stale"), firstKey, 2)
+	if conflict, ok := errors.AsType[*objects.ConflictError](err); !ok || conflict.Conflict.CurrentVersion != 2 {
+		t.Fatalf("unexpected conflict: %v", err)
 	}
 	assertNoObjectNotification(t, listener, userID, collectionID)
 
-	deleted, err := objects.Delete(ctx, database, publisher, userID, collectionID, created.Response.Object.ID, "delete-1", nil)
+	deleted, err := objectStore.Delete(ctx, mutation(objectID, "delete-1"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if deleted.Code != objects.OK || deleted.Response.Object.Version != "3" || deleted.Response.CollectionVersion != 3 {
+	if deleted.Object.Version != 3 || deleted.CollectionVersion != 3 {
 		t.Fatalf("unexpected delete: %#v", deleted)
 	}
 	waitForObjectNotification(t, listener, userID, collectionID, 3)
-	rows, _, err := objects.List(ctx, database, userID, collectionID, 2, nil)
+	rows, _, err := objectStore.List(ctx, userID, collectionID, 2, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(rows) != 1 || !rows[0].Deleted {
 		t.Fatalf("unexpected delta: %#v", rows)
 	}
-	staleVersion := int64(1)
-	staleRedelete, err := objects.Delete(ctx, database, publisher, userID, collectionID, created.Response.Object.ID, "delete-stale", &staleVersion)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if staleRedelete.Code != objects.VersionConflict || staleRedelete.Conflict.CurrentVersion != 3 {
-		t.Fatalf("unexpected stale tombstone re-delete: %#v", staleRedelete)
+	_, err = objectStore.Delete(ctx, mutation(objectID, "delete-stale"), new(int64(1)))
+	if conflict, ok := errors.AsType[*objects.ConflictError](err); !ok || conflict.Conflict.CurrentVersion != 3 {
+		t.Fatalf("unexpected stale tombstone re-delete: %v", err)
 	}
 	assertNoObjectNotification(t, listener, userID, collectionID)
-	tombstoneVersion := int64(3)
-	redeleted, err := objects.Delete(ctx, database, publisher, userID, collectionID, created.Response.Object.ID, "delete-2", &tombstoneVersion)
+	redeleted, err := objectStore.Delete(ctx, mutation(objectID, "delete-2"), new(int64(3)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if redeleted.Code != objects.OK || redeleted.Response.Object.Version != "3" ||
-		redeleted.Response.CollectionVersion != 3 || !redeleted.Response.Object.Deleted {
+	if redeleted.Object.Version != 3 || redeleted.CollectionVersion != 3 || !redeleted.Object.Deleted {
 		t.Fatalf("unexpected tombstone re-delete: %#v", redeleted)
 	}
 	assertNoObjectNotification(t, listener, userID, collectionID)
-	unconditionalRedelete, err := objects.Delete(ctx, database, publisher, userID, collectionID,
-		created.Response.Object.ID, "delete-3", nil)
+	unconditionalRedelete, err := objectStore.Delete(ctx, mutation(objectID, "delete-3"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if unconditionalRedelete.Code != objects.OK || unconditionalRedelete.Response.Object.Version != "3" ||
-		unconditionalRedelete.Response.CollectionVersion != 3 || !unconditionalRedelete.Response.Object.Deleted {
+	if unconditionalRedelete.Object.Version != 3 || unconditionalRedelete.CollectionVersion != 3 ||
+		!unconditionalRedelete.Object.Deleted {
 		t.Fatalf("unexpected unconditional tombstone re-delete: %#v", unconditionalRedelete)
 	}
 	assertNoObjectNotification(t, listener, userID, collectionID)
@@ -149,11 +126,11 @@ func TestObjectMutationLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tombstoneUpdate, err := objects.Update(ctx, database, publisher, userID, collectionID, created.Response.Object.ID, "update-2", thirdKey, 4)
+	tombstoneUpdate, err := objectStore.Update(ctx, mutation(objectID, "update-2"), thirdKey, 4)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tombstoneUpdate.Code != objects.OK || !tombstoneUpdate.Response.Object.Deleted {
+	if !tombstoneUpdate.Object.Deleted {
 		t.Fatalf("update should not revive tombstone: %#v", tombstoneUpdate)
 	}
 	// The replacement blob is claimed even though the object stays deleted, so
@@ -176,18 +153,18 @@ func TestObjectMutationLifecycle(t *testing.T) {
 		t.Fatalf("superseded tombstone blob state = %q, want %q", releasedState, "retained")
 	}
 	waitForObjectNotification(t, listener, userID, collectionID, 4)
-	recovered, err := objects.RecoverCreate(ctx, database, userID, collectionID, "create-1")
+	recovered, err := objectStore.RecoverCreate(ctx, userID, collectionID, "create-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if recovered.Code != objects.OK || recovered.Response.Object.ID != created.Response.Object.ID {
+	if recovered.Object.ID != objectID {
 		t.Fatalf("unexpected recovery: %#v", recovered)
 	}
 }
 
 func waitForObjectNotification(t *testing.T, listener *pgx.Conn, userID, collectionID string, version int64) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 	for {
 		notification, err := listener.WaitForNotification(ctx)
@@ -210,7 +187,7 @@ func waitForObjectNotification(t *testing.T, listener *pgx.Conn, userID, collect
 
 func assertNoObjectNotification(t *testing.T, listener *pgx.Conn, userID, collectionID string) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
 	defer cancel()
 	for {
 		notification, err := listener.WaitForNotification(ctx)
@@ -233,32 +210,16 @@ func assertNoObjectNotification(t *testing.T, listener *pgx.Conn, userID, collec
 // ciphertext on disk forever. Retained keeps it fetchable as a merge ancestor
 // while putting it on the same 365-day clock an update's old blob gets.
 func TestDeleteRetainsBlobForReclamation(t *testing.T) {
-	databaseURL := os.Getenv("OBJECTS_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("OBJECTS_TEST_DATABASE_URL is not set")
-	}
-	rawDatabase, err := sql.Open("pgx", databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dialect, err := databasepkg.ParseDialect(databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	database := databasepkg.Wrap(rawDatabase, dialect)
-	defer database.Close()
-	ctx := context.Background()
-	publisher := events.PostgresPublisher{}
-	if _, err := databasepkg.Migrate(ctx, database); err != nil {
-		t.Fatal(err)
-	}
+	database := dbtest.Postgres(t, "OBJECTS_TEST_DATABASE_URL")
+	ctx := t.Context()
+	objectStore := objects.New(database, events.PostgresPublisher{})
 
 	userID, collectionID := uuid.NewV7().String(), uuid.NewV7().String()
 	if _, err := database.ExecContext(ctx, `INSERT INTO users (id, sub, name, email)
 		VALUES ($1, $2, 'delete blob test', $3)`, userID, "delete-blob-"+userID, userID+"@example.invalid"); err != nil {
 		t.Fatal(err)
 	}
-	defer database.ExecContext(ctx, `DELETE FROM users WHERE id = $1`, userID)
+	dbtest.CleanupExec(t, database, `DELETE FROM users WHERE id = $1`, userID)
 	if _, err := database.ExecContext(ctx, `INSERT INTO collections (id, user_id) VALUES ($1, $2)`, collectionID, userID); err != nil {
 		t.Fatal(err)
 	}
@@ -268,19 +229,13 @@ func TestDeleteRetainsBlobForReclamation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	created, err := objects.Create(ctx, database, publisher, userID, collectionID, "create-folder", key)
+	created, err := objectStore.Create(ctx, objects.Mutation{UserID: userID, CollectionID: collectionID, MutationID: "create-folder"}, key)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("unexpected create: %v", err)
 	}
-	if created.Code != objects.OK {
-		t.Fatalf("unexpected create: %#v", created)
-	}
-	deleted, err := objects.Delete(ctx, database, publisher, userID, collectionID, created.Response.Object.ID, "delete-folder", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if deleted.Code != objects.OK {
-		t.Fatalf("unexpected delete: %#v", deleted)
+	if _, err := objectStore.Delete(ctx, objects.Mutation{UserID: userID, CollectionID: collectionID,
+		ObjectID: created.Object.ID, MutationID: "delete-folder"}, nil); err != nil {
+		t.Fatalf("unexpected delete: %v", err)
 	}
 
 	var state string

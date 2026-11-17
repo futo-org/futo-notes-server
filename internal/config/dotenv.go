@@ -1,6 +1,9 @@
 package config
 
 import (
+	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"strings"
 )
@@ -10,7 +13,7 @@ import (
 func loadDotenv(path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
 		return err
@@ -28,15 +31,22 @@ func loadDotenv(path string) error {
 			continue
 		}
 		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
 		value = parseValue(strings.TrimSpace(value))
 
 		if _, exists := os.LookupEnv(key); !exists {
-			os.Setenv(key, value)
+			if err := os.Setenv(key, value); err != nil {
+				return fmt.Errorf("setting %s: %w", key, err)
+			}
 		}
 	}
 	return nil
 }
 
+// parseValue strips matching surrounding quotes, or an inline comment from an
+// unquoted value.
 func parseValue(raw string) string {
 	if len(raw) >= 2 {
 		if (raw[0] == '"' && raw[len(raw)-1] == '"') || (raw[0] == '\'' && raw[len(raw)-1] == '\'') {

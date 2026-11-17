@@ -50,13 +50,13 @@ func sparseStore(t testing.TB, sizes map[string]int64) *blobs.Store {
 
 type frame struct {
 	Key    string
-	Status byte
+	Status frameStatus
 	Blob   []byte
 }
 
 func decodeFrames(t testing.TB, payload []byte) []frame {
 	t.Helper()
-	frames := []frame{}
+	var frames []frame
 	for offset := 0; offset < len(payload); {
 		if len(payload)-offset < 2 {
 			t.Fatalf("truncated key length at %d", offset)
@@ -68,7 +68,7 @@ func decodeFrames(t testing.TB, payload []byte) []frame {
 		}
 		f := frame{Key: string(payload[offset : offset+keyLen])}
 		offset += keyLen
-		f.Status = payload[offset]
+		f.Status = frameStatus(payload[offset])
 		offset++
 		blobLen := int(binary.BigEndian.Uint32(payload[offset:]))
 		offset += 4
@@ -102,7 +102,7 @@ func TestStreamBlobBatch(t *testing.T) {
 	if len(frames) != len(keys) {
 		t.Fatalf("got %d frames, want %d", len(frames), len(keys))
 	}
-	wantStatus := []byte{frameOK, frameMissing, frameMissing, frameMissing, frameMissing, frameOK}
+	wantStatus := []frameStatus{frameOK, frameMissing, frameMissing, frameMissing, frameMissing, frameOK}
 	for i, f := range frames {
 		if f.Key != keys[i] {
 			t.Errorf("frame %d key = %q, want %q", i, f.Key, keys[i])
@@ -138,7 +138,7 @@ func TestStreamBlobBatchCap(t *testing.T) {
 	frames := decodeFrames(t, out.Bytes())
 	// Two 12 MiB blobs fit under 32 MiB; the third would not. A later blob
 	// small enough to fit still ships.
-	want := []byte{frameOK, frameOK, frameOmitted, frameOK}
+	want := []frameStatus{frameOK, frameOK, frameOmitted, frameOK}
 	for i, f := range frames {
 		if f.Status != want[i] {
 			t.Fatalf("frame %d status = %d, want %d", i, f.Status, want[i])
@@ -177,7 +177,7 @@ func TestStreamBlobBatchSkipsUnframeableFile(t *testing.T) {
 }
 
 func batchRequest(store *blobs.Store, body string) *httptest.ResponseRecorder {
-	r := httptest.NewRequest("POST", "/api/blobs/batch", strings.NewReader(body))
+	r := httptest.NewRequest(http.MethodPost, "/api/blobs/batch", strings.NewReader(body))
 	session := &auth.Session{ID: "session", User: auth.User{ID: fuzzUser}}
 	r = r.WithContext(context.WithValue(r.Context(), sessionCtxKey{}, session))
 	w := httptest.NewRecorder()

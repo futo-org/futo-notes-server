@@ -13,7 +13,12 @@ import (
 	"futo-notes-server/internal/db"
 )
 
+// SessionTTL is how long a session stays valid after it is created.
 const SessionTTL = 7 * 24 * time.Hour
+
+// ErrNoSession is returned by ValidateSession when the token matches no live
+// session.
+var ErrNoSession = errors.New("no such session")
 
 // GenerateToken returns a raw session token: 32 random bytes, hex-encoded.
 func GenerateToken() string {
@@ -35,9 +40,9 @@ type Session struct {
 	User User
 }
 
-// ValidateSession looks up a session by hash(rawToken) and returns the
-// attached user. Returns nil for missing or expired tokens; an expired row is
-// deleted on presentation.
+// ValidateSession looks up a session by hash(rawToken) and returns it with
+// the attached user. It returns ErrNoSession for unknown or expired tokens;
+// an expired row is deleted on presentation.
 func ValidateSession(ctx context.Context, database *db.DB, rawToken string) (*Session, error) {
 	var s Session
 	var expiresAt db.Time
@@ -47,16 +52,16 @@ func ValidateSession(ctx context.Context, database *db.DB, rawToken string) (*Se
 		 WHERE s.access_token_hash = $1`, HashToken(rawToken)).
 		Scan(&s.ID, &expiresAt, &s.User.ID, &s.User.Email, &s.User.Name)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
+		return nil, ErrNoSession
 	}
 	if err != nil {
 		return nil, err
 	}
-	if !expiresAt.Time.After(time.Now()) {
+	if !expiresAt.After(time.Now()) {
 		if _, err := database.ExecContext(ctx, `DELETE FROM sessions WHERE id = $1`, s.ID); err != nil {
 			return nil, err
 		}
-		return nil, nil
+		return nil, ErrNoSession
 	}
 	return &s, nil
 }

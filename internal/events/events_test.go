@@ -1,6 +1,7 @@
 package events
 
 import (
+	"slices"
 	"testing"
 	"time"
 )
@@ -28,13 +29,8 @@ func TestHubCoalescesNewestVersionPerCollection(t *testing.T) {
 		{CollectionID: "collection-a", CurrentVersion: 3},
 		{CollectionID: "collection-b", CurrentVersion: 1},
 	}
-	if len(changes) != len(want) {
+	if !slices.Equal(changes, want) {
 		t.Fatalf("changes = %#v, want %#v", changes, want)
-	}
-	for i := range want {
-		if changes[i] != want[i] {
-			t.Fatalf("changes = %#v, want %#v", changes, want)
-		}
 	}
 
 	select {
@@ -97,4 +93,7 @@ func TestUnsubscribeIsIdempotent(t *testing.T) {
 	hub.Unsubscribe(sub)
 	hub.Unsubscribe(sub)
 	hub.Publish(Notification{UserID: "user-1", CollectionID: "collection", CurrentVersion: 1})
+	if _, open := <-sub.Wake(); open {
+		t.Fatal("unsubscribed subscription was woken")
+	}
 }

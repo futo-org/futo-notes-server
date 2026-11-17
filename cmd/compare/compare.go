@@ -2,14 +2,16 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"mime"
 	"net/http"
 	"reflect"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -96,10 +98,10 @@ func (r *runner) stepNamed(ctx context.Context, label string, spec requestSpec) 
 	}
 	results := make(chan namedOutcome, 2)
 	for _, tgt := range []*target{r.ts, r.goTarget} {
-		go func(t *target) {
-			response, err := t.do(ctx, spec)
-			results <- namedOutcome{target: t, response: response, err: err}
-		}(tgt)
+		go func() {
+			response, err := tgt.do(ctx, spec)
+			results <- namedOutcome{target: tgt, response: response, err: err}
+		}()
 	}
 	var pair responsePair
 	var requestErrors []string
@@ -163,7 +165,8 @@ func (r *runner) stepNamed(ctx context.Context, label string, spec requestSpec) 
 		}
 	}
 
-	if spec.Frames {
+	switch {
+	case spec.Frames:
 		tsFrames, tsErr := decodeDownloadFrames(pair.TS.Body)
 		goFrames, goErr := decodeDownloadFrames(pair.Go.Body)
 		if tsErr != nil || goErr != nil {
@@ -171,7 +174,7 @@ func (r *runner) stepNamed(ctx context.Context, label string, spec requestSpec) 
 		} else if !reflect.DeepEqual(normalizeFrames(tsFrames, r.ts), normalizeFrames(goFrames, r.goTarget)) {
 			problems = append(problems, fmt.Sprintf("binary frames differ %s=%v %s=%v", r.ts.name, summarizeFrames(tsFrames), r.goTarget.name, summarizeFrames(goFrames)))
 		}
-	} else if pair.TS.JSON != nil || pair.Go.JSON != nil {
+	case pair.TS.JSON != nil || pair.Go.JSON != nil:
 		for _, item := range []struct {
 			name  string
 			value any
@@ -195,7 +198,7 @@ func (r *runner) stepNamed(ctx context.Context, label string, spec requestSpec) 
 				}
 			}
 		}
-	} else if !bytes.Equal(pair.TS.Body, pair.Go.Body) {
+	case !bytes.Equal(pair.TS.Body, pair.Go.Body):
 		problems = append(problems, fmt.Sprintf("body differs %s=%s %s=%s", r.ts.name, preview(pair.TS.Body), r.goTarget.name, preview(pair.Go.Body)))
 	}
 
@@ -289,18 +292,10 @@ func capabilitiesDifferOnlyByVersion(tsValue, goValue any) bool {
 	if !tsVersionOK || !goVersionOK || tsVersion == "" || goVersion == "" || tsVersion == goVersion {
 		return false
 	}
-	tsWithoutVersion := make(map[string]any, len(tsCapability)-1)
-	goWithoutVersion := make(map[string]any, len(goCapability)-1)
-	for key, value := range tsCapability {
-		if key != "version" {
-			tsWithoutVersion[key] = value
-		}
-	}
-	for key, value := range goCapability {
-		if key != "version" {
-			goWithoutVersion[key] = value
-		}
-	}
+	tsWithoutVersion := maps.Clone(tsCapability)
+	goWithoutVersion := maps.Clone(goCapability)
+	delete(tsWithoutVersion, "version")
+	delete(goWithoutVersion, "version")
 	return reflect.DeepEqual(tsWithoutVersion, goWithoutVersion)
 }
 
@@ -401,11 +396,7 @@ func (t *target) do(ctx context.Context, spec requestSpec) (wireResponse, error)
 }
 
 func (t *target) render(value string) string {
-	keys := make([]string, 0, len(t.identities))
-	for key := range t.identities {
-		keys = append(keys, key)
-	}
-	sort.Slice(keys, func(i, j int) bool { return len(keys[i]) > len(keys[j]) })
+	keys := slices.SortedFunc(maps.Keys(t.identities), longestFirst)
 	for _, key := range keys {
 		value = strings.ReplaceAll(value, key, t.identities[key])
 	}
@@ -479,20 +470,22 @@ func normalizeIdentityString(value string, target *target) string {
 	if placeholder, ok := target.reverse[value]; ok {
 		return placeholder
 	}
-	actuals := make([]string, 0, len(target.reverse))
-	for actual := range target.reverse {
-		actuals = append(actuals, actual)
-	}
-	sort.Slice(actuals, func(i, j int) bool { return len(actuals[i]) > len(actuals[j]) })
+	actuals := slices.SortedFunc(maps.Keys(target.reverse), longestFirst)
 	for _, actual := range actuals {
 		value = strings.ReplaceAll(value, actual, target.reverse[actual])
 	}
 	return value
 }
 
+// longestFirst orders strings by descending length so that a replacement
+// never rewrites part of a longer string that contains it.
+func longestFirst(a, b string) int {
+	return cmp.Compare(len(b), len(a))
+}
+
 func jsonPath(value any, path string) (any, bool) {
 	current := value
-	for _, part := range strings.Split(path, ".") {
+	for part := range strings.SplitSeq(path, ".") {
 		switch typed := current.(type) {
 		case map[string]any:
 			var ok bool
@@ -521,10 +514,15 @@ func mediaType(value string) string {
 	return result
 }
 
+// cookieShape summarizes every parseable Set-Cookie header without its value.
+// Unparseable headers are skipped, as http.Response.Cookies does.
 func cookieShape(response wireResponse) []string {
-	fake := &http.Response{Header: response.Header}
-	shapes := []string{}
-	for _, cookie := range fake.Cookies() {
+	var shapes []string
+	for _, line := range response.Header.Values("Set-Cookie") {
+		cookie, err := http.ParseSetCookie(line)
+		if err != nil {
+			continue
+		}
 		maxAge := "none"
 		if cookie.MaxAge > 0 {
 			maxAge = "positive"
@@ -533,7 +531,7 @@ func cookieShape(response wireResponse) []string {
 		}
 		shapes = append(shapes, fmt.Sprintf("%s:path=%s:max-age=%s:http-only=%t:secure=%t:same-site=%d", cookie.Name, cookie.Path, maxAge, cookie.HttpOnly, cookie.Secure, cookie.SameSite))
 	}
-	sort.Strings(shapes)
+	slices.Sort(shapes)
 	return shapes
 }
 

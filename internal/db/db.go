@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -14,19 +15,21 @@ import (
 	"strings"
 	"time"
 
+	// Open selects these drivers by name: "pgx" for Postgres, "sqlite" for SQLite.
 	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
-
-	"futo-notes-server/internal/config"
 )
 
+// Engine names a supported database engine.
 type Engine string
 
+// The supported database engines.
 const (
 	Postgres Engine = "postgres"
 	SQLite   Engine = "sqlite"
 )
 
+// DefaultSQLiteURL is the database the server uses when DATABASE_URL is unset.
 const DefaultSQLiteURL = "sqlite:./data/notes.db"
 
 var placeholder = regexp.MustCompile(`\$([1-9][0-9]*)`)
@@ -38,6 +41,8 @@ type Dialect struct {
 	path   string
 }
 
+// ParseDialect selects the dialect for a postgres://, postgresql://, or
+// sqlite: database URL.
 func ParseDialect(databaseURL string) (Dialect, error) {
 	switch {
 	case strings.HasPrefix(databaseURL, "postgres://"), strings.HasPrefix(databaseURL, "postgresql://"):
@@ -49,13 +54,18 @@ func ParseDialect(databaseURL string) (Dialect, error) {
 		}
 		return Dialect{engine: SQLite, path: path}, nil
 	default:
-		return Dialect{}, fmt.Errorf("unsupported DATABASE_URL scheme (want postgres://, postgresql://, or sqlite:)")
+		return Dialect{}, errors.New("unsupported DATABASE_URL scheme (want postgres://, postgresql://, or sqlite:)")
 	}
 }
 
+// Engine returns the database engine the dialect targets.
 func (d Dialect) Engine() Engine { return d.engine }
-func (d Dialect) Path() string   { return d.path }
 
+// Path returns the SQLite database file path, or "" for Postgres.
+func (d Dialect) Path() string { return d.path }
+
+// Rebind rewrites Postgres $n placeholders into the engine's form. SQLite
+// gets ?n, which keeps the argument numbering.
 func (d Dialect) Rebind(query string) string {
 	if d.engine == SQLite {
 		return placeholder.ReplaceAllString(query, `?$1`)
@@ -63,6 +73,8 @@ func (d Dialect) Rebind(query string) string {
 	return query
 }
 
+// ForUpdate returns the row-locking clause to append to a SELECT, which is
+// empty on SQLite where a write transaction already holds the database lock.
 func (d Dialect) ForUpdate() string {
 	if d.engine == Postgres {
 		return " FOR UPDATE"
@@ -70,6 +82,7 @@ func (d Dialect) ForUpdate() string {
 	return ""
 }
 
+// ForUpdateSkipLocked is ForUpdate, skipping rows another transaction holds.
 func (d Dialect) ForUpdateSkipLocked() string {
 	if d.engine == Postgres {
 		return " FOR UPDATE SKIP LOCKED"
@@ -77,6 +90,7 @@ func (d Dialect) ForUpdateSkipLocked() string {
 	return ""
 }
 
+// JSONCast returns the cast that makes a text parameter a JSON value.
 func (d Dialect) JSONCast() string {
 	if d.engine == Postgres {
 		return "::jsonb"
@@ -84,6 +98,8 @@ func (d Dialect) JSONCast() string {
 	return ""
 }
 
+// LockMutation serializes transactions that use the same key until tx ends.
+// SQLite needs no lock because it admits one writer at a time.
 func (d Dialect) LockMutation(ctx context.Context, tx *Tx, key string) error {
 	if d.engine == SQLite {
 		return nil
@@ -94,92 +110,91 @@ func (d Dialect) LockMutation(ctx context.Context, tx *Tx, key string) error {
 
 // DB owns a sql.DB and applies placeholder rebinding at every shared SQL call.
 type DB struct {
-	*sql.DB
+	db      *sql.DB
 	dialect Dialect
 }
 
+// Wrap pairs an already opened sql.DB with the dialect its queries use.
 func Wrap(database *sql.DB, dialect Dialect) *DB {
-	return &DB{DB: database, dialect: dialect}
+	return &DB{db: database, dialect: dialect}
 }
 
+// Dialect returns the SQL dialect of the database engine.
 func (d *DB) Dialect() Dialect { return d.dialect }
 
+// ExecContext rebinds query for the engine and executes it.
 func (d *DB) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
-	return d.DB.ExecContext(ctx, d.dialect.Rebind(query), args...)
+	return d.db.ExecContext(ctx, d.dialect.Rebind(query), args...)
 }
 
-func (d *DB) Exec(query string, args ...any) (sql.Result, error) {
-	return d.DB.Exec(d.dialect.Rebind(query), args...)
-}
-
+// QueryContext rebinds query for the engine and runs it, returning its rows.
 func (d *DB) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
-	return d.DB.QueryContext(ctx, d.dialect.Rebind(query), args...)
+	return d.db.QueryContext(ctx, d.dialect.Rebind(query), args...)
 }
 
-func (d *DB) Query(query string, args ...any) (*sql.Rows, error) {
-	return d.DB.Query(d.dialect.Rebind(query), args...)
-}
-
+// QueryRowContext rebinds query for the engine and runs it, returning at most
+// one row.
 func (d *DB) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
-	return d.DB.QueryRowContext(ctx, d.dialect.Rebind(query), args...)
+	return d.db.QueryRowContext(ctx, d.dialect.Rebind(query), args...)
 }
 
-func (d *DB) QueryRow(query string, args ...any) *sql.Row {
-	return d.DB.QueryRow(d.dialect.Rebind(query), args...)
-}
-
+// BeginTx starts a transaction whose queries use the same dialect.
 func (d *DB) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) {
-	tx, err := d.DB.BeginTx(ctx, opts)
+	tx, err := d.db.BeginTx(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
-	return &Tx{Tx: tx, dialect: d.dialect}, nil
+	return &Tx{tx: tx, dialect: d.dialect}, nil
+}
+
+// PingContext verifies that the database is reachable.
+func (d *DB) PingContext(ctx context.Context) error { return d.db.PingContext(ctx) }
+
+// Close closes the underlying connection pool.
+func (d *DB) Close() error { return d.db.Close() }
+
+// Scanner is the Scan method shared by *sql.Row and *sql.Rows, so one
+// function can read a row from either.
+type Scanner interface {
+	Scan(dest ...any) error
 }
 
 // Tx applies the same dialect to transaction queries and can defer callbacks
 // until after a successful commit. SQLite sync notifications use that hook.
 type Tx struct {
-	*sql.Tx
+	tx          *sql.Tx
 	dialect     Dialect
 	afterCommit []func()
 }
 
-func WrapTx(tx *sql.Tx, dialect Dialect) *Tx {
-	return &Tx{Tx: tx, dialect: dialect}
-}
-
+// Dialect returns the SQL dialect of the database engine.
 func (t *Tx) Dialect() Dialect { return t.dialect }
 
+// ExecContext rebinds query for the engine and executes it in the transaction.
 func (t *Tx) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
-	return t.Tx.ExecContext(ctx, t.dialect.Rebind(query), args...)
+	return t.tx.ExecContext(ctx, t.dialect.Rebind(query), args...)
 }
 
-func (t *Tx) Exec(query string, args ...any) (sql.Result, error) {
-	return t.Tx.Exec(t.dialect.Rebind(query), args...)
-}
-
+// QueryContext rebinds query for the engine and runs it in the transaction.
 func (t *Tx) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
-	return t.Tx.QueryContext(ctx, t.dialect.Rebind(query), args...)
+	return t.tx.QueryContext(ctx, t.dialect.Rebind(query), args...)
 }
 
-func (t *Tx) Query(query string, args ...any) (*sql.Rows, error) {
-	return t.Tx.Query(t.dialect.Rebind(query), args...)
-}
-
+// QueryRowContext rebinds query for the engine and runs it in the
+// transaction, returning at most one row.
 func (t *Tx) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
-	return t.Tx.QueryRowContext(ctx, t.dialect.Rebind(query), args...)
+	return t.tx.QueryRowContext(ctx, t.dialect.Rebind(query), args...)
 }
 
-func (t *Tx) QueryRow(query string, args ...any) *sql.Row {
-	return t.Tx.QueryRow(t.dialect.Rebind(query), args...)
-}
-
+// AfterCommit registers callback to run once the transaction commits. It is
+// dropped if the transaction rolls back.
 func (t *Tx) AfterCommit(callback func()) {
 	t.afterCommit = append(t.afterCommit, callback)
 }
 
+// Commit commits the transaction and then runs the AfterCommit callbacks.
 func (t *Tx) Commit() error {
-	if err := t.Tx.Commit(); err != nil {
+	if err := t.tx.Commit(); err != nil {
 		return err
 	}
 	for _, callback := range t.afterCommit {
@@ -188,16 +203,44 @@ func (t *Tx) Commit() error {
 	return nil
 }
 
-func Open(cfg config.Config) (*DB, error) {
-	dialect, err := ParseDialect(cfg.DatabaseURL)
+// Rollback aborts the transaction.
+func (t *Tx) Rollback() error { return t.tx.Rollback() }
+
+// Discard rolls the transaction back unless it has already been committed or
+// rolled back, so it is safe to defer right after BeginTx. A rollback failure
+// has no caller to report to, so it is logged.
+func (t *Tx) Discard() {
+	if err := t.tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+		slog.Warn("rolling back transaction", "err", err)
+	}
+}
+
+// Options holds the settings Open needs besides the database URL.
+type Options struct {
+	// BlobDir is checked for existing blobs before a fresh SQLite database
+	// is created.
+	BlobDir string
+	// AllowFresh creates a fresh SQLite database even when BlobDir holds
+	// blobs.
+	AllowFresh bool
+	// PoolMax caps the open and idle Postgres connections.
+	PoolMax int
+	// PoolIdleTimeout closes Postgres connections idle for longer than this.
+	PoolIdleTimeout time.Duration
+}
+
+// Open opens the database named by databaseURL, a postgres://,
+// postgresql://, or sqlite: URL. It does not apply migrations.
+func Open(databaseURL string, opts Options) (*DB, error) {
+	dialect, err := ParseDialect(databaseURL)
 	if err != nil {
 		return nil, err
 	}
 
 	driverName := "pgx"
-	dsn := cfg.DatabaseURL
+	dsn := databaseURL
 	if dialect.engine == SQLite {
-		if err := prepareSQLiteFile(dialect.path, cfg.BlobDir, cfg.AllowFreshDatabase); err != nil {
+		if err := prepareSQLiteFile(dialect.path, opts.BlobDir, opts.AllowFresh); err != nil {
 			return nil, err
 		}
 		driverName = "sqlite"
@@ -209,9 +252,9 @@ func Open(cfg config.Config) (*DB, error) {
 		return nil, err
 	}
 	if dialect.engine == Postgres {
-		database.SetMaxOpenConns(cfg.DBPoolMax)
-		database.SetMaxIdleConns(cfg.DBPoolMax)
-		database.SetConnMaxIdleTime(cfg.DBPoolIdleTimeout)
+		database.SetMaxOpenConns(opts.PoolMax)
+		database.SetMaxIdleConns(opts.PoolMax)
+		database.SetConnMaxIdleTime(opts.PoolIdleTimeout)
 	} else {
 		database.SetMaxOpenConns(4)
 		database.SetMaxIdleConns(4)
@@ -285,13 +328,17 @@ func containsBlobFiles(root string) (bool, error) {
 	return found, err
 }
 
+// TimestampFormat is the fixed-width ISO-8601 UTC millisecond form timestamps
+// are stored in as text. Kysely records migration timestamps in the same form.
 const TimestampFormat = "2006-01-02T15:04:05.000Z"
 
+// Timestamp formats value in UTC using TimestampFormat.
 func Timestamp(value time.Time) string { return value.UTC().Format(TimestampFormat) }
 
 // Time scans both pgx time.Time values and SQLite's fixed-width TEXT form.
 type Time struct{ time.Time }
 
+// Scan implements sql.Scanner.
 func (t *Time) Scan(src any) error {
 	switch value := src.(type) {
 	case time.Time:
@@ -309,24 +356,4 @@ func (t *Time) Scan(src any) error {
 	default:
 		return fmt.Errorf("cannot scan %T as timestamp", src)
 	}
-}
-
-type NullTime struct {
-	Time  time.Time
-	Valid bool
-}
-
-func (t *NullTime) Scan(src any) error {
-	if src == nil {
-		t.Time = time.Time{}
-		t.Valid = false
-		return nil
-	}
-	var value Time
-	if err := value.Scan(src); err != nil {
-		return err
-	}
-	t.Time = value.Time
-	t.Valid = true
-	return nil
 }

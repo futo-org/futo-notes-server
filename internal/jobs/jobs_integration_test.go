@@ -1,49 +1,28 @@
 package jobs_test
 
 import (
-	"context"
-	"database/sql"
 	"fmt"
-	"os"
-	"path/filepath"
 	"slices"
 	"testing"
 	"time"
 	"uuid"
 
 	"futo-notes-server/internal/blobs"
-	databasepkg "futo-notes-server/internal/db"
+	"futo-notes-server/internal/db"
+	"futo-notes-server/internal/dbtest"
 	"futo-notes-server/internal/jobs"
-
-	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 func TestRecurringJobs(t *testing.T) {
-	databaseURL := os.Getenv("JOBS_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("JOBS_TEST_DATABASE_URL is not set")
-	}
-	rawDatabase, err := sql.Open("pgx", databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dialect, err := databasepkg.ParseDialect(databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	database := databasepkg.Wrap(rawDatabase, dialect)
-	defer database.Close()
-	ctx := context.Background()
-	if _, err := databasepkg.Migrate(ctx, database); err != nil {
-		t.Fatal(err)
-	}
+	database := dbtest.Postgres(t, "JOBS_TEST_DATABASE_URL")
+	ctx := t.Context()
 
 	userID := uuid.NewV7().String()
 	if _, err := database.ExecContext(ctx, `INSERT INTO users (id, sub, name, email)
 		VALUES ($1, $2, 'jobs test', $3)`, userID, "jobs-test-"+userID, userID+"@example.invalid"); err != nil {
 		t.Fatal(err)
 	}
-	defer database.ExecContext(ctx, `DELETE FROM users WHERE id = $1`, userID)
+	dbtest.CleanupExec(t, database, `DELETE FROM users WHERE id = $1`, userID)
 
 	t.Run("session reaper", func(t *testing.T) {
 		if _, err := jobs.ReapSessions(ctx, database); err != nil {
@@ -259,12 +238,15 @@ func TestRecurringJobs(t *testing.T) {
 				wantRows = 0
 			}
 			assertRowCount(t, database, `SELECT count(*) FROM blob_ledger WHERE blob_key = $1`, wantRows, key)
-			_, statErr := os.Stat(filepath.Join(store.Dir, filepath.FromSlash(key)))
-			if row.purged && row.withFile && !os.IsNotExist(statErr) {
-				t.Fatalf("purged file %q still exists: %v", key, statErr)
+			exists, err := store.Exists(key)
+			if err != nil {
+				t.Fatal(err)
 			}
-			if !row.purged && row.withFile && statErr != nil {
-				t.Fatalf("protected file %q missing: %v", key, statErr)
+			if row.purged && row.withFile && exists {
+				t.Fatalf("purged file %q still exists", key)
+			}
+			if !row.purged && row.withFile && !exists {
+				t.Fatalf("protected file %q missing", key)
 			}
 		}
 	})
@@ -289,10 +271,10 @@ func TestRecurringJobs(t *testing.T) {
 	})
 }
 
-func assertRowCount(t *testing.T, database *databasepkg.DB, query string, want int, args ...any) {
+func assertRowCount(t *testing.T, database *db.DB, query string, want int, args ...any) {
 	t.Helper()
 	var got int
-	if err := database.QueryRow(query, args...).Scan(&got); err != nil {
+	if err := database.QueryRowContext(t.Context(), query, args...).Scan(&got); err != nil {
 		t.Fatal(err)
 	}
 	if got != want {

@@ -8,12 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"strings"
 	"text/tabwriter"
 	"time"
-
-	"futo-notes-server/internal/config"
 )
 
 type copyTable struct {
@@ -78,13 +77,14 @@ func MigratePostgresToSQLite(ctx context.Context, sourceURL, targetURL string, o
 	if err != nil {
 		return fmt.Errorf("starting Postgres snapshot: %w", err)
 	}
-	defer snapshot.Rollback()
+	defer func() {
+		// The snapshot only read, so failing to end it cannot affect the copy.
+		if rollbackErr := snapshot.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+			slog.Warn("ending Postgres snapshot", "err", rollbackErr)
+		}
+	}()
 
-	target, err := Open(config.Config{
-		DatabaseURL:        targetURL,
-		BlobDir:            "",
-		AllowFreshDatabase: true,
-	})
+	target, err := Open(targetURL, Options{AllowFresh: true})
 	if err != nil {
 		return fmt.Errorf("opening SQLite target: %w", err)
 	}
@@ -96,7 +96,7 @@ func MigratePostgresToSQLite(ctx context.Context, sourceURL, targetURL string, o
 	if err != nil {
 		return fmt.Errorf("starting SQLite copy: %w", err)
 	}
-	defer targetTx.Rollback()
+	defer targetTx.Discard()
 
 	counts := make(map[string]int64, len(sqliteCopyTables))
 	for _, table := range sqliteCopyTables {
@@ -186,13 +186,10 @@ func copyPostgresTable(ctx context.Context, source *sql.Tx, target *Tx, table co
 }
 
 func sqliteCopyValue(value any, compactJSON bool) (any, error) {
-	if value == nil {
-		return nil, nil
-	}
 	if timestamp, ok := value.(time.Time); ok {
 		return Timestamp(timestamp), nil
 	}
-	if !compactJSON {
+	if value == nil || !compactJSON {
 		return value, nil
 	}
 	var source []byte

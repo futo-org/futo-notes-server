@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -62,13 +63,11 @@ func (r *runner) scenarioSQLiteConcurrency(ctx context.Context) {
 	errorsFound := make(chan error, concurrencyMutations+concurrencyJobRequests)
 	var workers sync.WaitGroup
 	for index := range concurrencyMutations {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
+		workers.Go(func() {
 			<-start
 			response, err := target.do(ctx, requestSpec{
 				Method: http.MethodPost, Path: "/api/collections/" + identity.collectionID + "/blob-objects",
-				Body:        []byte(fmt.Sprintf("concurrent encrypted payload %02d", index)),
+				Body:        fmt.Appendf(nil, "concurrent encrypted payload %02d", index),
 				ContentType: "application/octet-stream", Auth: identity.token,
 				Headers: map[string]string{"Mutation-Id": fmt.Sprintf("sqlite-concurrent-%02d", index)},
 			})
@@ -79,12 +78,10 @@ func (r *runner) scenarioSQLiteConcurrency(ctx context.Context) {
 			if response.Status != http.StatusCreated || containsLocked(response.Body) {
 				errorsFound <- fmt.Errorf("mutation %02d returned %d: %s", index, response.Status, preview(response.Body))
 			}
-		}()
+		})
 	}
 	for index := range concurrencyJobRequests {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
+		workers.Go(func() {
 			<-start
 			job := "reconciliation"
 			if index%2 == 1 {
@@ -98,7 +95,7 @@ func (r *runner) scenarioSQLiteConcurrency(ctx context.Context) {
 			if response.Status != http.StatusOK || containsLocked(response.Body) {
 				errorsFound <- fmt.Errorf("%s request %d returned %d: %s", job, index, response.Status, preview(response.Body))
 			}
-		}()
+		})
 	}
 	close(start)
 	workers.Wait()
@@ -119,7 +116,7 @@ func (r *runner) scenarioSQLiteConcurrency(ctx context.Context) {
 		}
 	}
 	if len(problems) != 0 {
-		fail(fmt.Errorf("%s", strings.Join(problems, "; ")))
+		fail(errors.New(strings.Join(problems, "; ")))
 		return
 	}
 	r.result.Matched++
@@ -130,24 +127,27 @@ func (r *runner) prepareSQLiteConcurrency(ctx context.Context, target *target) (
 	var identity sqliteHammerIdentity
 	login, err := target.do(ctx, jsonRequest(http.MethodPost, "/api/auth/dev/login",
 		`{"email":"sqlite-concurrency@example.invalid","name":"SQLite Concurrency"}`, "", http.StatusOK))
-	if err != nil || login.Status != http.StatusOK {
-		return identity, fmt.Errorf("logging in concurrency user: status=%d err=%v body=%s", login.Status, err, preview(login.Body))
+	if err := requireStatus(login, err, http.StatusOK); err != nil {
+		return identity, fmt.Errorf("logging in concurrency user: %w", err)
 	}
-	userID, userFound := jsonPath(login.JSON, "user.id")
-	token, tokenFound := jsonPath(login.JSON, "token")
-	identity.userID, userFound = userID.(string)
-	identity.token, tokenFound = token.(string)
-	if !userFound || !tokenFound || identity.userID == "" || identity.token == "" {
-		return identity, fmt.Errorf("concurrency login returned incomplete identity")
+	// A missing path yields nil, which fails the string assertion.
+	userID, _ := jsonPath(login.JSON, "user.id")
+	token, _ := jsonPath(login.JSON, "token")
+	var userOK, tokenOK bool
+	identity.userID, userOK = userID.(string)
+	identity.token, tokenOK = token.(string)
+	if !userOK || !tokenOK || identity.userID == "" || identity.token == "" {
+		return identity, errors.New("concurrency login returned incomplete identity")
 	}
 	claimed, err := target.do(ctx, requestSpec{Method: http.MethodPost, Path: "/api/collections", Auth: identity.token})
-	if err != nil || claimed.Status != http.StatusCreated {
-		return identity, fmt.Errorf("claiming concurrency collection: status=%d err=%v body=%s", claimed.Status, err, preview(claimed.Body))
+	if err := requireStatus(claimed, err, http.StatusCreated); err != nil {
+		return identity, fmt.Errorf("claiming concurrency collection: %w", err)
 	}
-	collectionID, collectionFound := jsonPath(claimed.JSON, "collection.id")
-	identity.collectionID, collectionFound = collectionID.(string)
-	if !collectionFound || identity.collectionID == "" {
-		return identity, fmt.Errorf("concurrency claim returned no collection ID")
+	collectionID, _ := jsonPath(claimed.JSON, "collection.id")
+	var collectionOK bool
+	identity.collectionID, collectionOK = collectionID.(string)
+	if !collectionOK || identity.collectionID == "" {
+		return identity, errors.New("concurrency claim returned no collection ID")
 	}
 
 	orphanDir := filepath.Join(r.env.goBlob, identity.userID)
@@ -166,12 +166,12 @@ func (r *runner) prepareSQLiteConcurrency(ctx context.Context, target *target) (
 	for index := range concurrencyJobRequests {
 		created, err := target.do(ctx, requestSpec{
 			Method: http.MethodPost, Path: "/api/collections/" + identity.collectionID + "/blob-objects",
-			Body:        []byte(fmt.Sprintf("gc encrypted payload %02d", index)),
+			Body:        fmt.Appendf(nil, "gc encrypted payload %02d", index),
 			ContentType: "application/octet-stream", Auth: identity.token,
 			Headers: map[string]string{"Mutation-Id": fmt.Sprintf("sqlite-gc-create-%02d", index)},
 		})
-		if err != nil || created.Status != http.StatusCreated {
-			return identity, fmt.Errorf("creating GC fixture %d: status=%d err=%v body=%s", index, created.Status, err, preview(created.Body))
+		if err := requireStatus(created, err, http.StatusCreated); err != nil {
+			return identity, fmt.Errorf("creating GC fixture %d: %w", index, err)
 		}
 		objectID, ok := jsonPath(created.JSON, "object.id")
 		objectIDText, stringOK := objectID.(string)
@@ -186,11 +186,23 @@ func (r *runner) prepareSQLiteConcurrency(ctx context.Context, target *target) (
 				"Mutation-Id": fmt.Sprintf("sqlite-gc-delete-%02d", index),
 			},
 		})
-		if err != nil || deleted.Status != http.StatusOK {
-			return identity, fmt.Errorf("deleting GC fixture %d: status=%d err=%v body=%s", index, deleted.Status, err, preview(deleted.Body))
+		if err := requireStatus(deleted, err, http.StatusOK); err != nil {
+			return identity, fmt.Errorf("deleting GC fixture %d: %w", index, err)
 		}
 	}
 	return identity, nil
+}
+
+// requireStatus fails a setup request that hit a transport error or answered
+// anything but want. Both cases report the status and body that came back.
+func requireStatus(response wireResponse, err error, want int) error {
+	if err != nil {
+		return fmt.Errorf("status=%d body=%s: %w", response.Status, preview(response.Body), err)
+	}
+	if response.Status != want {
+		return fmt.Errorf("status=%d body=%s", response.Status, preview(response.Body))
+	}
+	return nil
 }
 
 func containsLocked(body []byte) bool {

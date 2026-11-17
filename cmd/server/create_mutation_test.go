@@ -2,9 +2,9 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"io"
 	"io/fs"
 	"net/http"
@@ -17,6 +17,7 @@ import (
 	"futo-notes-server/internal/blobs"
 	"futo-notes-server/internal/config"
 	"futo-notes-server/internal/db"
+	"futo-notes-server/internal/dbtest"
 	"futo-notes-server/internal/events"
 )
 
@@ -33,21 +34,12 @@ type mutationTestServer struct {
 // blobDir, logs a dev user in, and claims that user's collection.
 func startMutationTestServer(t *testing.T, blobDir string) mutationTestServer {
 	t.Helper()
-	root := t.TempDir()
 	cfg := config.Config{
-		DatabaseURL:  "sqlite:" + filepath.Join(root, "notes.db"),
 		AuthMode:     "dev",
 		CookieSecure: false,
 		BlobDir:      blobDir,
 	}
-	database, err := db.Open(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { database.Close() })
-	if _, err := db.Migrate(context.Background(), database); err != nil {
-		t.Fatal(err)
-	}
+	database := dbtest.SQLite(t)
 	hub := events.NewHub()
 	server := httptest.NewServer(routes(cfg, database, &blobs.Store{Dir: cfg.BlobDir}, hub,
 		events.NewPublisher(database.Dialect(), hub)))
@@ -122,7 +114,7 @@ func (s mutationTestServer) blobFileCount(t *testing.T) int {
 		}
 		return nil
 	})
-	if err != nil && !os.IsNotExist(err) {
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		t.Fatal(err)
 	}
 	return count
@@ -131,7 +123,7 @@ func (s mutationTestServer) blobFileCount(t *testing.T) int {
 func (s mutationTestServer) stagedLedgerRows(t *testing.T) int {
 	t.Helper()
 	var count int
-	if err := s.database.QueryRowContext(context.Background(),
+	if err := s.database.QueryRowContext(t.Context(),
 		`SELECT count(*) FROM blob_ledger WHERE state = 'staged'`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}

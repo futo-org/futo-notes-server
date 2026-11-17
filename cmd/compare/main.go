@@ -27,6 +27,12 @@ type options struct {
 }
 
 func main() {
+	os.Exit(run())
+}
+
+// run executes the comparison and returns the process exit code: 2 for usage
+// errors, 1 for any divergence or infrastructure failure, 0 otherwise.
+func run() int {
 	var scenarioList string
 	opts := options{}
 	flag.StringVar(&opts.mode, "mode", "all", "auth mode to compare: dev, password, or all")
@@ -44,10 +50,10 @@ func main() {
 
 	if opts.mode != "dev" && opts.mode != "password" && opts.mode != "all" {
 		fmt.Fprintln(os.Stderr, "-mode must be dev, password, or all")
-		os.Exit(2)
+		return 2
 	}
 	opts.scenarios = map[string]bool{}
-	for _, name := range strings.Split(scenarioList, ",") {
+	for name := range strings.SplitSeq(scenarioList, ",") {
 		if name = strings.TrimSpace(name); name != "" {
 			opts.scenarios[name] = true
 		}
@@ -57,7 +63,7 @@ func main() {
 	defer cancel()
 	started := time.Now()
 	result := &runResult{}
-	modes := []runConfig{}
+	var modes []runConfig
 	if opts.mode == "dev" || opts.mode == "all" {
 		modes = append(modes, runConfig{name: "dev", authMode: "dev"})
 	}
@@ -91,8 +97,9 @@ func main() {
 		fmt.Printf("ERROR %s\n", item)
 	}
 	if len(result.Divergences) != 0 || len(result.Infrastructure) != 0 {
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }
 
 const comparisonPassword = "comparison-harness-password"

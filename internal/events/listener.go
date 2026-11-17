@@ -22,6 +22,8 @@ func Listen(ctx context.Context, databaseURL string, hub *Hub) {
 	listen(ctx, databaseURL, hub, listenerAppName)
 }
 
+// listen is Listen with the connection's application_name injectable, so
+// tests can find and terminate the listener's backend.
 func listen(ctx context.Context, databaseURL string, hub *Hub, appName string) {
 	delay := initialReconnectDelay
 	for {
@@ -34,23 +36,22 @@ func listen(ctx context.Context, databaseURL string, hub *Hub, appName string) {
 		if connected {
 			delay = initialReconnectDelay
 		}
-		slog.Info("sync events listener lost", "err", err, "reconnect_in", delay)
+		slog.Warn("sync events listener lost", "err", err, "reconnect_in", delay)
 
-		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
-			if !timer.Stop() {
-				<-timer.C
-			}
 			hub.CloseAll()
 			return
-		case <-timer.C:
+		case <-time.After(delay):
 		}
 		delay = min(delay*2, maxReconnectDelay)
 	}
 }
 
-func listenOnce(ctx context.Context, databaseURL string, hub *Hub, appName string) (bool, error) {
+// listenOnce runs one LISTEN connection until it fails or ctx is canceled.
+// connected reports whether LISTEN was established, which resets the
+// reconnect backoff.
+func listenOnce(ctx context.Context, databaseURL string, hub *Hub, appName string) (connected bool, err error) {
 	config, err := pgx.ParseConfig(databaseURL)
 	if err != nil {
 		return false, err

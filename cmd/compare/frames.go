@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 )
@@ -12,7 +13,7 @@ type downloadFrame struct {
 }
 
 func decodeDownloadFrames(body []byte) ([]downloadFrame, error) {
-	frames := []downloadFrame{}
+	var frames []downloadFrame
 	for offset := 0; offset < len(body); {
 		if len(body)-offset < 2 {
 			return nil, fmt.Errorf("truncated key length at %d", offset)
@@ -31,7 +32,7 @@ func decodeDownloadFrames(body []byte) ([]downloadFrame, error) {
 		if len(body)-offset < blobLen {
 			return nil, fmt.Errorf("truncated blob at %d", offset)
 		}
-		blob := append([]byte(nil), body[offset:offset+blobLen]...)
+		blob := bytes.Clone(body[offset : offset+blobLen])
 		offset += blobLen
 		frames = append(frames, downloadFrame{Key: key, Status: status, Blob: blob})
 	}

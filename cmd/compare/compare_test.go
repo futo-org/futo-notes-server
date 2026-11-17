@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"reflect"
 	"testing"
@@ -109,6 +110,39 @@ func TestDownloadFrameRoundTrip(t *testing.T) {
 	want := []downloadFrame{{Key: "key", Status: 0, Blob: []byte("one")}}
 	if !reflect.DeepEqual(frames, want) {
 		t.Fatalf("frames = %#v, want %#v", frames, want)
+	}
+}
+
+// A key present on only one side must be a divergence even when the other
+// side's lookup of that key would read as the zero value.
+func TestSSECheckpointsMatchRequiresIdenticalKeys(t *testing.T) {
+	if sseCheckpointsMatch(map[string]int64{"a": 0}, map[string]int64{"b": 5}, nil, nil) {
+		t.Fatal("checkpoints with different keys matched")
+	}
+	if sseCheckpointsMatch(map[string]int64{"a": 5}, map[string]int64{"a": 6}, nil, nil) {
+		t.Fatal("checkpoints with different versions matched")
+	}
+	if sseCheckpointsMatch(map[string]int64{"a": 5}, map[string]int64{"a": 5}, errors.New("closed"), nil) {
+		t.Fatal("checkpoint with a subscriber error matched")
+	}
+	if !sseCheckpointsMatch(map[string]int64{"a": 5}, map[string]int64{"a": 5}, nil, nil) {
+		t.Fatal("identical checkpoints did not match")
+	}
+}
+
+func TestCookieShape(t *testing.T) {
+	header := http.Header{}
+	header.Add("Set-Cookie", "session=new; Path=/; HttpOnly; SameSite=Lax")
+	header.Add("Set-Cookie", "session=old; Path=/; Max-Age=0; HttpOnly; SameSite=Lax")
+	header.Add("Set-Cookie", "remember=1; Path=/app; Max-Age=60; Secure")
+	header.Add("Set-Cookie", "not a cookie")
+	want := []string{
+		"remember:path=/app:max-age=positive:http-only=false:secure=true:same-site=0",
+		"session:path=/:max-age=delete:http-only=true:secure=false:same-site=2",
+		"session:path=/:max-age=none:http-only=true:secure=false:same-site=2",
+	}
+	if got := cookieShape(wireResponse{Header: header}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("cookieShape() = %q, want %q", got, want)
 	}
 }
 

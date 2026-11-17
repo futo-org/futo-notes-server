@@ -1,18 +1,22 @@
-// Package objects owns versioned object metadata and coordinates its blob ledger.
+// Package objects owns versioned object metadata and coordinates its blob
+// ledger. Mutations are idempotent under a client Mutation ID: the first
+// outcome is stored durably and every retry with the same ID replays it.
 package objects
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"regexp"
-	"strconv"
 	"time"
 	"uuid"
 
-	appdb "futo-notes-server/internal/db"
+	"futo-notes-server/internal/db"
 	"futo-notes-server/internal/events"
+	"futo-notes-server/internal/ids"
 )
 
 const objectColumns = `id, collection_id, version, change_seq, deleted,
@@ -20,136 +24,136 @@ const objectColumns = `id, collection_id, version, change_seq, deleted,
 
 var mutationIDPattern = regexp.MustCompile(`^[A-Za-z0-9._~-]{1,128}$`)
 
-var ErrNotFound = errors.New("not found")
+// Domain failures. A *ConflictError reports a version conflict.
+var (
+	// ErrNotFound reports that the user owns no such collection or object, or
+	// no recoverable create under a Mutation ID.
+	ErrNotFound = errors.New("not found")
+	// ErrBlobNotStaged reports that a mutation named a blob key the user has
+	// not staged within the last 24 hours.
+	ErrBlobNotStaged = errors.New("blob is not staged")
+	// ErrMutationMismatch reports that a Mutation ID was reused for a
+	// different intent than the one it was first used for.
+	ErrMutationMismatch = errors.New("mutation id reused for different intent")
+	// ErrMutationPending reports that the first request under a Mutation ID
+	// has not finished yet.
+	ErrMutationPending = errors.New("mutation still in progress")
+)
 
+// ConflictError reports a mutation that named a version other than the one
+// the object required. Conflict is the payload the client receives.
+type ConflictError struct {
+	Conflict Conflict
+}
+
+// Error returns the conflict's error message, "version conflict".
+func (e *ConflictError) Error() string { return e.Conflict.Error }
+
+// Object is the metadata of one encrypted object. The integer fields travel
+// as JSON strings.
 type Object struct {
 	ID           string    `json:"id"`
 	CollectionID string    `json:"collection_id"`
-	Version      string    `json:"version"`
-	ChangeSeq    string    `json:"change_seq"`
+	Version      int64     `json:"version,string"`
+	ChangeSeq    int64     `json:"change_seq,string"`
 	Deleted      bool      `json:"deleted"`
 	BlobKey      *string   `json:"blob_key"`
-	SizeBytes    *string   `json:"size_bytes"`
+	SizeBytes    *int64    `json:"size_bytes,string"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 
+// DeletedObject is the tombstone a delete answers with.
 type DeletedObject struct {
 	ID        string `json:"id"`
-	Version   string `json:"version"`
-	ChangeSeq string `json:"change_seq"`
+	Version   int64  `json:"version,string"`
+	ChangeSeq int64  `json:"change_seq,string"`
 	Deleted   bool   `json:"deleted"`
 }
 
+// MutationResponse is the answer to a create or update. Replayed is set only
+// for creates: false for a fresh create, true for a replay.
 type MutationResponse struct {
 	Object            Object `json:"object"`
 	CollectionVersion int64  `json:"collectionVersion"`
 	Replayed          *bool  `json:"replayed,omitempty"`
 }
 
+// DeleteResponse is the answer to a delete.
 type DeleteResponse struct {
 	Object            DeletedObject `json:"object"`
 	CollectionVersion int64         `json:"collectionVersion"`
 }
 
+// Conflict is the body of a version conflict: the object's current version
+// and blob key, so the client can merge.
 type Conflict struct {
 	Error          string  `json:"error"`
 	CurrentVersion int64   `json:"currentVersion"`
 	CurrentBlobKey *string `json:"currentBlobKey"`
 }
 
-type ResultCode int
-
-const (
-	OK ResultCode = iota
-	NotFound
-	VersionConflict
-	BlobNotStaged
-	MutationMismatch
-	MutationPending
-)
-
-type MutationOutcome struct {
-	Code     ResultCode
-	Response MutationResponse
-	Conflict Conflict
+// Mutation names what a mutation acts on. ObjectID is the object an update or
+// delete targets and is ignored for a create. MutationID is the client's
+// idempotency key; empty means the mutation is not recorded for replay.
+type Mutation struct {
+	UserID       string
+	CollectionID string
+	ObjectID     string
+	MutationID   string
 }
 
-type DeleteOutcome struct {
-	Code     ResultCode
-	Response DeleteResponse
-	Conflict Conflict
+// Store reads and mutates objects. The publisher announces each new
+// collection version; a Store that only reads may have a nil publisher.
+type Store struct {
+	database  *db.DB
+	publisher events.Publisher
 }
 
-type scanner interface{ Scan(...any) error }
+// New returns a Store over database that announces changes through publisher.
+func New(database *db.DB, publisher events.Publisher) *Store {
+	return &Store{database: database, publisher: publisher}
+}
 
-func scanObject(row scanner) (Object, error) {
+// ValidMutationID reports whether id is a well-formed client Mutation ID.
+func ValidMutationID(id string) bool { return mutationIDPattern.MatchString(id) }
+
+// ValidBlobKey reports whether key is a blob key scoped to userID: the user's
+// UUID, a slash, and a blob UUID.
+func ValidBlobKey(userID, key string) bool {
+	return len(userID) == 36 && len(key) == 73 && key[:36] == userID && key[36] == '/' && ids.IsUUID(key[37:])
+}
+
+func scanObject(row db.Scanner) (Object, error) {
 	var o Object
-	var version, changeSeq int64
-	var blobKey sql.NullString
-	var size sql.NullInt64
-	var createdAt, updatedAt appdb.Time
-	if err := row.Scan(&o.ID, &o.CollectionID, &version, &changeSeq, &o.Deleted,
-		&blobKey, &size, &createdAt, &updatedAt); err != nil {
+	var createdAt, updatedAt db.Time
+	if err := row.Scan(&o.ID, &o.CollectionID, &o.Version, &o.ChangeSeq, &o.Deleted,
+		&o.BlobKey, &o.SizeBytes, &createdAt, &updatedAt); err != nil {
 		return Object{}, err
-	}
-	o.Version = strconv.FormatInt(version, 10)
-	o.ChangeSeq = strconv.FormatInt(changeSeq, 10)
-	if blobKey.Valid {
-		o.BlobKey = &blobKey.String
-	}
-	if size.Valid {
-		s := strconv.FormatInt(size.Int64, 10)
-		o.SizeBytes = &s
 	}
 	o.CreatedAt = createdAt.Time
 	o.UpdatedAt = updatedAt.Time
 	return o, nil
 }
 
-func ValidMutationID(id string) bool { return mutationIDPattern.MatchString(id) }
-
-func ValidUUID(s string) bool {
-	if len(s) != 36 {
-		return false
-	}
-	for i, c := range []byte(s) {
-		switch i {
-		case 8, 13, 18, 23:
-			if c != '-' {
-				return false
-			}
-		default:
-			if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F') {
-				return false
-			}
-		}
-	}
-	return true
-}
-
-func ValidBlobKey(userID, key string) bool {
-	return len(userID) == 36 && len(key) == 73 && key[:36] == userID && key[36] == '/' && ValidUUID(key[37:])
-}
-
-func Exists(ctx context.Context, db *appdb.DB, userID, collectionID string) (bool, error) {
-	if !ValidUUID(collectionID) {
-		return false, nil
+// CheckCollection returns ErrNotFound unless userID owns collectionID.
+func (s *Store) CheckCollection(ctx context.Context, userID, collectionID string) error {
+	if !ids.IsUUID(collectionID) {
+		return ErrNotFound
 	}
 	var one int
-	err := db.QueryRowContext(ctx, `SELECT 1 FROM collections WHERE id = $1 AND user_id = $2`, collectionID, userID).Scan(&one)
+	err := s.database.QueryRowContext(ctx, `SELECT 1 FROM collections WHERE id = $1 AND user_id = $2`, collectionID, userID).Scan(&one)
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+		return ErrNotFound
 	}
-	return err == nil, err
+	return err
 }
 
-func List(ctx context.Context, db *appdb.DB, userID, collectionID string, since int64, limit *int) ([]Object, bool, error) {
-	found, err := Exists(ctx, db, userID, collectionID)
-	if err != nil || !found {
-		if err == nil {
-			err = ErrNotFound
-		}
+// List returns the collection's objects changed after since, in change
+// order. With a limit it returns at most that many and reports whether more
+// remain. It returns ErrNotFound unless userID owns the collection.
+func (s *Store) List(ctx context.Context, userID, collectionID string, since int64, limit *int) ([]Object, bool, error) {
+	if err := s.CheckCollection(ctx, userID, collectionID); err != nil {
 		return nil, false, err
 	}
 	query := `SELECT ` + objectColumns + ` FROM objects
@@ -159,11 +163,12 @@ func List(ctx context.Context, db *appdb.DB, userID, collectionID string, since 
 		query += ` LIMIT $4`
 		args = append(args, *limit+1)
 	}
-	rows, err := db.QueryContext(ctx, query, args...)
+	rows, err := s.database.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, false, err
 	}
 	defer rows.Close()
+	// Never nil: an empty delta serializes as [].
 	result := []Object{}
 	for rows.Next() {
 		o, err := scanObject(rows)
@@ -182,21 +187,33 @@ func List(ctx context.Context, db *appdb.DB, userID, collectionID string, since 
 	return result, hasMore, nil
 }
 
-func Get(ctx context.Context, db *appdb.DB, userID, collectionID, objectID string) (*Object, error) {
-	if !ValidUUID(collectionID) || !ValidUUID(objectID) {
-		return nil, nil
+// Get returns one object, or ErrNotFound unless userID owns it.
+func (s *Store) Get(ctx context.Context, userID, collectionID, objectID string) (Object, error) {
+	if !ids.IsUUID(collectionID) || !ids.IsUUID(objectID) {
+		return Object{}, ErrNotFound
 	}
-	o, err := scanObject(db.QueryRowContext(ctx, `SELECT `+objectColumns+` FROM objects
+	o, err := scanObject(s.database.QueryRowContext(ctx, `SELECT `+objectColumns+` FROM objects
 		WHERE id = $1 AND collection_id = $2 AND user_id = $3`, objectID, collectionID, userID))
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
+		return Object{}, ErrNotFound
 	}
-	if err != nil {
-		return nil, err
-	}
-	return &o, nil
+	return o, err
 }
 
+// pendingBody is the stored body of a mutation that has not finished, and
+// pendingResult the wrapped result prepare inserts as the in-progress claim.
+const (
+	pendingBody   = `{"error":"mutation still in progress"}`
+	pendingResult = `{"status":102,"body":` + pendingBody + `}`
+)
+
+// errorBody is the stored body of a failed mutation.
+type errorBody struct {
+	Error string `json:"error"`
+}
+
+// storedResult is a mutation's durable result: the HTTP status it answered
+// with and its body.
 type storedResult struct {
 	Status int             `json:"status"`
 	Body   json.RawMessage `json:"body"`
@@ -209,8 +226,7 @@ func decodeStoredResult(raw []byte) (storedResult, error) {
 			Status string `json:"status"`
 		}
 		if legacyErr := json.Unmarshal(raw, &legacy); legacyErr == nil && legacy.Status == "pending" {
-			pendingBody, marshalErr := json.Marshal(map[string]string{"error": "mutation still in progress"})
-			return storedResult{Status: 102, Body: pendingBody}, marshalErr
+			return storedResult{Status: http.StatusProcessing, Body: json.RawMessage(pendingBody)}, nil
 		}
 		return stored, err
 	}
@@ -220,105 +236,205 @@ func decodeStoredResult(raw []byte) (storedResult, error) {
 	// Accept unwrapped result bodies so durable outcomes written by an older
 	// deployment remain recoverable after upgrading. Keep this error mapping
 	// in sync with ExpireMutationResults in internal/jobs/jobs.go.
-	stored.Body = append(json.RawMessage(nil), raw...)
-	var body struct {
-		Error string `json:"error"`
-	}
+	stored.Body = bytes.Clone(raw)
+	var body errorBody
 	if err := json.Unmarshal(raw, &body); err != nil {
 		return stored, err
 	}
 	switch body.Error {
 	case "not found":
-		stored.Status = 404
+		stored.Status = http.StatusNotFound
 	case "version conflict", "blob is not staged", "Mutation-Id reused for different intent":
-		stored.Status = 409
+		stored.Status = http.StatusConflict
 	default:
-		stored.Status = 200
+		stored.Status = http.StatusOK
 	}
 	return stored, nil
 }
 
-type mutationIntent struct {
-	Kind             string
-	CollectionID     string
-	ObjectID         *string
-	RequestedVersion *int64
+// mutationResponse returns what a create or update stored as r answered.
+func (r storedResult) mutationResponse(create bool) (MutationResponse, error) {
+	switch r.Status {
+	case http.StatusNotFound:
+		return MutationResponse{}, ErrNotFound
+	case http.StatusConflict:
+		var body errorBody
+		if err := json.Unmarshal(r.Body, &body); err != nil {
+			return MutationResponse{}, err
+		}
+		if body.Error == "blob is not staged" {
+			return MutationResponse{}, ErrBlobNotStaged
+		}
+		return MutationResponse{}, r.conflict()
+	case http.StatusProcessing:
+		return MutationResponse{}, ErrMutationPending
+	default:
+		return r.decodeMutationResponse(create)
+	}
 }
 
-func lockMutation(ctx context.Context, tx *appdb.Tx, userID, mutationID string) error {
-	if mutationID == "" {
+// deleteResponse returns what a delete stored as r answered.
+func (r storedResult) deleteResponse() (DeleteResponse, error) {
+	switch r.Status {
+	case http.StatusProcessing:
+		return DeleteResponse{}, ErrMutationPending
+	case http.StatusConflict:
+		return DeleteResponse{}, r.conflict()
+	}
+	var response DeleteResponse
+	if err := json.Unmarshal(r.Body, &response); err != nil {
+		return DeleteResponse{}, err
+	}
+	if r.Status == http.StatusNotFound {
+		return DeleteResponse{}, ErrNotFound
+	}
+	return response, nil
+}
+
+func (r storedResult) conflict() error {
+	var conflict Conflict
+	if err := json.Unmarshal(r.Body, &conflict); err != nil {
+		return err
+	}
+	return &ConflictError{Conflict: conflict}
+}
+
+func (r storedResult) decodeMutationResponse(create bool) (MutationResponse, error) {
+	var response MutationResponse
+	if err := json.Unmarshal(r.Body, &response); err != nil {
+		return MutationResponse{}, err
+	}
+	if create {
+		response.Replayed = new(true)
+	}
+	return response, nil
+}
+
+// mutationKind is the kind a mutation's result is recorded under.
+type mutationKind string
+
+const (
+	kindCreate mutationKind = "create"
+	kindUpdate mutationKind = "update"
+	kindDelete mutationKind = "delete"
+)
+
+// intent is a mutation together with what a replay must match: its kind and
+// requested version. A create's ObjectID is empty until the object exists.
+type intent struct {
+	Mutation
+	kind             mutationKind
+	requestedVersion *int64
+}
+
+func createIntent(m Mutation) intent {
+	m.ObjectID = ""
+	return intent{Mutation: m, kind: kindCreate}
+}
+
+// recorded reports whether the intent's result is kept under its Mutation ID.
+// A malformed collection or object ID can never match a row, so its outcome
+// is not recorded.
+func (in intent) recorded() bool {
+	return in.MutationID != "" && ids.IsUUID(in.CollectionID) &&
+		(in.kind == kindCreate || ids.IsUUID(in.ObjectID))
+}
+
+// objectID is the object ID a result row records: NULL for a create that has
+// not made its object.
+func (in intent) objectID() *string {
+	if in.ObjectID == "" {
 		return nil
 	}
-	return tx.Dialect().LockMutation(ctx, tx, userID+":"+mutationID)
+	return &in.ObjectID
 }
 
-func replay(ctx context.Context, tx *appdb.Tx, userID, mutationID string, intent mutationIntent) (*storedResult, bool, error) {
-	if mutationID == "" {
-		return nil, false, nil
-	}
-	var kind, collectionID string
-	var objectID sql.NullString
-	var requestedVersion sql.NullInt64
-	var raw []byte
-	err := tx.QueryRowContext(ctx, `SELECT kind, collection_id, object_id, requested_version, result
-		FROM mutation_results WHERE user_id = $1 AND mutation_id = $2`, userID, mutationID).
-		Scan(&kind, &collectionID, &objectID, &requestedVersion, &raw)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, false, nil
-	}
-	if err != nil {
-		return nil, false, err
-	}
-	matches := kind == intent.Kind && collectionID == intent.CollectionID
-	if intent.Kind != "create" {
-		matches = matches && nullableStringEqual(objectID, intent.ObjectID) && nullableIntEqual(requestedVersion, intent.RequestedVersion)
-	}
-	if !matches {
-		return nil, true, nil
-	}
-	stored, err := decodeStoredResult(raw)
-	if err != nil {
-		return nil, false, err
-	}
-	return &stored, false, nil
-}
-
-func prepareMutation(ctx context.Context, db *appdb.DB, userID, mutationID string, intent mutationIntent) (bool, error) {
-	if mutationID == "" || !ValidUUID(intent.CollectionID) ||
-		(intent.ObjectID != nil && !ValidUUID(*intent.ObjectID)) {
+// prepare inserts the in-progress claim for the intent's Mutation ID and
+// reports whether this call inserted it.
+func (s *Store) prepare(ctx context.Context, in intent) (bool, error) {
+	if !in.recorded() {
 		return false, nil
 	}
-	pendingBody, err := json.Marshal(map[string]string{"error": "mutation still in progress"})
-	if err != nil {
-		return false, err
-	}
-	pending, err := json.Marshal(storedResult{Status: 102, Body: pendingBody})
-	if err != nil {
-		return false, err
-	}
 	var inserted int
-	err = db.QueryRowContext(ctx, `INSERT INTO mutation_results
+	err := s.database.QueryRowContext(ctx, `INSERT INTO mutation_results
 		(user_id, mutation_id, kind, collection_id, object_id, requested_version, result, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		ON CONFLICT (user_id, mutation_id) DO NOTHING RETURNING 1`, userID, mutationID,
-		intent.Kind, intent.CollectionID, intent.ObjectID, intent.RequestedVersion, pending, appdb.Timestamp(time.Now())).Scan(&inserted)
+		ON CONFLICT (user_id, mutation_id) DO NOTHING RETURNING 1`, in.UserID, in.MutationID,
+		string(in.kind), in.CollectionID, in.objectID(), in.requestedVersion, []byte(pendingResult), db.Timestamp(time.Now())).Scan(&inserted)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
 	return err == nil, err
 }
 
-func nullableStringEqual(got sql.NullString, want *string) bool {
-	return got.Valid == (want != nil) && (!got.Valid || got.String == *want)
+// begin starts the transaction a mutation runs in, serialized against every
+// other request under the same Mutation ID. When the ID already carries a
+// settled result, begin commits and returns that result instead of a
+// transaction. prepared says this request inserted the ID's pending claim
+// itself, so a pending result is its own claim rather than a settled one.
+func (s *Store) begin(ctx context.Context, in intent, prepared bool) (*db.Tx, *storedResult, error) {
+	tx, err := s.database.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	stored, settled, err := settledResult(ctx, tx, in, prepared)
+	if err == nil && settled {
+		err = tx.Commit()
+	}
+	if err != nil {
+		tx.Discard()
+		return nil, nil, err
+	}
+	if settled {
+		return nil, &stored, nil
+	}
+	return tx, nil, nil
 }
 
-func nullableIntEqual(got sql.NullInt64, want *int64) bool {
-	return got.Valid == (want != nil) && (!got.Valid || got.Int64 == *want)
+// settledResult takes the Mutation ID's lock and returns the result the ID
+// already carries, if any. It returns ErrMutationMismatch when the ID was
+// first used for a different intent.
+func settledResult(ctx context.Context, tx *db.Tx, in intent, prepared bool) (storedResult, bool, error) {
+	if in.MutationID == "" {
+		return storedResult{}, false, nil
+	}
+	if err := tx.Dialect().LockMutation(ctx, tx, in.UserID+":"+in.MutationID); err != nil {
+		return storedResult{}, false, err
+	}
+	var kind, collectionID string
+	var objectID sql.NullString
+	var requestedVersion sql.NullInt64
+	var raw []byte
+	err := tx.QueryRowContext(ctx, `SELECT kind, collection_id, object_id, requested_version, result
+		FROM mutation_results WHERE user_id = $1 AND mutation_id = $2`, in.UserID, in.MutationID).
+		Scan(&kind, &collectionID, &objectID, &requestedVersion, &raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return storedResult{}, false, nil
+	}
+	if err != nil {
+		return storedResult{}, false, err
+	}
+	matches := mutationKind(kind) == in.kind && collectionID == in.CollectionID
+	if in.kind != kindCreate {
+		matches = matches && objectID.Valid && objectID.String == in.ObjectID &&
+			requestedVersion.Valid == (in.requestedVersion != nil) &&
+			(!requestedVersion.Valid || requestedVersion.Int64 == *in.requestedVersion)
+	}
+	if !matches {
+		return storedResult{}, false, ErrMutationMismatch
+	}
+	stored, err := decodeStoredResult(raw)
+	if err != nil {
+		return storedResult{}, false, err
+	}
+	if prepared && stored.Status == http.StatusProcessing {
+		return storedResult{}, false, nil
+	}
+	return stored, true, nil
 }
 
-func saveResult(ctx context.Context, tx *appdb.Tx, userID, mutationID string, intent mutationIntent, status int, body any, resultingObjectID *string) error {
-	if mutationID == "" || !ValidUUID(intent.CollectionID) ||
-		(intent.ObjectID != nil && !ValidUUID(*intent.ObjectID)) {
+func saveResult(ctx context.Context, tx *db.Tx, in intent, status int, body any) error {
+	if !in.recorded() {
 		return nil
 	}
 	bodyJSON, err := json.Marshal(body)
@@ -329,452 +445,314 @@ func saveResult(ctx context.Context, tx *appdb.Tx, userID, mutationID string, in
 	if err != nil {
 		return err
 	}
-	objectID := intent.ObjectID
-	if intent.Kind == "create" {
-		objectID = resultingObjectID
-	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO mutation_results
 		(user_id, mutation_id, kind, collection_id, object_id, requested_version, result, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (user_id, mutation_id) DO UPDATE SET object_id = EXCLUDED.object_id,
-		requested_version = EXCLUDED.requested_version, result = EXCLUDED.result`, userID, mutationID, intent.Kind,
-		intent.CollectionID, objectID, intent.RequestedVersion, storedJSON, appdb.Timestamp(time.Now()))
+		requested_version = EXCLUDED.requested_version, result = EXCLUDED.result`, in.UserID, in.MutationID, string(in.kind),
+		in.CollectionID, in.objectID(), in.requestedVersion, storedJSON, db.Timestamp(time.Now()))
 	return err
 }
 
-func lockCollection(ctx context.Context, tx *appdb.Tx, userID, collectionID string) (bool, error) {
-	if !ValidUUID(collectionID) {
-		return false, nil
+// settle stores status and body as the mutation's result and commits.
+func settle(ctx context.Context, tx *db.Tx, in intent, status int, body any) error {
+	if err := saveResult(ctx, tx, in, status, body); err != nil {
+		return err
 	}
-	var id string
-	err := tx.QueryRowContext(ctx, `SELECT id FROM collections WHERE id = $1 AND user_id = $2`+tx.Dialect().ForUpdate(), collectionID, userID).Scan(&id)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	return err == nil, err
+	return tx.Commit()
 }
 
-func stagedBlobSize(ctx context.Context, tx *appdb.Tx, userID, blobKey string) (int64, bool, error) {
+// settleChange stores status and body as the mutation's result, announces
+// the collection's new version, and commits.
+func (s *Store) settleChange(ctx context.Context, tx *db.Tx, in intent, status int, body any, collectionVersion int64) error {
+	if err := saveResult(ctx, tx, in, status, body); err != nil {
+		return err
+	}
+	if err := s.publisher.Publish(ctx, tx, in.UserID, in.CollectionID, collectionVersion); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// fail ends a mutation that failed with err. A domain failure is stored as
+// the mutation's result and committed, so a retry replays it, and returned.
+// Any other error is returned as is and leaves tx to roll back.
+func fail(ctx context.Context, tx *db.Tx, in intent, err error) error {
+	var status int
+	var body any
+	conflict, isConflict := errors.AsType[*ConflictError](err)
+	switch {
+	case isConflict:
+		status, body = http.StatusConflict, conflict.Conflict
+	case errors.Is(err, ErrBlobNotStaged):
+		status, body = http.StatusConflict, errorBody{Error: "blob is not staged"}
+	case errors.Is(err, ErrNotFound):
+		status, body = http.StatusNotFound, errorBody{Error: "not found"}
+	default:
+		return err
+	}
+	if settleErr := settle(ctx, tx, in, status, body); settleErr != nil {
+		return settleErr
+	}
+	return err
+}
+
+func conflictWith(current Object) *ConflictError {
+	return &ConflictError{Conflict: Conflict{
+		Error: "version conflict", CurrentVersion: current.Version, CurrentBlobKey: current.BlobKey,
+	}}
+}
+
+// lockCollection locks the mutation's collection, or returns ErrNotFound
+// unless the user owns it.
+func lockCollection(ctx context.Context, tx *db.Tx, in intent) error {
+	if !ids.IsUUID(in.CollectionID) {
+		return ErrNotFound
+	}
+	var id string
+	err := tx.QueryRowContext(ctx, `SELECT id FROM collections WHERE id = $1 AND user_id = $2`+tx.Dialect().ForUpdate(),
+		in.CollectionID, in.UserID).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	return err
+}
+
+// lockObject locks and returns the mutation's object, or returns ErrNotFound.
+func lockObject(ctx context.Context, tx *db.Tx, in intent) (Object, error) {
+	if !ids.IsUUID(in.ObjectID) {
+		return Object{}, ErrNotFound
+	}
+	current, err := scanObject(tx.QueryRowContext(ctx, `SELECT `+objectColumns+` FROM objects
+		WHERE id = $1 AND collection_id = $2 AND user_id = $3`+tx.Dialect().ForUpdate(), in.ObjectID, in.CollectionID, in.UserID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Object{}, ErrNotFound
+	}
+	return current, err
+}
+
+// stagedBlobSize locks the user's staged blob and returns its size, or
+// returns ErrBlobNotStaged.
+func stagedBlobSize(ctx context.Context, tx *db.Tx, userID, blobKey string) (int64, error) {
 	var size int64
 	err := tx.QueryRowContext(ctx, `SELECT size_bytes FROM blob_ledger
 		WHERE blob_key = $1 AND user_id = $2 AND state = 'staged'
-		AND created_at > $3`+tx.Dialect().ForUpdate(), blobKey, userID, appdb.Timestamp(time.Now().Add(-24*time.Hour))).Scan(&size)
+		AND created_at > $3`+tx.Dialect().ForUpdate(), blobKey, userID, db.Timestamp(time.Now().Add(-24*time.Hour))).Scan(&size)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, false, nil
+		return 0, ErrBlobNotStaged
 	}
-	return size, err == nil, err
+	return size, err
 }
 
-func decodeMutationResponse(stored *storedResult, create bool) (MutationResponse, error) {
-	var response MutationResponse
-	if err := json.Unmarshal(stored.Body, &response); err != nil {
-		return response, err
-	}
-	if create {
-		replayed := true
-		response.Replayed = &replayed
-	}
-	return response, nil
+func bumpCollectionVersion(ctx context.Context, tx *db.Tx, collectionID string) (int64, error) {
+	var collectionVersion int64
+	err := tx.QueryRowContext(ctx, `UPDATE collections SET current_version = current_version + 1
+		WHERE id = $1 RETURNING current_version`, collectionID).Scan(&collectionVersion)
+	return collectionVersion, err
 }
 
-func mutationOutcomeFromStored(stored *storedResult, create bool) (MutationOutcome, error) {
-	switch stored.Status {
-	case 404:
-		return MutationOutcome{Code: NotFound}, nil
-	case 409:
-		var body struct {
-			Error string `json:"error"`
-		}
-		if err := json.Unmarshal(stored.Body, &body); err != nil {
-			return MutationOutcome{}, err
-		}
-		if body.Error == "blob is not staged" {
-			return MutationOutcome{Code: BlobNotStaged}, nil
-		}
-		var conflict Conflict
-		if err := json.Unmarshal(stored.Body, &conflict); err != nil {
-			return MutationOutcome{}, err
-		}
-		return MutationOutcome{Code: VersionConflict, Conflict: conflict}, nil
-	case 102:
-		return MutationOutcome{Code: MutationPending}, nil
-	default:
-		response, err := decodeMutationResponse(stored, create)
-		if err != nil {
-			return MutationOutcome{}, err
-		}
-		return MutationOutcome{Code: OK, Response: response}, nil
+// releaseBlob moves a superseded blob from claimed to retained. A claimed
+// blob is never eligible for garbage collection; a retained one still reads
+// back from disk, so it can serve as a merge ancestor, and starts the
+// 365-day retention clock.
+func releaseBlob(ctx context.Context, tx *db.Tx, blobKey *string, now string) error {
+	if blobKey == nil {
+		return nil
 	}
+	_, err := tx.ExecContext(ctx, `UPDATE blob_ledger SET state = 'retained', object_id = NULL,
+		object_version = NULL, state_changed_at = $2 WHERE blob_key = $1 AND state = 'claimed'`, *blobKey, now)
+	return err
 }
 
 // Reservation is the in-progress claim a create Mutation ID holds while its
-// request runs. Settled means the ID already carries an outcome: Outcome is
-// the answer, and the caller must neither stage ciphertext nor call
+// request runs. A non-nil Replay means the ID already completed a create:
+// Replay is the answer, and the caller must neither stage ciphertext nor call
 // CreateReserved.
 type Reservation struct {
-	Outcome  MutationOutcome
-	Settled  bool
+	Replay   *MutationResponse
+	mutation Mutation
 	prepared bool
 }
 
 // ReserveCreate records the in-progress claim for a create Mutation ID, or
-// reports the outcome the ID already carries. A caller that has to stage
+// reports the outcome the ID already carries: a completed create as
+// Reservation.Replay, a failed one as its error. A caller that has to stage
 // ciphertext before it can name a blob key reserves the ID first: recovery
 // then sees a pending claim instead of a missing one while the create
 // commits, and a replay of a completed create is answered without staging a
 // second blob. Pass the reservation on to CreateReserved.
-func ReserveCreate(ctx context.Context, db *appdb.DB, userID, collectionID, mutationID string) (Reservation, error) {
-	intent := mutationIntent{Kind: "create", CollectionID: collectionID}
-	prepared, err := prepareMutation(ctx, db, userID, mutationID, intent)
+func (s *Store) ReserveCreate(ctx context.Context, m Mutation) (Reservation, error) {
+	in := createIntent(m)
+	prepared, err := s.prepare(ctx, in)
 	if err != nil {
 		return Reservation{}, err
 	}
-	if prepared || mutationID == "" || !ValidUUID(collectionID) {
-		return Reservation{prepared: prepared}, nil
+	if prepared || !in.recorded() {
+		return Reservation{mutation: in.Mutation, prepared: prepared}, nil
 	}
-	tx, err := db.BeginTx(ctx, nil)
+	tx, stored, err := s.begin(ctx, in, false)
 	if err != nil {
 		return Reservation{}, err
-	}
-	defer tx.Rollback()
-	if err := lockMutation(ctx, tx, userID, mutationID); err != nil {
-		return Reservation{}, err
-	}
-	stored, mismatch, err := replay(ctx, tx, userID, mutationID, intent)
-	if err != nil {
-		return Reservation{}, err
-	}
-	if mismatch {
-		return Reservation{Outcome: MutationOutcome{Code: MutationMismatch}, Settled: true}, nil
 	}
 	// A row that has since expired leaves nothing to replay, so the create
 	// runs as if the ID were fresh.
 	if stored == nil {
-		return Reservation{}, nil
+		tx.Discard()
+		return Reservation{mutation: in.Mutation}, nil
 	}
-	outcome, err := mutationOutcomeFromStored(stored, true)
+	response, err := stored.mutationResponse(true)
 	if err != nil {
 		return Reservation{}, err
 	}
-	if err := tx.Commit(); err != nil {
-		return Reservation{}, err
-	}
-	return Reservation{Outcome: outcome, Settled: true}, nil
+	return Reservation{Replay: &response, mutation: in.Mutation}, nil
 }
 
-func Create(ctx context.Context, db *appdb.DB, publisher events.Publisher, userID, collectionID, mutationID, blobKey string) (MutationOutcome, error) {
-	reservation, err := ReserveCreate(ctx, db, userID, collectionID, mutationID)
-	if err != nil || reservation.Settled {
-		return reservation.Outcome, err
+// Create records a new object for the staged blob blobKey.
+func (s *Store) Create(ctx context.Context, m Mutation, blobKey string) (MutationResponse, error) {
+	reservation, err := s.ReserveCreate(ctx, m)
+	if err != nil {
+		return MutationResponse{}, err
 	}
-	return CreateReserved(ctx, db, publisher, userID, collectionID, mutationID, blobKey, reservation)
+	if reservation.Replay != nil {
+		return *reservation.Replay, nil
+	}
+	return s.CreateReserved(ctx, reservation, blobKey)
 }
 
-// CreateReserved records a new object for a staged blob under the claim
-// ReserveCreate took for mutationID.
-func CreateReserved(ctx context.Context, db *appdb.DB, publisher events.Publisher, userID, collectionID, mutationID, blobKey string, reservation Reservation) (MutationOutcome, error) {
-	intent := mutationIntent{Kind: "create", CollectionID: collectionID}
-	tx, err := db.BeginTx(ctx, nil)
+// CreateReserved records a new object for the staged blob blobKey under the
+// claim ReserveCreate took.
+func (s *Store) CreateReserved(ctx context.Context, reservation Reservation, blobKey string) (MutationResponse, error) {
+	in := createIntent(reservation.mutation)
+	tx, stored, err := s.begin(ctx, in, reservation.prepared)
 	if err != nil {
-		return MutationOutcome{}, err
-	}
-	defer tx.Rollback()
-	if err := lockMutation(ctx, tx, userID, mutationID); err != nil {
-		return MutationOutcome{}, err
-	}
-	stored, mismatch, err := replay(ctx, tx, userID, mutationID, intent)
-	if err != nil {
-		return MutationOutcome{}, err
-	}
-	if mismatch {
-		return MutationOutcome{Code: MutationMismatch}, nil
-	}
-	if reservation.prepared && stored != nil && stored.Status == 102 {
-		stored = nil
+		return MutationResponse{}, err
 	}
 	if stored != nil {
-		outcome, err := mutationOutcomeFromStored(stored, true)
-		if err != nil {
-			return MutationOutcome{}, err
-		}
-		if err := tx.Commit(); err != nil {
-			return MutationOutcome{}, err
-		}
-		return outcome, nil
+		return stored.mutationResponse(true)
 	}
-	found, err := lockCollection(ctx, tx, userID, collectionID)
+	defer tx.Discard()
+	if err := lockCollection(ctx, tx, in); err != nil {
+		return MutationResponse{}, fail(ctx, tx, in, err)
+	}
+	size, err := stagedBlobSize(ctx, tx, in.UserID, blobKey)
 	if err != nil {
-		return MutationOutcome{}, err
+		return MutationResponse{}, fail(ctx, tx, in, err)
 	}
-	if !found {
-		if err := saveResult(ctx, tx, userID, mutationID, intent, 404, map[string]string{"error": "not found"}, nil); err != nil {
-			return MutationOutcome{}, err
-		}
-		if err := tx.Commit(); err != nil {
-			return MutationOutcome{}, err
-		}
-		return MutationOutcome{Code: NotFound}, nil
-	}
-	size, staged, err := stagedBlobSize(ctx, tx, userID, blobKey)
+	collectionVersion, err := bumpCollectionVersion(ctx, tx, in.CollectionID)
 	if err != nil {
-		return MutationOutcome{}, err
-	}
-	if !staged {
-		body := map[string]string{"error": "blob is not staged"}
-		if err := saveResult(ctx, tx, userID, mutationID, intent, 409, body, nil); err != nil {
-			return MutationOutcome{}, err
-		}
-		if err := tx.Commit(); err != nil {
-			return MutationOutcome{}, err
-		}
-		return MutationOutcome{Code: BlobNotStaged}, nil
-	}
-	var collectionVersion int64
-	if err := tx.QueryRowContext(ctx, `UPDATE collections SET current_version = current_version + 1
-		WHERE id = $1 RETURNING current_version`, collectionID).Scan(&collectionVersion); err != nil {
-		return MutationOutcome{}, err
+		return MutationResponse{}, err
 	}
 	objectID := uuid.NewV7().String()
-	now := appdb.Timestamp(time.Now())
+	now := db.Timestamp(time.Now())
 	o, err := scanObject(tx.QueryRowContext(ctx, `INSERT INTO objects
 		(id, collection_id, user_id, version, change_seq, blob_key, size_bytes, created_at, updated_at)
 		VALUES ($1, $2, $3, 1, $4, $5, $6, $7, $7) RETURNING `+objectColumns,
-		objectID, collectionID, userID, collectionVersion, blobKey, size, now))
+		objectID, in.CollectionID, in.UserID, collectionVersion, blobKey, size, now))
 	if err != nil {
-		return MutationOutcome{}, err
+		return MutationResponse{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE blob_ledger SET state = 'claimed', collection_id = $2,
-		object_id = $3, object_version = 1, state_changed_at = $4 WHERE blob_key = $1`, blobKey, collectionID, objectID, now); err != nil {
-		return MutationOutcome{}, err
+		object_id = $3, object_version = 1, state_changed_at = $4 WHERE blob_key = $1`, blobKey, in.CollectionID, objectID, now); err != nil {
+		return MutationResponse{}, err
 	}
-	replayed := false
-	response := MutationResponse{Object: o, CollectionVersion: collectionVersion, Replayed: &replayed}
-	if err := saveResult(ctx, tx, userID, mutationID, intent, 201, response, &objectID); err != nil {
-		return MutationOutcome{}, err
+	// The stored result names the object the create made.
+	in.ObjectID = objectID
+	response := MutationResponse{Object: o, CollectionVersion: collectionVersion, Replayed: new(false)}
+	if err := s.settleChange(ctx, tx, in, http.StatusCreated, response, collectionVersion); err != nil {
+		return MutationResponse{}, err
 	}
-	if err := publisher.Publish(ctx, tx, userID, collectionID, collectionVersion); err != nil {
-		return MutationOutcome{}, err
-	}
-	if err := tx.Commit(); err != nil {
-		return MutationOutcome{}, err
-	}
-	return MutationOutcome{Code: OK, Response: response}, nil
+	return response, nil
 }
 
-func resultCode(status int) ResultCode {
-	switch status {
-	case 404:
-		return NotFound
-	case 409:
-		return VersionConflict
-	default:
-		return OK
-	}
-}
-
-func Update(ctx context.Context, db *appdb.DB, publisher events.Publisher, userID, collectionID, objectID, mutationID, blobKey string, version int64) (MutationOutcome, error) {
-	intent := mutationIntent{Kind: "update", CollectionID: collectionID, ObjectID: &objectID, RequestedVersion: &version}
-	prepared, err := prepareMutation(ctx, db, userID, mutationID, intent)
+// Update replaces the object's blob with the staged blob blobKey. version
+// must be exactly one more than the object's current version.
+func (s *Store) Update(ctx context.Context, m Mutation, blobKey string, version int64) (MutationResponse, error) {
+	in := intent{Mutation: m, kind: kindUpdate, requestedVersion: &version}
+	prepared, err := s.prepare(ctx, in)
 	if err != nil {
-		return MutationOutcome{}, err
+		return MutationResponse{}, err
 	}
-	tx, err := db.BeginTx(ctx, nil)
+	tx, stored, err := s.begin(ctx, in, prepared)
 	if err != nil {
-		return MutationOutcome{}, err
-	}
-	defer tx.Rollback()
-	if err := lockMutation(ctx, tx, userID, mutationID); err != nil {
-		return MutationOutcome{}, err
-	}
-	stored, mismatch, err := replay(ctx, tx, userID, mutationID, intent)
-	if err != nil {
-		return MutationOutcome{}, err
-	}
-	if mismatch {
-		return MutationOutcome{Code: MutationMismatch}, nil
-	}
-	if prepared && stored != nil && stored.Status == 102 {
-		stored = nil
+		return MutationResponse{}, err
 	}
 	if stored != nil {
-		outcome, err := mutationOutcomeFromStored(stored, false)
-		if err != nil {
-			return MutationOutcome{}, err
-		}
-		if err := tx.Commit(); err != nil {
-			return MutationOutcome{}, err
-		}
-		return outcome, nil
+		return stored.mutationResponse(false)
 	}
-	found, err := lockCollection(ctx, tx, userID, collectionID)
+	defer tx.Discard()
+	if err := lockCollection(ctx, tx, in); err != nil {
+		return MutationResponse{}, fail(ctx, tx, in, err)
+	}
+	current, err := lockObject(ctx, tx, in)
 	if err != nil {
-		return MutationOutcome{}, err
+		return MutationResponse{}, fail(ctx, tx, in, err)
 	}
-	if !found {
-		return finishMutationNotFound(ctx, tx, userID, mutationID, intent)
+	if version != current.Version+1 {
+		return MutationResponse{}, fail(ctx, tx, in, conflictWith(current))
 	}
-	if !ValidUUID(objectID) {
-		return finishMutationNotFound(ctx, tx, userID, mutationID, intent)
-	}
-	current, err := scanObject(tx.QueryRowContext(ctx, `SELECT `+objectColumns+` FROM objects
-		WHERE id = $1 AND collection_id = $2 AND user_id = $3`+tx.Dialect().ForUpdate(), objectID, collectionID, userID))
-	if errors.Is(err, sql.ErrNoRows) {
-		return finishMutationNotFound(ctx, tx, userID, mutationID, intent)
-	}
+	size, err := stagedBlobSize(ctx, tx, in.UserID, blobKey)
 	if err != nil {
-		return MutationOutcome{}, err
+		return MutationResponse{}, fail(ctx, tx, in, err)
 	}
-	currentVersion, _ := strconv.ParseInt(current.Version, 10, 64)
-	if version != currentVersion+1 {
-		conflict := Conflict{Error: "version conflict", CurrentVersion: currentVersion, CurrentBlobKey: current.BlobKey}
-		if err := saveResult(ctx, tx, userID, mutationID, intent, 409, conflict, nil); err != nil {
-			return MutationOutcome{}, err
-		}
-		if err := tx.Commit(); err != nil {
-			return MutationOutcome{}, err
-		}
-		return MutationOutcome{Code: VersionConflict, Conflict: conflict}, nil
-	}
-	size, staged, err := stagedBlobSize(ctx, tx, userID, blobKey)
+	collectionVersion, err := bumpCollectionVersion(ctx, tx, in.CollectionID)
 	if err != nil {
-		return MutationOutcome{}, err
+		return MutationResponse{}, err
 	}
-	if !staged {
-		if err := saveResult(ctx, tx, userID, mutationID, intent, 409, map[string]string{"error": "blob is not staged"}, nil); err != nil {
-			return MutationOutcome{}, err
-		}
-		if err := tx.Commit(); err != nil {
-			return MutationOutcome{}, err
-		}
-		return MutationOutcome{Code: BlobNotStaged}, nil
-	}
-	var collectionVersion int64
-	if err := tx.QueryRowContext(ctx, `UPDATE collections SET current_version = current_version + 1 WHERE id = $1 RETURNING current_version`, collectionID).Scan(&collectionVersion); err != nil {
-		return MutationOutcome{}, err
-	}
-	now := appdb.Timestamp(time.Now())
+	now := db.Timestamp(time.Now())
 	o, err := scanObject(tx.QueryRowContext(ctx, `UPDATE objects SET version = $2, change_seq = $3,
 		blob_key = $4, size_bytes = $5, updated_at = $6 WHERE id = $1 RETURNING `+objectColumns,
-		objectID, version, collectionVersion, blobKey, size, now))
+		in.ObjectID, version, collectionVersion, blobKey, size, now))
 	if err != nil {
-		return MutationOutcome{}, err
+		return MutationResponse{}, err
 	}
-	if current.BlobKey != nil {
-		if _, err := tx.ExecContext(ctx, `UPDATE blob_ledger SET state = 'retained', object_id = NULL,
-			object_version = NULL, state_changed_at = $2 WHERE blob_key = $1 AND state = 'claimed'`, *current.BlobKey, now); err != nil {
-			return MutationOutcome{}, err
-		}
+	if err := releaseBlob(ctx, tx, current.BlobKey, now); err != nil {
+		return MutationResponse{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE blob_ledger SET state = 'claimed', collection_id = $2,
-		object_id = $3, object_version = $4, state_changed_at = $5 WHERE blob_key = $1`, blobKey, collectionID, objectID, version, now); err != nil {
-		return MutationOutcome{}, err
+		object_id = $3, object_version = $4, state_changed_at = $5 WHERE blob_key = $1`, blobKey, in.CollectionID, in.ObjectID, version, now); err != nil {
+		return MutationResponse{}, err
 	}
 	response := MutationResponse{Object: o, CollectionVersion: collectionVersion}
-	if err := saveResult(ctx, tx, userID, mutationID, intent, 200, response, nil); err != nil {
-		return MutationOutcome{}, err
+	if err := s.settleChange(ctx, tx, in, http.StatusOK, response, collectionVersion); err != nil {
+		return MutationResponse{}, err
 	}
-	if err := publisher.Publish(ctx, tx, userID, collectionID, collectionVersion); err != nil {
-		return MutationOutcome{}, err
-	}
-	if err := tx.Commit(); err != nil {
-		return MutationOutcome{}, err
-	}
-	return MutationOutcome{Code: OK, Response: response}, nil
+	return response, nil
 }
 
-func finishMutationNotFound(ctx context.Context, tx *appdb.Tx, userID, mutationID string, intent mutationIntent) (MutationOutcome, error) {
-	if err := saveResult(ctx, tx, userID, mutationID, intent, 404, map[string]string{"error": "not found"}, nil); err != nil {
-		return MutationOutcome{}, err
-	}
-	if err := tx.Commit(); err != nil {
-		return MutationOutcome{}, err
-	}
-	return MutationOutcome{Code: NotFound}, nil
-}
-
-func Delete(ctx context.Context, db *appdb.DB, publisher events.Publisher, userID, collectionID, objectID, mutationID string, expectedVersion *int64) (DeleteOutcome, error) {
-	intent := mutationIntent{Kind: "delete", CollectionID: collectionID, ObjectID: &objectID, RequestedVersion: expectedVersion}
-	prepared, err := prepareMutation(ctx, db, userID, mutationID, intent)
+// Delete turns the object into a tombstone. With expectedVersion set, the
+// object must currently be at that version. Deleting a tombstone again
+// answers with the tombstone and changes nothing.
+func (s *Store) Delete(ctx context.Context, m Mutation, expectedVersion *int64) (DeleteResponse, error) {
+	in := intent{Mutation: m, kind: kindDelete, requestedVersion: expectedVersion}
+	prepared, err := s.prepare(ctx, in)
 	if err != nil {
-		return DeleteOutcome{}, err
+		return DeleteResponse{}, err
 	}
-	tx, err := db.BeginTx(ctx, nil)
+	tx, stored, err := s.begin(ctx, in, prepared)
 	if err != nil {
-		return DeleteOutcome{}, err
-	}
-	defer tx.Rollback()
-	if err := lockMutation(ctx, tx, userID, mutationID); err != nil {
-		return DeleteOutcome{}, err
-	}
-	stored, mismatch, err := replay(ctx, tx, userID, mutationID, intent)
-	if err != nil {
-		return DeleteOutcome{}, err
-	}
-	if mismatch {
-		return DeleteOutcome{Code: MutationMismatch}, nil
-	}
-	if prepared && stored != nil && stored.Status == 102 {
-		stored = nil
+		return DeleteResponse{}, err
 	}
 	if stored != nil {
-		if stored.Status == 102 {
-			if err := tx.Commit(); err != nil {
-				return DeleteOutcome{}, err
-			}
-			return DeleteOutcome{Code: MutationPending}, nil
-		}
-		if stored.Status == 409 {
-			var conflict Conflict
-			if err := json.Unmarshal(stored.Body, &conflict); err != nil {
-				return DeleteOutcome{}, err
-			}
-			if err := tx.Commit(); err != nil {
-				return DeleteOutcome{}, err
-			}
-			return DeleteOutcome{Code: VersionConflict, Conflict: conflict}, nil
-		}
-		var response DeleteResponse
-		if err := json.Unmarshal(stored.Body, &response); err != nil {
-			return DeleteOutcome{}, err
-		}
-		if err := tx.Commit(); err != nil {
-			return DeleteOutcome{}, err
-		}
-		return DeleteOutcome{Code: resultCode(stored.Status), Response: response}, nil
+		return stored.deleteResponse()
 	}
-	found, err := lockCollection(ctx, tx, userID, collectionID)
+	defer tx.Discard()
+	if err := lockCollection(ctx, tx, in); err != nil {
+		return DeleteResponse{}, fail(ctx, tx, in, err)
+	}
+	current, err := lockObject(ctx, tx, in)
 	if err != nil {
-		return DeleteOutcome{}, err
-	}
-	if !found || !ValidUUID(objectID) {
-		return finishDeleteNotFound(ctx, tx, userID, mutationID, intent)
-	}
-	current, err := scanObject(tx.QueryRowContext(ctx, `SELECT `+objectColumns+` FROM objects
-		WHERE id = $1 AND collection_id = $2 AND user_id = $3`+tx.Dialect().ForUpdate(), objectID, collectionID, userID))
-	if errors.Is(err, sql.ErrNoRows) {
-		return finishDeleteNotFound(ctx, tx, userID, mutationID, intent)
-	}
-	if err != nil {
-		return DeleteOutcome{}, err
+		return DeleteResponse{}, fail(ctx, tx, in, err)
 	}
 	// The race guard applies to tombstones too: a stale ?version must 409
 	// before the re-delete no-op below.
-	currentVersion, _ := strconv.ParseInt(current.Version, 10, 64)
-	if expectedVersion != nil && *expectedVersion != currentVersion {
-		conflict := Conflict{Error: "version conflict", CurrentVersion: currentVersion, CurrentBlobKey: current.BlobKey}
-		if err := saveResult(ctx, tx, userID, mutationID, intent, 409, conflict, nil); err != nil {
-			return DeleteOutcome{}, err
-		}
-		if err := tx.Commit(); err != nil {
-			return DeleteOutcome{}, err
-		}
-		return DeleteOutcome{Code: VersionConflict, Conflict: conflict}, nil
+	if expectedVersion != nil && *expectedVersion != current.Version {
+		return DeleteResponse{}, fail(ctx, tx, in, conflictWith(current))
 	}
 	if current.Deleted {
 		var collectionVersion int64
 		if err := tx.QueryRowContext(ctx,
-			`SELECT current_version FROM collections WHERE id = $1`, collectionID).Scan(&collectionVersion); err != nil {
-			return DeleteOutcome{}, err
+			`SELECT current_version FROM collections WHERE id = $1`, in.CollectionID).Scan(&collectionVersion); err != nil {
+			return DeleteResponse{}, err
 		}
 		response := DeleteResponse{
 			Object: DeletedObject{
@@ -785,93 +763,67 @@ func Delete(ctx context.Context, db *appdb.DB, publisher events.Publisher, userI
 			},
 			CollectionVersion: collectionVersion,
 		}
-		if err := saveResult(ctx, tx, userID, mutationID, intent, 200, response, nil); err != nil {
-			return DeleteOutcome{}, err
+		if err := settle(ctx, tx, in, http.StatusOK, response); err != nil {
+			return DeleteResponse{}, err
 		}
-		if err := tx.Commit(); err != nil {
-			return DeleteOutcome{}, err
-		}
-		return DeleteOutcome{Code: OK, Response: response}, nil
+		return response, nil
 	}
-	var collectionVersion int64
-	if err := tx.QueryRowContext(ctx, `UPDATE collections SET current_version = current_version + 1 WHERE id = $1 RETURNING current_version`, collectionID).Scan(&collectionVersion); err != nil {
-		return DeleteOutcome{}, err
+	collectionVersion, err := bumpCollectionVersion(ctx, tx, in.CollectionID)
+	if err != nil {
+		return DeleteResponse{}, err
 	}
-	newVersion := currentVersion + 1
 	var deleted DeletedObject
-	var version, changeSeq int64
-	now := appdb.Timestamp(time.Now())
+	now := db.Timestamp(time.Now())
 	if err := tx.QueryRowContext(ctx, `UPDATE objects SET deleted = true, version = $2,
 		change_seq = $3, updated_at = $4 WHERE id = $1 RETURNING id, version, change_seq, deleted`,
-		objectID, newVersion, collectionVersion, now).Scan(&deleted.ID, &version, &changeSeq, &deleted.Deleted); err != nil {
-		return DeleteOutcome{}, err
+		in.ObjectID, current.Version+1, collectionVersion, now).Scan(&deleted.ID, &deleted.Version, &deleted.ChangeSeq, &deleted.Deleted); err != nil {
+		return DeleteResponse{}, err
 	}
-	deleted.Version, deleted.ChangeSeq = strconv.FormatInt(version, 10), strconv.FormatInt(changeSeq, 10)
-	if current.BlobKey != nil {
-		// Release the claim the way an update does. A claimed blob is never
-		// eligible for garbage collection, so a tombstone that kept its claim
-		// would hold its ciphertext on disk forever. Retained still reads back
-		// from disk, so the blob can serve as a merge ancestor, and it starts
-		// the same 365-day clock an update's superseded blob gets.
-		if _, err := tx.ExecContext(ctx, `UPDATE blob_ledger SET state = 'retained', object_id = NULL,
-			object_version = NULL, state_changed_at = $2 WHERE blob_key = $1 AND state = 'claimed'`, *current.BlobKey, now); err != nil {
-			return DeleteOutcome{}, err
-		}
+	// Release the claim the way an update does, or the tombstone would hold
+	// its ciphertext on disk forever.
+	if err := releaseBlob(ctx, tx, current.BlobKey, now); err != nil {
+		return DeleteResponse{}, err
 	}
 	response := DeleteResponse{Object: deleted, CollectionVersion: collectionVersion}
-	if err := saveResult(ctx, tx, userID, mutationID, intent, 200, response, nil); err != nil {
-		return DeleteOutcome{}, err
+	if err := s.settleChange(ctx, tx, in, http.StatusOK, response, collectionVersion); err != nil {
+		return DeleteResponse{}, err
 	}
-	if err := publisher.Publish(ctx, tx, userID, collectionID, collectionVersion); err != nil {
-		return DeleteOutcome{}, err
-	}
-	if err := tx.Commit(); err != nil {
-		return DeleteOutcome{}, err
-	}
-	return DeleteOutcome{Code: OK, Response: response}, nil
+	return response, nil
 }
 
-func finishDeleteNotFound(ctx context.Context, tx *appdb.Tx, userID, mutationID string, intent mutationIntent) (DeleteOutcome, error) {
-	if err := saveResult(ctx, tx, userID, mutationID, intent, 404, map[string]string{"error": "not found"}, nil); err != nil {
-		return DeleteOutcome{}, err
-	}
-	if err := tx.Commit(); err != nil {
-		return DeleteOutcome{}, err
-	}
-	return DeleteOutcome{Code: NotFound}, nil
-}
-
-func RecoverCreate(ctx context.Context, db *appdb.DB, userID, collectionID, mutationID string) (MutationOutcome, error) {
-	found, err := Exists(ctx, db, userID, collectionID)
-	if err != nil || !found {
-		return MutationOutcome{Code: NotFound}, err
+// RecoverCreate returns the outcome of the create recorded under mutationID:
+// the stored response with Replayed set, ErrMutationPending while it runs,
+// or ErrNotFound when there is no such create or it failed.
+func (s *Store) RecoverCreate(ctx context.Context, userID, collectionID, mutationID string) (MutationResponse, error) {
+	if err := s.CheckCollection(ctx, userID, collectionID); err != nil {
+		return MutationResponse{}, err
 	}
 	var kind string
 	var raw []byte
-	err = db.QueryRowContext(ctx, `SELECT kind, result FROM mutation_results
+	err := s.database.QueryRowContext(ctx, `SELECT kind, result FROM mutation_results
 		WHERE user_id = $1 AND mutation_id = $2 AND collection_id = $3`, userID, mutationID, collectionID).Scan(&kind, &raw)
 	if errors.Is(err, sql.ErrNoRows) {
-		return MutationOutcome{Code: NotFound}, nil
+		return MutationResponse{}, ErrNotFound
 	}
 	if err != nil {
-		return MutationOutcome{}, err
+		return MutationResponse{}, err
 	}
-	if kind != "create" {
-		return MutationOutcome{Code: NotFound}, nil
+	if mutationKind(kind) != kindCreate {
+		return MutationResponse{}, ErrNotFound
 	}
 	stored, err := decodeStoredResult(raw)
 	if err != nil {
-		return MutationOutcome{}, err
+		return MutationResponse{}, err
 	}
-	if stored.Status == 102 {
-		return MutationOutcome{Code: MutationPending}, nil
+	switch {
+	case stored.Status == http.StatusProcessing:
+		return MutationResponse{}, ErrMutationPending
+	case stored.Status == http.StatusNotFound, stored.Status == http.StatusConflict:
+		return MutationResponse{}, ErrNotFound
+	case stored.Status < http.StatusOK || stored.Status >= http.StatusMultipleChoices:
+		// No status this server or its predecessor records lands here; an
+		// unknown one recovers as an empty success, as it always has.
+		return MutationResponse{}, nil
 	}
-	if stored.Status < 200 || stored.Status >= 300 {
-		return MutationOutcome{Code: resultCode(stored.Status)}, nil
-	}
-	response, err := decodeMutationResponse(&stored, true)
-	if err != nil {
-		return MutationOutcome{}, err
-	}
-	return MutationOutcome{Code: OK, Response: response}, nil
+	return stored.decodeMutationResponse(true)
 }

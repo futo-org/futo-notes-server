@@ -1,46 +1,25 @@
 package main
 
 import (
-	"context"
-	"database/sql"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 
 	"futo-notes-server/internal/blobs"
 	"futo-notes-server/internal/config"
-	databasepkg "futo-notes-server/internal/db"
+	"futo-notes-server/internal/dbtest"
 	"futo-notes-server/internal/events"
 	"uuid"
-
-	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 func TestRoutesComposePublicAuthAndRecoveryMiddleware(t *testing.T) {
-	databaseURL := os.Getenv("SERVER_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("SERVER_TEST_DATABASE_URL is not set")
-	}
-	rawDatabase, err := sql.Open("pgx", databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dialect, err := databasepkg.ParseDialect(databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	database := databasepkg.Wrap(rawDatabase, dialect)
-	defer database.Close()
-	if _, err := databasepkg.Migrate(context.Background(), database); err != nil {
-		t.Fatal(err)
-	}
+	database := dbtest.Postgres(t, "SERVER_TEST_DATABASE_URL")
 
 	cfg := config.Config{
-		AuthMode:     "dev",
+		AuthMode:     config.AuthModeDev,
 		CookieSecure: false,
 		DevUI:        true,
 		BlobDir:      t.TempDir(),
@@ -115,26 +94,10 @@ func TestRoutesComposePublicAuthAndRecoveryMiddleware(t *testing.T) {
 }
 
 func TestRoutesComposePasswordLoginRateLimit(t *testing.T) {
-	databaseURL := os.Getenv("SERVER_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("SERVER_TEST_DATABASE_URL is not set")
-	}
-	rawDatabase, err := sql.Open("pgx", databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dialect, err := databasepkg.ParseDialect(databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	database := databasepkg.Wrap(rawDatabase, dialect)
-	defer database.Close()
-	if _, err := databasepkg.Migrate(context.Background(), database); err != nil {
-		t.Fatal(err)
-	}
+	database := dbtest.Postgres(t, "SERVER_TEST_DATABASE_URL")
 
 	cfg := config.Config{
-		AuthMode:     "password",
+		AuthMode:     config.AuthModePassword,
 		Password:     "correct password",
 		CookieSecure: false,
 		BlobDir:      t.TempDir(),
@@ -178,7 +141,7 @@ func serverClient(server *httptest.Server) *http.Client {
 
 func doRequest(t *testing.T, client *http.Client, method, url, body, bearer string, cookie *http.Cookie) routeTestResponse {
 	t.Helper()
-	request, err := http.NewRequest(method, url, strings.NewReader(body))
+	request, err := http.NewRequestWithContext(t.Context(), method, url, strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}

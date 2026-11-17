@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
@@ -47,7 +48,10 @@ type managedProcess struct {
 	cmd     *exec.Cmd
 	logPath string
 	logFile *os.File
-	wait    chan error
+	// exited is closed once the process has been reaped; exitErr holds
+	// cmd.Wait's result and may only be read after that.
+	exited  chan struct{}
+	exitErr error
 	once    sync.Once
 }
 
@@ -60,7 +64,7 @@ func runComparison(ctx context.Context, opts options, cfg runConfig) (result run
 	}
 	keep := opts.keep
 	defer func() {
-		if err := env.close(context.Background(), opts, keep || len(result.Divergences) != 0 || returnedErr != nil); err != nil {
+		if err := env.close(context.Background(), keep || len(result.Divergences) != 0 || returnedErr != nil); err != nil {
 			result.Infrastructure = append(result.Infrastructure, cfg.name+" teardown: "+err.Error())
 		}
 	}()
@@ -97,8 +101,7 @@ func startEnvironment(ctx context.Context, opts options, cfg runConfig) (*enviro
 	}
 	env := &environment{tmpDir: tmpDir}
 	fail := func(cause error) (*environment, error) {
-		env.close(context.Background(), opts, true)
-		return nil, cause
+		return nil, errors.Join(cause, env.close(context.Background(), true))
 	}
 
 	env.db, err = sql.Open("pgx", opts.adminURL)
@@ -147,12 +150,12 @@ func startEnvironment(ctx context.Context, opts options, cfg runConfig) (*enviro
 		"LOG_LEVEL": "warn", "DEV_UI": "false", "FUTO_NOTES_PASSWORD": cfg.password,
 		"FUTO_NOTES_PASSWORD_HASH": cfg.passwordHash,
 	}
-	tsEnv := cloneMap(common)
+	tsEnv := maps.Clone(common)
 	env.tsDatabaseURL = databaseURL(opts.adminURL, env.dbTS)
 	tsEnv["DATABASE_URL"] = env.tsDatabaseURL
 	tsEnv["PORT"] = strconv.Itoa(opts.tsPort)
 	tsEnv["BLOB_DIR"] = env.tsBlob
-	goEnv := cloneMap(common)
+	goEnv := maps.Clone(common)
 	if opts.engineParity {
 		env.goDatabaseURL = "sqlite:" + filepath.Join(tmpDir, "notes.db")
 	} else {
@@ -209,8 +212,11 @@ func startProcess(name, dir, logPath string, env map[string]string, program stri
 		logFile.Close()
 		return nil, fmt.Errorf("starting %s server: %w", name, err)
 	}
-	p := &managedProcess{name: name, cmd: cmd, logPath: logPath, logFile: logFile, wait: make(chan error, 1)}
-	go func() { p.wait <- cmd.Wait() }()
+	p := &managedProcess{name: name, cmd: cmd, logPath: logPath, logFile: logFile, exited: make(chan struct{})}
+	go func() {
+		p.exitErr = cmd.Wait()
+		close(p.exited)
+	}()
 	return p, nil
 }
 
@@ -222,8 +228,12 @@ func waitHealthy(ctx context.Context, process *managedProcess, baseURL string, t
 	client := &http.Client{Timeout: time.Second}
 	for {
 		select {
-		case err := <-process.wait:
-			return fmt.Errorf("%s server exited during startup (%v); log: %s\n%s", process.name, err, process.logPath, tail(process.logPath))
+		case <-process.exited:
+			err := process.exitErr
+			if err == nil {
+				err = errors.New("exit status 0")
+			}
+			return fmt.Errorf("%s server exited during startup (%w); log: %s\n%s", process.name, err, process.logPath, tail(process.logPath))
 		case <-deadline.C:
 			return fmt.Errorf("%s server was not healthy after %s; log: %s\n%s", process.name, timeout, process.logPath, tail(process.logPath))
 		case <-ctx.Done():
@@ -240,7 +250,7 @@ func waitHealthy(ctx context.Context, process *managedProcess, baseURL string, t
 	}
 }
 
-func (e *environment) close(ctx context.Context, opts options, keep bool) error {
+func (e *environment) close(ctx context.Context, keep bool) error {
 	var errs []error
 	for _, process := range []*managedProcess{e.ts, e.goSrv} {
 		if process != nil {
@@ -280,13 +290,15 @@ func (p *managedProcess) stop() error {
 	var stopErr error
 	p.once.Do(func() {
 		_ = p.cmd.Process.Signal(os.Interrupt)
+		// The exit status after a deliberate interrupt or kill is expected and
+		// says nothing about the comparison, so exitErr is not reported.
 		select {
-		case <-p.wait:
+		case <-p.exited:
 		case <-time.After(3 * time.Second):
 			if err := p.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
 				stopErr = err
 			}
-			<-p.wait
+			<-p.exited
 		}
 		stopErr = errors.Join(stopErr, p.logFile.Close())
 	})
@@ -335,14 +347,6 @@ func withEnv(base []string, overrides map[string]string) []string {
 	}
 	for key, value := range overrides {
 		result = append(result, key+"="+value)
-	}
-	return result
-}
-
-func cloneMap(source map[string]string) map[string]string {
-	result := make(map[string]string, len(source))
-	for key, value := range source {
-		result[key] = value
 	}
 	return result
 }

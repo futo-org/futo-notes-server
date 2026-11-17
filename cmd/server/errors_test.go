@@ -35,7 +35,8 @@ func TestServerError(t *testing.T) {
 	}
 	for _, want := range []string{
 		`level=ERROR`,
-		`msg="loading things"`,
+		`msg="internal server error"`,
+		`action="loading things"`,
 		`err="database unavailable"`,
 		`method=POST`,
 		`path=/api/things`,
@@ -91,7 +92,7 @@ func TestRecoverPanicPropagatesAbortHandler(t *testing.T) {
 		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/stream", nil))
 	}()
 
-	if recovered != http.ErrAbortHandler {
+	if err, ok := recovered.(error); !ok || !errors.Is(err, http.ErrAbortHandler) {
 		t.Fatalf("recovered = %#v, want http.ErrAbortHandler", recovered)
 	}
 }
