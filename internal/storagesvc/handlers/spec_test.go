@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
+
+	"futo-notes-server/internal/httputil"
 )
 
 // Every response the other tests receive is checked against the spec by
@@ -21,7 +23,7 @@ func TestSpecDescribesEveryRoute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	routes = append(routes, http.MethodGet+" "+readyPath)
+	routes = append(routes, http.MethodGet+" "+httputil.ReadyPath)
 
 	var documented []string
 	for path, item := range loadSpec(t).Paths.Map() {

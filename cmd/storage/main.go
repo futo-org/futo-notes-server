@@ -113,7 +113,7 @@ func main() {
 	// swallowed by the drain.
 	stop()
 
-	if err := drain(srv, httpSrv, cfg.DrainDelay, cfg.ShutdownTimeout); err != nil {
+	if err := srv.Drain(httpSrv, cfg.DrainDelay, cfg.ShutdownTimeout); err != nil {
 		log.Error().Err(err).Msg("shutdown deadline hit with requests still in flight")
 	}
 
@@ -127,20 +127,4 @@ func main() {
 		}
 	}
 	log.Info().Msg("shutdown complete")
-}
-
-// drain retires this instance in two phases. Phase one fails /readyz while
-// serving as before, giving the readiness probe and the EndpointSlice time to
-// move new requests to another replica. Only then does phase two close the
-// listener and wait for in-flight requests; closing it first would reset live
-// blob transfers.
-func drain(srv *handlers.Server, httpSrv *http.Server, delay, timeout time.Duration) error {
-	srv.BeginDrain()
-	log.Info().Dur("drain_delay", delay).Msg("draining: readiness failing, still serving")
-	time.Sleep(delay)
-
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	log.Info().Dur("timeout", timeout).Msg("closing listener, waiting for in-flight requests")
-	return httpSrv.Shutdown(ctx)
 }

@@ -32,6 +32,7 @@ import (
 	"github.com/rs/zerolog/hlog"
 	"github.com/rs/zerolog/log"
 
+	"futo-notes-server/internal/httputil"
 	"futo-notes-server/internal/mockoidc"
 )
 
@@ -101,12 +102,7 @@ func router(provider *mockoidc.Provider) http.Handler {
 	r.Use(hlog.RequestIDHandler("request_id", "X-Request-Id"))
 	r.Use(hlog.RemoteAddrHandler("remote_ip"))
 	r.Use(hlog.UserAgentHandler("user_agent"))
-	r.Use(hlog.AccessHandler(func(r *http.Request, status, size int, duration time.Duration) {
-		hlog.FromRequest(r).Info().
-			Int("status", status).Int("size", size).Dur("duration", duration).
-			Str("method", r.Method).Str("path", r.URL.Path).
-			Msgf("%s %s (%d)", r.Method, r.URL.Path, status)
-	}))
+	r.Use(hlog.AccessHandler(httputil.LogAccess))
 	r.Use(chimw.Recoverer)
 	r.Mount("/", provider.Handler())
 	return r

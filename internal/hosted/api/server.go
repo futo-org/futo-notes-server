@@ -8,8 +8,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"sync/atomic"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
@@ -28,8 +26,6 @@ import (
 	"futo-notes-server/internal/syncapi"
 )
 
-const readyPath = "/readyz"
-
 // Options are what a Server is built from.
 type Options struct {
 	Config   config.Config
@@ -45,8 +41,10 @@ type Options struct {
 	Version string
 }
 
-// Server serves the hosted API.
+// Server serves the hosted API. Its embedded Readiness answers the readiness
+// probe and drains it.
 type Server struct {
+	httputil.Readiness
 	cfg       config.Config
 	database  *db.DB
 	accounts  *account.Store
@@ -59,7 +57,6 @@ type Server struct {
 	version   string
 	oidc      *oidcClient
 	storage   *storageclient.Client
-	draining  atomic.Bool
 }
 
 // New returns a Server for o.
@@ -93,13 +90,9 @@ func New(o Options) (*Server, error) {
 // Accounts returns the account store the server acts through.
 func (s *Server) Accounts() *account.Store { return s.accounts }
 
-// BeginDrain fails readiness while the server keeps serving, so the load
-// balancer moves traffic away before the listener closes.
-func (s *Server) BeginDrain() { s.draining.Store(true) }
-
 // Handler returns the server's HTTP handler.
 func (s *Server) Handler() http.Handler {
-	return s.withReadiness(s.router())
+	return s.Readiness.Wrap(s.router())
 }
 
 func (s *Server) router() chi.Router {
@@ -109,7 +102,7 @@ func (s *Server) router() chi.Router {
 		hlog.RequestIDHandler("request_id", "X-Request-Id"),
 		hlog.RemoteAddrHandler("remote_ip"),
 		hlog.UserAgentHandler("user_agent"),
-		hlog.AccessHandler(logAccess),
+		hlog.AccessHandler(httputil.LogAccess),
 		s.metrics.middleware,
 		syncapi.RecoverPanic,
 		chimw.GetHead,
@@ -176,24 +169,6 @@ func (s *Server) syncRoutes(r chi.Router) {
 	r.Delete("/collections/{id}/objects/{objectId}", syncapi.HandleDeleteObject(s.database, s.publisher))
 	r.Get("/collections/{id}/create-mutations/{mutationId}", syncapi.HandleRecoverCreate(s.database))
 	r.Get("/sync/events", s.metrics.countStreams(syncapi.HandleSyncEvents(s.hub)))
-}
-
-// withReadiness answers /readyz ahead of the router, so probes stay out of
-// the access log and metrics. Readiness does not check the database: an
-// outage is shared by every replica, and failing them all would only empty
-// the Service.
-func (s *Server) withReadiness(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != readyPath {
-			next.ServeHTTP(w, r)
-			return
-		}
-		if s.draining.Load() {
-			http.Error(w, "draining", http.StatusServiceUnavailable)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	})
 }
 
 // errorShape picks how authentication failures are answered: the sync
@@ -266,19 +241,4 @@ func requireActiveAccount(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
-}
-
-// logAccess writes the access log line for a finished request.
-func logAccess(r *http.Request, status, size int, duration time.Duration) {
-	route := chi.RouteContext(r.Context()).RoutePattern()
-	if route == "" {
-		route = r.URL.Path
-	}
-	hlog.FromRequest(r).Info().
-		Int("status", status).
-		Int("size", size).
-		Dur("duration", duration).
-		Str("method", r.Method).
-		Str("path", r.URL.Path).
-		Msgf("%s %s (%d)", r.Method, route, status)
 }

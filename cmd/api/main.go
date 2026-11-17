@@ -5,7 +5,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -209,7 +208,7 @@ func run() error {
 	// A second signal now kills the process instead of being swallowed.
 	stopSignals()
 
-	if err := drain(server, httpSrv, cfg.DrainDelay, cfg.ShutdownTimeout); err != nil {
+	if err := server.Drain(httpSrv, cfg.DrainDelay, cfg.ShutdownTimeout); err != nil {
 		log.Error().Err(err).Msg("shutdown deadline hit with requests still in flight")
 	}
 	stopBackground()
@@ -221,22 +220,6 @@ func run() error {
 		log.Error().Err(err).Msg("meter provider shutdown")
 	}
 	log.Info().Msg("shutdown complete")
-	return nil
-}
-
-// drain fails readiness and keeps serving for delay, so the load balancer
-// stops routing here, then closes the listener and waits up to timeout for
-// in-flight requests.
-func drain(server *api.Server, httpSrv *http.Server, delay, timeout time.Duration) error {
-	server.BeginDrain()
-	log.Info().Dur("drain_delay", delay).Msg("draining: readiness failing, still serving")
-	time.Sleep(delay)
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	log.Info().Dur("timeout", timeout).Msg("closing listener, waiting for in-flight requests")
-	if err := httpSrv.Shutdown(ctx); err != nil {
-		return errors.Join(err, httpSrv.Close())
-	}
 	return nil
 }
 

@@ -1,5 +1,6 @@
 // Package httputil is the HTTP plumbing the hosted binaries share: the hosted
-// error body and JSON writer used by the hosted API and the storage service.
+// error body and JSON writer used by the hosted API and the storage service,
+// the access log line, and the readiness probe with its two-phase drain.
 package httputil
 
 import (
