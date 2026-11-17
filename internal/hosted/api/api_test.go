@@ -13,6 +13,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 
 	"futo-notes-server/internal/events"
+	"futo-notes-server/internal/hosted/config"
 	"futo-notes-server/internal/hosted/hostedtest"
 	"futo-notes-server/internal/hostedauth"
 )
@@ -226,6 +227,25 @@ func TestAppSignInDeviceName(t *testing.T) {
 	}
 	expectContains(t, browser.expect(http.MethodGet, "/dashboard/devices", nil, http.StatusOK),
 		`<td class="ua">`+strings.Repeat("é", 99)+`x</td>`, `<td class="ua">Go-http-client/1.1 <span class="tag">This device</span>`)
+}
+
+func TestAppRedirectSchemesAreExact(t *testing.T) {
+	start := func(h *harness, redirect string) response {
+		return h.client().do(http.MethodGet, "/api/auth/oidc/start?"+url.Values{
+			"redirect_uri": {redirect}, "code_challenge": {challenge}, "code_challenge_method": {"S256"},
+		}.Encode(), nil)
+	}
+	release := newHarnessWith(t, func(c *config.Config) { c.AppRedirectSchemes = []string{"tech.futo.notes"} })
+	if res := start(release, "tech.futo.notes://oauth/callback"); res.status != http.StatusFound {
+		t.Fatalf("release scheme = %d %s, want 302", res.status, res.body)
+	}
+	expectHostedError(t, start(release, "tech.futo.notes.dev://oauth/callback"), http.StatusBadRequest, "invalid_request")
+
+	both := newHarnessWith(t, func(c *config.Config) { c.AppRedirectSchemes = []string{"tech.futo.notes", "tech.futo.notes.dev"} })
+	back := both.client().appCode(both.newSub(), "tech.futo.notes.dev://oauth/callback")
+	if back.Scheme != "tech.futo.notes.dev" || back.Query().Get("code") == "" {
+		t.Fatalf("dev scheme redirect = %s", back)
+	}
 }
 
 func TestAppSignInRejectsDisallowedRedirects(t *testing.T) {

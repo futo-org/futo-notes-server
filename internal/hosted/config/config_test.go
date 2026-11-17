@@ -124,12 +124,12 @@ func TestLoadRejects(t *testing.T) {
 
 func TestLoadRedirectSchemes(t *testing.T) {
 	env := validEnv(t)
-	env["APP_REDIRECT_SCHEMES"] = " org.futo.notes , Notes+Dev "
+	env["APP_REDIRECT_SCHEMES"] = " org.futo.notes , Notes+Dev , tech.futo.notes.dev"
 	cfg, err := config.Load(getenv(env))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(cfg.AppRedirectSchemes, ",") != "org.futo.notes,notes+dev" {
+	if strings.Join(cfg.AppRedirectSchemes, ",") != "org.futo.notes,notes+dev,tech.futo.notes.dev" {
 		t.Fatalf("schemes = %v", cfg.AppRedirectSchemes)
 	}
 }

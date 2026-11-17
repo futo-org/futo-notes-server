@@ -62,7 +62,7 @@ plain-http cookies). Every prod release sets the following.
 | `publicUrl` | the external origin, no path: `https://notes.futo.cloud` in prod, `https://notes-staging.apps.futo.network` in staging |
 | `oidcIssuer` | the Zitadel instance URL, exactly as its discovery document's `issuer` |
 | `oidcClientId` | the Zitadel application's client id |
-| `appRedirectSchemes` | the custom URL schemes the apps sign in through. Loopback `http://127.0.0.1:<port>` and `http://[::1]:<port>` are always allowed; `http` and `https` are refused. |
+| `appRedirectSchemes` | the custom URL schemes the apps sign in through: `[tech.futo.notes]` (the release apps, and the chart default) in prod, `[tech.futo.notes, tech.futo.notes.dev]` in staging so dev builds can sign in too. Loopback `http://127.0.0.1:<port>` and `http://[::1]:<port>` are always allowed (desktop); `http` and `https` are refused, so claimed `https` app links are not accepted. |
 | `regions` | the regions file (format below) |
 | `postgresClusterName` | `notes-db` |
 | `secretData` | `null` |

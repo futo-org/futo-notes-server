@@ -74,8 +74,9 @@ publicUrl: http://localhost:3005
 oidcIssuer: http://mock-oidc:8092
 oidcClientId: notes-dev
 # Custom URL schemes apps may sign in through (redirect_uri), besides loopback
-# http. Empty until the apps ship hosted sign-in.
-appRedirectSchemes: []
+# http: the release apps' tech.futo.notes. Staging adds the dev builds'
+# tech.futo.notes.dev (docs/Hosted deployment.md); prod must not.
+appRedirectSchemes: [tech.futo.notes]
 
 # The regions users choose from, rendered into the regions ConfigMap. endpoint
 # is the storage service's address as clients reach it; receipt_public_keys
