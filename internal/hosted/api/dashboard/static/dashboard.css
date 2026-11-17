@@ -1,54 +1,132 @@
+/* The FUTO Notes app's "Ambient Precision" theme (src/styles/theme.css in the
+   apps repo) and its Settings presentation, for the account dashboard. */
+
+@font-face {
+  font-family: 'Barlow';
+  src: url('Barlow-400-latin.woff2') format('woff2');
+  font-weight: 400;
+  font-display: swap;
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329,
+    U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Barlow';
+  src: url('Barlow-400-latin-ext.woff2') format('woff2');
+  font-weight: 400;
+  font-display: swap;
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+1D00-1DBF, U+1E00-1E9F,
+    U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: 'Barlow';
+  src: url('Barlow-500-latin.woff2') format('woff2');
+  font-weight: 500;
+  font-display: swap;
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329,
+    U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Barlow';
+  src: url('Barlow-500-latin-ext.woff2') format('woff2');
+  font-weight: 500;
+  font-display: swap;
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+1D00-1DBF, U+1E00-1E9F,
+    U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: 'Barlow';
+  src: url('Barlow-600-latin.woff2') format('woff2');
+  font-weight: 600;
+  font-display: swap;
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329,
+    U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Barlow';
+  src: url('Barlow-600-latin-ext.woff2') format('woff2');
+  font-weight: 600;
+  font-display: swap;
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+1D00-1DBF, U+1E00-1E9F,
+    U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
 :root {
   color-scheme: light dark;
-  --bg: #f6f7f9;
-  --surface: #ffffff;
-  --border: #d9dce3;
-  --text: #1c1f26;
-  --muted: #5b6272;
-  --accent: #2f5fd0;
-  --accent-text: #ffffff;
-  --danger: #b3261e;
-  --danger-bg: #fdecea;
-  --warn-bg: #fff4d6;
-  --warn-border: #e2b33b;
-  --focus: #2f5fd0;
+  --color-primary: #f26b1f;
+  --color-text: #0f0f0f;
+  --color-border: #e5e5e5;
+  --color-surface: #f2f2f2;
+  --color-bg: #fcfcfc;
+  --color-danger: #dc2626;
+  --color-danger-fill: #dc2626;
+  --ink-rgb: 15, 15, 15;
+  --primary-rgb: 242, 107, 31;
+  /* The app's muted (#737373) is 4.2:1 on its surface; this is 4.6:1. */
+  --color-muted: #6e6e6e;
+  /* Filled buttons are the app's primary. White on it is 3.0:1, too little
+     for a label, so labels are ink (6.3:1), as the dark theme's are. */
+  --color-accent: #f26b1f;
+  --color-accent-hover: #d9550f;
+  --color-on-accent: #0f0f0f;
+  /* Orange text: the primary's hue, dark enough for 4.5:1 on the surface. */
+  --color-link: #bc4b0b;
+  --font-sans: 'Barlow', system-ui, -apple-system, sans-serif;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #15171c;
-    --surface: #1e2128;
-    --border: #343946;
-    --text: #e3e6ec;
-    --muted: #a0a7b6;
-    --accent: #7ea6ff;
-    --accent-text: #0d1220;
-    --danger: #ff8a80;
-    --danger-bg: #3a1d1b;
-    --warn-bg: #3a3017;
-    --warn-border: #a8842b;
-    --focus: #7ea6ff;
+    --color-primary: #ff7a33;
+    --color-text: #fafafa;
+    --color-border: #262626;
+    --color-surface: #171717;
+    --color-bg: #0a0a0a;
+    --color-danger: #ef4444;
+    --color-danger-fill: #b91c1c;
+    --ink-rgb: 250, 250, 250;
+    --primary-rgb: 255, 122, 51;
+    --color-muted: #a3a3a3;
+    --color-accent: #ff7a33;
+    --color-accent-hover: #ff9559;
+    --color-on-accent: #0a0a0a;
+    --color-link: #ff7a33;
   }
 }
 
 * { box-sizing: border-box; }
 
+html { background: var(--color-bg); }
+
 body {
   margin: 0;
-  background: var(--bg);
-  color: var(--text);
-  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
 }
 
-a { color: var(--accent); }
+strong, b { font-weight: 600; }
 
-:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+a { color: var(--color-link); text-underline-offset: 2px; }
+
+::selection { background: rgba(var(--primary-rgb), 0.25); }
+
+:focus-visible { outline: 2px solid var(--color-link); outline-offset: 2px; }
 
 .skip {
   position: absolute;
   left: -10000px;
 }
-.skip:focus { left: 1rem; top: 1rem; background: var(--surface); padding: .5rem 1rem; }
+.skip:focus {
+  left: 16px;
+  top: 12px;
+  z-index: 2;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 8px 14px;
+}
 
 .visually-hidden {
   position: absolute;
@@ -59,108 +137,281 @@ a { color: var(--accent); }
   white-space: nowrap;
 }
 
+/* Header: icon and wordmark, then the account and Sign out, on one line at
+   every width. The email gives way first. */
 header.site {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
-  gap: 1rem;
-  padding: .75rem 1.25rem;
-  background: var(--surface);
-  border-bottom: 1px solid var(--border);
+  gap: 12px;
+  max-width: 632px;
+  margin: 0 auto;
+  padding: 16px 16px 8px;
 }
-header.site .brand { font-weight: 600; color: var(--text); text-decoration: none; }
-header.site .who { margin-left: auto; color: var(--muted); }
-header.site form { margin: 0; }
-
-#page { max-width: 46rem; margin: 0 auto; padding: 1rem 1.25rem 3rem; }
-
-nav ul { display: flex; flex-wrap: wrap; gap: .25rem 1.25rem; list-style: none; margin: 0 0 1rem; padding: 0; }
-nav a { text-decoration: none; padding: .25rem 0; }
-nav a[aria-current="page"] { color: var(--text); font-weight: 600; border-bottom: 2px solid var(--accent); }
-
-h1 { font-size: 1.6rem; margin: .5rem 0 1rem; }
-h2 { font-size: 1.1rem; margin: 0 0 .5rem; }
-
-section.card {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 1rem 1.25rem;
-  margin: 0 0 1rem;
+header.site .brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  color: var(--color-text);
+  font-size: 17px;
+  font-weight: 600;
+  text-decoration: none;
 }
-
-section.banner {
-  background: var(--warn-bg);
-  border: 1px solid var(--warn-border);
-  border-radius: 8px;
-  padding: 1rem 1.25rem;
-  margin: 0 0 1rem;
+/* The icon is a white app tile; the ring keeps its edge in both themes. */
+header.site .brand img { display: block; width: 32px; height: 32px; border-radius: 8px; box-shadow: 0 0 0 1px var(--color-border); }
+header.site .who {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-muted);
+  font-size: 13px;
+}
+header.site form { flex: none; margin: 0; }
+@media (max-width: 359px) {
+  header.site .who { visibility: hidden; }
 }
 
-dl { display: grid; grid-template-columns: max-content 1fr; gap: .25rem 1.5rem; margin: 0; }
-dt { color: var(--muted); }
-dd { margin: 0; overflow-wrap: anywhere; }
+#page { max-width: 632px; margin: 0 auto; padding: 8px 16px 48px; }
 
-.muted { color: var(--muted); }
+/* The navigation is the app's segmented control. */
+nav ul {
+  display: grid;
+  grid-auto-columns: minmax(0, 1fr);
+  grid-auto-flow: column;
+  gap: 4px;
+  margin: 0 0 20px;
+  padding: 4px;
+  list-style: none;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: var(--color-bg);
+}
+nav a {
+  display: block;
+  padding: 9px 8px;
+  border-radius: 9px;
+  color: var(--color-muted);
+  font-size: 14px;
+  font-weight: 500;
+  text-align: center;
+  text-decoration: none;
+  white-space: nowrap;
+}
+nav a:hover { color: var(--color-text); background: rgba(var(--ink-rgb), 0.04); }
+nav a[aria-current="page"] { background: var(--color-accent); color: var(--color-on-accent); }
+
+h1 { font-size: 22px; font-weight: 600; line-height: 1.25; margin: 4px 4px 16px; }
+h2 { font-size: 16px; font-weight: 600; margin: 0 0 6px; }
+p { margin: 0 0 12px; }
+main > p { margin-left: 4px; margin-right: 4px; color: var(--color-muted); }
+
+/* A Settings section: a small uppercase title over a rounded card. */
+.section { margin: 0 0 24px; }
+.section-title {
+  margin: 0 0 8px 4px;
+  color: var(--color-muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.card {
+  background: var(--color-surface);
+  border-radius: 12px;
+  padding: 14px 16px;
+}
+.card > :last-child { margin-bottom: 0; }
+
+/* Label and value rows, divided like the app's grouped rows. */
+dl { margin: 0 0 12px; }
+dl > div {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 2px 16px;
+  padding: 10px 0;
+  border-top: 1px solid var(--color-border);
+}
+dl > div:first-child { border-top: 0; padding-top: 0; }
+dl > div:last-child { padding-bottom: 0; }
+dt { color: var(--color-muted); }
+dd { margin: 0; font-weight: 500; text-align: right; overflow-wrap: anywhere; }
+
+.muted, .hint { color: var(--color-muted); }
+.hint { font-size: 13px; line-height: 1.4; }
+
+.item-title { margin: 0 0 2px; font-size: 16px; font-weight: 500; }
+.item-desc { margin: 0 0 12px; color: var(--color-muted); font-size: 13px; line-height: 1.4; }
+
+ul.facts { margin: 0 0 14px; padding-left: 20px; }
+ul.facts li { margin: 0 0 6px; }
 
 .alert {
-  background: var(--danger-bg);
-  color: var(--danger);
-  border: 1px solid var(--danger);
-  border-radius: 8px;
-  padding: .75rem 1rem;
-  margin: 0 0 1rem;
+  margin: 0 0 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-danger);
+  border-radius: 10px;
+  color: var(--color-text);
 }
 
 .notice {
-  border: 1px solid var(--accent);
-  border-radius: 8px;
-  padding: .75rem 1rem;
-  margin: 0 0 1rem;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-primary);
+  border-radius: 10px;
+  background: rgba(var(--primary-rgb), 0.08);
 }
+
+/* The pending deletion: the app's warning box, a danger outline. */
+.banner {
+  margin: 0 0 24px;
+  padding: 14px 16px;
+  border: 1px solid var(--color-danger);
+  border-radius: 12px;
+}
+.banner h2 { margin-bottom: 4px; }
+.banner p { color: var(--color-muted); font-size: 14px; }
+.banner > :last-child { margin-bottom: 0; }
+
+.sign-in { max-width: 420px; margin: 32px auto 0; text-align: center; }
+.sign-in img { display: block; margin: 0 auto 16px; border-radius: 16px; box-shadow: 0 0 0 1px var(--color-border); }
+.sign-in h1 { margin: 0 0 8px; }
+.sign-in p { color: var(--color-muted); }
+.sign-in .button { min-width: 160px; }
 
 /* Stripe sizes the checkout frame itself; this only keeps the panel from
    collapsing while it loads. */
-.checkout { min-height: 12rem; margin-top: 1rem; }
+.checkout { min-height: 12rem; margin-top: 12px; border-radius: 12px; overflow: hidden; }
+.checkout [data-checkout-status]:empty { display: none; }
 
+/* Buttons: one filled action per card, the rest bordered (settings-visual.md). */
 button, .button {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 40px;
+  padding: 9px 16px;
+  border: 1px solid var(--color-accent);
+  border-radius: 10px;
+  background: var(--color-accent);
+  color: var(--color-on-accent);
   font: inherit;
-  padding: .45rem 1rem;
-  border-radius: 6px;
-  border: 1px solid var(--accent);
-  background: var(--accent);
-  color: var(--accent-text);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.2;
   text-decoration: none;
   cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: transform 0.1s ease;
 }
-button.secondary { background: transparent; color: var(--accent); }
-button.danger { background: var(--danger); border-color: var(--danger); color: var(--surface); }
+button:hover, .button:hover { background: var(--color-accent-hover); border-color: var(--color-accent-hover); }
+button:active, .button:active { transform: scale(0.98); }
+button.secondary {
+  min-height: 32px;
+  padding: 6px 14px;
+  border-color: var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-size: 13px;
+}
+button.secondary:hover { background: rgba(var(--ink-rgb), 0.06); border-color: var(--color-muted); }
+button.danger { background: var(--color-danger-fill); border-color: var(--color-danger-fill); color: #ffffff; }
+button.danger:hover {
+  background: color-mix(in srgb, var(--color-danger-fill) 84%, var(--color-text));
+  border-color: color-mix(in srgb, var(--color-danger-fill) 84%, var(--color-text));
+}
 
-input[type="text"] {
-  font: inherit;
-  padding: .45rem .6rem;
-  border: 1px solid var(--border);
+label { font-size: 13px; color: var(--color-muted); }
+kbd {
+  padding: 1px 6px;
+  border: 1px solid var(--color-border);
   border-radius: 6px;
-  background: var(--bg);
-  color: var(--text);
-  width: 100%;
-  max-width: 20rem;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
 }
 
-fieldset { border: 0; margin: 0 0 1rem; padding: 0; }
-legend { font-weight: 600; margin-bottom: .5rem; }
-.choice { display: flex; gap: .6rem; align-items: flex-start; padding: .6rem 0; border-top: 1px solid var(--border); }
-.choice label span { display: block; color: var(--muted); }
+/* The app's input border is 1.2:1 on the page; a field needs 3:1 to be seen. */
+input[type="text"] {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--color-muted);
+  border-radius: 10px;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font: inherit;
+  font-size: 14px;
+}
+input[type="text"]:focus-visible { outline: none; border-color: var(--color-primary); box-shadow: 0 0 0 1px var(--color-primary); }
 
-form.stack > * + * { margin-top: .75rem; }
-form.stack label { display: block; }
+form.stack > * + * { margin-top: 8px; }
+form.stack label { display: block; margin: 0 2px; }
+form.stack button { margin-top: 12px; }
 
+/* The region choice: the app's "doors" list of options. */
+fieldset { margin: 0 0 12px; padding: 0; border: 0; }
+legend { margin: 0 0 8px 2px; padding: 0; color: var(--color-muted); font-size: 13px; }
+.choice {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-bg);
+}
+.choice + .choice { margin-top: 6px; }
+.choice:has(input:checked) { border-color: var(--color-primary); background: rgba(var(--primary-rgb), 0.08); }
+.choice input { margin: 3px 0 0; accent-color: var(--color-link); }
+.choice label { flex: 1; color: var(--color-text); font-size: 15px; cursor: pointer; }
+.choice label::after { content: ""; position: absolute; inset: 0; }
+.choice label strong { font-weight: 500; }
+.choice label span { display: block; color: var(--color-muted); font-size: 13px; }
+
+/* Devices: a table on wide screens, stacked rows on narrow ones. */
 table { width: 100%; border-collapse: collapse; }
-th, td { text-align: left; padding: .5rem .5rem .5rem 0; border-top: 1px solid var(--border); vertical-align: top; }
-thead th { border-top: 0; color: var(--muted); font-weight: 500; }
+th, td { padding: 10px 12px 10px 0; text-align: left; vertical-align: middle; border-top: 1px solid var(--color-border); }
+th:last-child, td:last-child { padding-right: 0; text-align: right; }
+thead th { padding-top: 0; border-top: 0; color: var(--color-muted); font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
+tbody td { font-size: 14px; }
+tbody tr:last-child td { padding-bottom: 0; }
 td form { margin: 0; }
-.ua { overflow-wrap: anywhere; }
-.tag { display: inline-block; font-size: .8rem; padding: 0 .4rem; border-radius: 4px; border: 1px solid var(--accent); color: var(--accent); }
+.ua { font-weight: 500; font-size: 15px; overflow-wrap: anywhere; }
+.when { color: var(--color-muted); white-space: nowrap; }
+.tag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: rgba(var(--primary-rgb), 0.14);
+  color: var(--color-text);
+  font-size: 12px;
+  font-weight: 500;
+  vertical-align: 1px;
+  white-space: nowrap;
+}
+@media (max-width: 560px) {
+  thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  table, tbody, tr, td { display: block; }
+  tbody tr { position: relative; padding: 12px 0; border-top: 1px solid var(--color-border); }
+  tbody tr:first-child { padding-top: 0; border-top: 0; }
+  tbody tr:last-child { padding-bottom: 0; }
+  tbody td { padding: 0; border: 0; text-align: left; }
+  tbody td:last-child { text-align: left; }
+  td.ua { margin-bottom: 2px; }
+  td.when { font-size: 13px; }
+  td.when::before { content: attr(data-label) " "; }
+  td form { margin-top: 8px; }
+}
 
 .htmx-request button { opacity: .6; cursor: progress; }
+
+@media (forced-colors: active) {
+  nav a[aria-current="page"] { outline: 2px solid Highlight; }
+}

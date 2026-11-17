@@ -3,49 +3,64 @@
 {{define "main" -}}
 {{if .Account.PurgeAt}}{{template "pending-deletion" .}}{{end}}
 <h1>Your account</h1>
-<section class="card" aria-labelledby="profile-heading">
-<h2 id="profile-heading">Profile</h2>
+<section class="section" aria-labelledby="profile-heading">
+<h2 class="section-title" id="profile-heading">Profile</h2>
+<div class="card">
 <dl>
-<dt>Name</dt><dd>{{.Account.User.Name}}</dd>
-<dt>Email</dt><dd>{{.Account.User.Email}}</dd>
+<div><dt>Name</dt><dd>{{.Account.User.Name}}</dd></div>
+<div><dt>Email</dt><dd>{{.Account.User.Email}}</dd></div>
 </dl>
+</div>
 </section>
 {{with .Billing}}{{template "billing" $}}{{end -}}
-<section class="card" aria-labelledby="region-heading">
-<h2 id="region-heading">Region</h2>
+<section class="section" aria-labelledby="region-heading">
+<h2 class="section-title" id="region-heading">Storage region</h2>
+<div class="card">
 {{with .Region -}}
-<p><strong>{{.Name}}</strong><br><span class="muted">{{.Description}}</span></p>
-<p class="muted">Your notes are stored in this region. It cannot be changed.</p>
+<p class="item-title"><strong>{{.Name}}</strong></p>
+{{with .Description}}<p class="item-desc">{{.}}</p>{{end}}
+<p class="hint">Chosen when you set up your account. It can't be changed.</p>
 {{- else -}}
 <p>Not chosen yet. <a href="/dashboard/region">Choose a region</a> before syncing.</p>
 {{- end}}
+</div>
 </section>
-<section class="card" aria-labelledby="usage-heading">
-<h2 id="usage-heading">Usage</h2>
+<section class="section" aria-labelledby="usage-heading">
+<h2 class="section-title" id="usage-heading">Usage</h2>
+<div class="card">
 <dl>
-<dt>Collections</dt><dd>{{.Account.Collections}}</dd>
-<dt>Blobs</dt><dd>{{.Account.Blobs}}</dd>
-<dt>Stored</dt><dd><data value="{{.Account.StoredBytes}}">{{humanBytes .Account.StoredBytes}}</data></dd>
+<div><dt>Collections</dt><dd>{{.Account.Collections}}</dd></div>
+<div><dt>Blobs</dt><dd>{{.Account.Blobs}}</dd></div>
+<div><dt>Stored</dt><dd><data value="{{.Account.StoredBytes}}">{{humanBytes .Account.StoredBytes}}</data></dd></div>
 </dl>
+</div>
 </section>
 {{- end}}
 
 
 {{define "billing" -}}
-<section class="card" aria-labelledby="billing-heading">
-<h2 id="billing-heading">Subscription</h2>
+<section class="section" aria-labelledby="billing-heading">
+<h2 class="section-title" id="billing-heading">Subscription</h2>
+<div class="card">
 {{template "notice" .}}
 {{with .Billing.Current -}}
+{{- /* Deleting the account cancels web and Play renewals; only the subscriber can cancel in the App Store. */ -}}
+{{- $cancelled := and $.Account.PurgeAt (ne .Source "app_store") -}}
 <dl>
-<dt>Status</dt><dd data-billing-status="{{.Status}}">{{if $.Billing.Entitled}}Active{{else}}Inactive{{end}} ({{.Status}})</dd>
-<dt>Bought</dt><dd data-billing-source="{{.Source}}">{{if eq .Source "web"}}On the web{{else if eq .Source "app_store"}}In the App Store{{else}}On Google Play{{end}}</dd>
-{{with .ExpiresAt}}<dt>{{if $.Billing.Current.WillRenew}}Renews{{else}}Ends{{end}}</dt><dd><time datetime="{{isoTime .}}">{{utcTime .}}</time></dd>{{end}}
+<div><dt>Status</dt><dd data-billing-status="{{.Status}}">{{statusLabel .Status $.Billing.Entitled}}</dd></div>
+<div><dt>Bought</dt><dd data-billing-source="{{.Source}}">{{if eq .Source "web"}}On the web{{else if eq .Source "app_store"}}In the App Store{{else}}On Google Play{{end}}</dd></div>
+{{with .ExpiresAt}}<div><dt>{{if and $.Billing.Current.WillRenew (not $cancelled)}}Renews{{else}}Ends{{end}}</dt><dd><time datetime="{{isoTime .}}">{{utcTime .}}</time></dd></div>{{end}}
 </dl>
+{{- if and $cancelled $.Billing.Entitled}}
+<p class="hint">It won't renew: your account is scheduled for deletion.</p>
+{{- else if and $.Account.PurgeAt .WillRenew $.Billing.Entitled}}
+<p class="hint">Your account is scheduled for deletion, but this subscription still renews. Cancel it in the App Store's subscription settings.</p>
+{{- end}}
 {{- else -}}
 <p>No subscription yet.</p>
 {{- end}}
 {{if not .Billing.Entitled -}}
-<p>Without a subscription your notes stay readable, but your devices cannot sync changes.</p>
+<p class="hint">Without a subscription your notes stay readable, but your devices cannot sync changes.</p>
 {{if .EmbeddedCheckout -}}
 {{with .Checkout}}{{template "checkout-panel" .}}{{else -}}
 <p><a class="button" href="/dashboard/billing/subscribe" hx-get="/dashboard/billing/subscribe" hx-push-url="true">Subscribe</a></p>
@@ -57,13 +72,14 @@
 </form>
 {{- end}}
 {{- end}}
-{{with .Billing.Current}}{{if and (eq .Source "web") $.WebPayments -}}
+{{with .Billing.Current}}{{if $.Account.PurgeAt}}{{else if and (eq .Source "web") $.WebPayments -}}
 <form method="post" action="/dashboard/billing/portal" hx-post="/dashboard/billing/portal">
 {{template "csrf-field" $}}
 <button type="submit" class="secondary">Manage subscription</button>
 </form>
 {{- else if ne .Source "web" -}}
-<p class="muted">Manage it in the subscription settings of the store you bought it in.</p>
+<p class="hint">Manage it in the subscription settings of the store you bought it in.</p>
 {{- end}}{{end}}
+</div>
 </section>
 {{- end}}

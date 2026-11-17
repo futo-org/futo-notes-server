@@ -226,7 +226,8 @@ func TestAppSignInDeviceName(t *testing.T) {
 		}
 	}
 	expectContains(t, browser.expect(http.MethodGet, "/dashboard/devices", nil, http.StatusOK),
-		`<td class="ua">`+strings.Repeat("é", 99)+`x</td>`, `<td class="ua">Go-http-client/1.1 <span class="tag">This device</span>`)
+		`<td class="ua" title="reqwest/0.12">`+strings.Repeat("é", 99)+`x</td>`,
+		`<td class="ua" title="Go-http-client/1.1">Go-http-client <span class="tag">This device</span>`)
 }
 
 func TestAppRedirectSchemesAreExact(t *testing.T) {

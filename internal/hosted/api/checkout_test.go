@@ -25,7 +25,7 @@ import (
 
 const checkoutCSP = "default-src 'none'; " +
 	"script-src 'self' https://js.stripe.com https://*.js.stripe.com https://checkout.stripe.com; " +
-	"style-src 'self'; img-src 'self' https://*.stripe.com; " +
+	"style-src 'self'; img-src 'self' https://*.stripe.com; font-src 'self'; " +
 	"connect-src 'self' https://api.stripe.com https://checkout.stripe.com; " +
 	"frame-src https://js.stripe.com https://*.js.stripe.com https://hooks.stripe.com https://checkout.stripe.com; " +
 	"form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
