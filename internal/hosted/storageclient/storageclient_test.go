@@ -221,7 +221,8 @@ func TestCallsRetryTransientFailuresOnly(t *testing.T) {
 }
 
 func TestEachAttemptTimesOut(t *testing.T) {
-	c, f := newClient(t, nil, func(w http.ResponseWriter, r *http.Request, _ int) {
+	reader := sdkmetric.NewManualReader()
+	c, _ := newClient(t, sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)), func(w http.ResponseWriter, r *http.Request, _ int) {
 		select {
 		case <-r.Context().Done():
 		case <-time.After(5 * time.Second):
@@ -231,9 +232,31 @@ func TestEachAttemptTimesOut(t *testing.T) {
 	c.timeout = 50 * time.Millisecond
 	start := time.Now()
 	_, err := c.PurgeUser(t.Context(), region, user)
-	if !errors.Is(err, context.DeadlineExceeded) || f.calls.Load() != attempts || time.Since(start) > 3*time.Second {
-		t.Fatalf("purge against a hung service = %v over %d calls in %s", err, f.calls.Load(), time.Since(start))
+	// Attempts are counted by the client: under load an attempt can time out
+	// before its request reaches the hung server at all.
+	if made := attemptsMade(t, reader); !errors.Is(err, context.DeadlineExceeded) || made != attempts || time.Since(start) > 3*time.Second {
+		t.Fatalf("purge against a hung service = %v after %d attempts in %s", err, made, time.Since(start))
 	}
+}
+
+// attemptsMade sums the client's storage_client.calls counter.
+func attemptsMade(t *testing.T, reader *sdkmetric.ManualReader) int64 {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatal(err)
+	}
+	var made int64
+	for _, scope := range rm.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if sum, ok := m.Data.(metricdata.Sum[int64]); ok && m.Name == "storage_client.calls" {
+				for _, point := range sum.DataPoints {
+					made += point.Value
+				}
+			}
+		}
+	}
+	return made
 }
 
 func TestCallsAreRecordedByRegionAndOperation(t *testing.T) {
