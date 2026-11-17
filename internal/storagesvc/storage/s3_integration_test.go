@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 	"uuid"
+
+	"futo-notes-server/internal/storagesvc/adminapi"
 )
 
 // testBucket is the MinIO bucket the S3 integration tests use; compose and
@@ -47,7 +49,7 @@ func testUser(t *testing.T, s *S3Storage) string {
 	t.Cleanup(func() {
 		ctx := context.Background()
 		for {
-			page, err := s.ListObjects(ctx, user+"/", "", MaxDeleteKeys)
+			page, err := s.ListObjects(ctx, user+"/", "", adminapi.MaxDeleteKeys)
 			if err != nil {
 				t.Errorf("cleanup list: %v", err)
 				return
@@ -219,14 +221,14 @@ func TestS3ListAndDelete(t *testing.T) {
 	if err != nil || len(failed) != 0 {
 		t.Fatalf("delete: %v %v", failed, err)
 	}
-	page, err := s.ListObjects(ctx, user+"/", "", MaxDeleteKeys)
+	page, err := s.ListObjects(ctx, user+"/", "", adminapi.MaxDeleteKeys)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(page.Objects) != 2 || page.Truncated {
 		t.Fatalf("after delete: %+v", page)
 	}
-	if page, err := s.ListObjects(ctx, other+"/", "", MaxDeleteKeys); err != nil || len(page.Objects) != 1 {
+	if page, err := s.ListObjects(ctx, other+"/", "", adminapi.MaxDeleteKeys); err != nil || len(page.Objects) != 1 {
 		t.Fatalf("other user's prefix: %+v %v", page, err)
 	}
 }

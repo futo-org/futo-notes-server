@@ -14,6 +14,7 @@ import (
 	"futo-notes-server/internal/hostedauth"
 	"futo-notes-server/internal/ids"
 	"futo-notes-server/internal/jobs"
+	"futo-notes-server/internal/storagesvc/adminapi"
 )
 
 // OrphanMinAge is how old a stored key must be before reconciliation may
@@ -25,7 +26,7 @@ const OrphanMinAge = 2 * hostedauth.ReceiptTTL
 
 // gcBatchSize is how many ledger rows one GC transaction removes; one
 // storage delete call takes them all.
-const gcBatchSize = storageclient.MaxDeleteKeys
+const gcBatchSize = adminapi.MaxDeleteKeys
 
 // GCResult reports what CollectBlobs did.
 type GCResult struct {
@@ -139,7 +140,7 @@ type ReconcileResult struct {
 // never deleted, whatever its state.
 func ReconcileOrphans(ctx context.Context, database *db.DB, storage *storageclient.Client, region, prefix string, now time.Time) (ReconcileResult, error) {
 	var result ReconcileResult
-	err := storage.ListBlobs(ctx, region, prefix, now.Add(-OrphanMinAge), func(blobs []storageclient.Blob) error {
+	err := storage.ListBlobs(ctx, region, prefix, now.Add(-OrphanMinAge), func(blobs []adminapi.Blob) error {
 		result.Listed += len(blobs)
 		keys := make([]string, 0, len(blobs))
 		for _, b := range blobs {

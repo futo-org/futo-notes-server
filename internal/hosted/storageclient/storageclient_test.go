@@ -19,6 +19,7 @@ import (
 
 	"futo-notes-server/internal/hosted/config"
 	"futo-notes-server/internal/hostedauth"
+	"futo-notes-server/internal/storagesvc/adminapi"
 )
 
 const (
@@ -107,7 +108,7 @@ func TestListBlobsPagesUntilTheCursorIsNull(t *testing.T) {
 	})
 	var got []string
 	pagesSeen := 0
-	err := c.ListBlobs(t.Context(), region, "", olderThan, func(blobs []Blob) error {
+	err := c.ListBlobs(t.Context(), region, "", olderThan, func(blobs []adminapi.Blob) error {
 		pagesSeen++
 		for _, b := range blobs {
 			got = append(got, b.Key)
@@ -121,12 +122,12 @@ func TestListBlobsPagesUntilTheCursorIsNull(t *testing.T) {
 	stuck, _ := newClient(t, nil, func(w http.ResponseWriter, _ *http.Request, _ int) {
 		_, _ = w.Write([]byte(`{"blobs":[],"next_cursor":"same"}`))
 	})
-	if err := stuck.ListBlobs(t.Context(), region, "", olderThan, func([]Blob) error { return nil }); err == nil {
+	if err := stuck.ListBlobs(t.Context(), region, "", olderThan, func([]adminapi.Blob) error { return nil }); err == nil {
 		t.Fatal("a cursor that never advances listed forever or succeeded")
 	}
 
 	stop := errors.New("stop")
-	if err := c.ListBlobs(t.Context(), region, "", olderThan, func([]Blob) error { return stop }); !errors.Is(err, stop) {
+	if err := c.ListBlobs(t.Context(), region, "", olderThan, func([]adminapi.Blob) error { return stop }); !errors.Is(err, stop) {
 		t.Fatalf("page error = %v, want it returned", err)
 	}
 }
@@ -139,7 +140,7 @@ func TestListBlobsSendsThePrefix(t *testing.T) {
 		}
 		_, _ = w.Write([]byte(`{"blobs":[],"next_cursor":null}`))
 	})
-	if err := c.ListBlobs(t.Context(), region, prefix, time.Now(), func([]Blob) error { return nil }); err != nil || f.calls.Load() != 1 {
+	if err := c.ListBlobs(t.Context(), region, prefix, time.Now(), func([]adminapi.Blob) error { return nil }); err != nil || f.calls.Load() != 1 {
 		t.Fatalf("listing a prefix: %d calls, err %v", f.calls.Load(), err)
 	}
 }
@@ -154,7 +155,7 @@ func TestDeleteBlobsSendsAtMostAThousandKeysPerCall(t *testing.T) {
 			t.Errorf("call %d: %s %s", call, r.Method, r.URL)
 		}
 		sizes = append(sizes, len(body.Keys))
-		writeJSON(w, map[string]any{"deleted": len(body.Keys) - 1, "failed": []KeyFailure{{Key: body.Keys[0], Message: "denied"}}})
+		writeJSON(w, map[string]any{"deleted": len(body.Keys) - 1, "failed": []adminapi.KeyFailure{{Key: body.Keys[0], Message: "denied"}}})
 	})
 	keys := make([]string, 2500)
 	for i := range keys {

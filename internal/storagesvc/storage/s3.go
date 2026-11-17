@@ -14,6 +14,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
+
+	"futo-notes-server/internal/storagesvc/adminapi"
 )
 
 // Observer is told how each S3 call went. failed is false for the answers a
@@ -217,8 +219,8 @@ func (s *S3Storage) DeleteObjects(ctx context.Context, keys []string) (failed []
 	if len(keys) == 0 {
 		return nil, nil
 	}
-	if len(keys) > MaxDeleteKeys {
-		return nil, fmt.Errorf("delete objects: %d keys, at most %d", len(keys), MaxDeleteKeys)
+	if len(keys) > adminapi.MaxDeleteKeys {
+		return nil, fmt.Errorf("delete objects: %d keys, at most %d", len(keys), adminapi.MaxDeleteKeys)
 	}
 	objects := make([]types.ObjectIdentifier, len(keys))
 	for i, key := range keys {

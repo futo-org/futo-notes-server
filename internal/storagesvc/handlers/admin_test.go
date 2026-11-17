@@ -11,7 +11,7 @@ import (
 	"time"
 	"uuid"
 
-	"futo-notes-server/internal/storagesvc/storage"
+	"futo-notes-server/internal/storagesvc/adminapi"
 )
 
 func blobKeyFor(userID string) string { return userID + "/" + uuid.NewV7().String() }
@@ -26,7 +26,7 @@ func TestDeleteBlobs(t *testing.T) {
 	if resp.status != http.StatusOK {
 		t.Fatalf("status %d: %s", resp.status, resp.body)
 	}
-	var body DeleteBlobsResponse
+	var body adminapi.DeleteBlobsResponse
 	resp.json(t, &body)
 	if body.Deleted != 3 || len(body.Failed) != 0 {
 		t.Fatalf("response %+v", body)
@@ -43,7 +43,7 @@ func TestDeleteBlobsReportsPerKeyFailures(t *testing.T) {
 	e.store.put(stuck, []byte("x"))
 	e.store.deleteFail = map[string]bool{stuck: true}
 	resp := e.deleteJSON("/internal/blobs", e.admin(), map[string][]string{"keys": {ok, stuck}})
-	var body DeleteBlobsResponse
+	var body adminapi.DeleteBlobsResponse
 	resp.json(t, &body)
 	if resp.status != http.StatusOK || body.Deleted != 1 || len(body.Failed) != 1 || body.Failed[0].Key != stuck ||
 		body.Failed[0].Message == "" {
@@ -53,7 +53,7 @@ func TestDeleteBlobsReportsPerKeyFailures(t *testing.T) {
 
 func TestDeleteBlobsValidation(t *testing.T) {
 	e := newEnv(t)
-	tooMany := make([]string, storage.MaxDeleteKeys+1)
+	tooMany := make([]string, adminapi.MaxDeleteKeys+1)
 	for i := range tooMany {
 		tooMany[i] = blobKeyFor(userA)
 	}
@@ -79,16 +79,16 @@ func TestDeleteBlobsValidation(t *testing.T) {
 	if resp := e.do(http.MethodDelete, "/internal/blobs", e.admin(), strings.NewReader(huge), nil); resp.status != http.StatusRequestEntityTooLarge {
 		t.Fatalf("huge body: status %d", resp.status)
 	}
-	exactly := tooMany[:storage.MaxDeleteKeys]
+	exactly := tooMany[:adminapi.MaxDeleteKeys]
 	if resp := e.deleteJSON("/internal/blobs", e.admin(), map[string][]string{"keys": exactly}); resp.status != http.StatusOK {
 		t.Fatalf("1000 keys: status %d: %s", resp.status, resp.body)
 	}
 }
 
-func (e *env) list(query url.Values) (ListBlobsResponse, response) {
+func (e *env) list(query url.Values) (adminapi.ListBlobsResponse, response) {
 	e.t.Helper()
 	resp := e.do(http.MethodGet, "/internal/blobs?"+query.Encode(), e.admin(), nil, nil)
-	var body ListBlobsResponse
+	var body adminapi.ListBlobsResponse
 	if resp.status == http.StatusOK {
 		resp.json(e.t, &body)
 	}
@@ -194,19 +194,19 @@ func TestListBlobsValidation(t *testing.T) {
 
 func TestDeleteUserLoopsUntilDone(t *testing.T) {
 	e := newEnv(t)
-	for range storage.MaxDeleteKeys + 1 {
+	for range adminapi.MaxDeleteKeys + 1 {
 		e.store.put(blobKeyFor(userA), []byte("x"))
 	}
 	survivor := blobKeyFor(userB)
 	e.store.put(survivor, []byte("x"))
 
-	for i, want := range []DeleteUserResponse{
-		{Deleted: storage.MaxDeleteKeys, Done: false},
+	for i, want := range []adminapi.DeleteUserResponse{
+		{Deleted: adminapi.MaxDeleteKeys, Done: false},
 		{Deleted: 1, Done: true},
 		{Deleted: 0, Done: true},
 	} {
 		resp := e.do(http.MethodDelete, "/internal/users/"+userA, e.admin(), nil, nil)
-		var got DeleteUserResponse
+		var got adminapi.DeleteUserResponse
 		resp.json(t, &got)
 		if resp.status != http.StatusOK || got != want {
 			t.Fatalf("call %d: status %d, %+v, want %+v", i, resp.status, got, want)

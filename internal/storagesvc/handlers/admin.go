@@ -13,25 +13,11 @@ import (
 
 	"futo-notes-server/internal/httputil"
 	"futo-notes-server/internal/ids"
-	"futo-notes-server/internal/storagesvc/storage"
+	"futo-notes-server/internal/storagesvc/adminapi"
 )
 
-// maxDeleteBody fits storage.MaxDeleteKeys blob keys with room for JSON.
+// maxDeleteBody fits adminapi.MaxDeleteKeys blob keys with room for JSON.
 const maxDeleteBody = 128 << 10
-
-// DeleteBlobsResponse is the body of DELETE /internal/blobs.
-type DeleteBlobsResponse struct {
-	// Deleted counts the keys that are now absent, including ones that were
-	// already gone.
-	Deleted int           `json:"deleted"`
-	Failed  []DeleteError `json:"failed"`
-}
-
-// DeleteError is a key DELETE /internal/blobs could not remove.
-type DeleteError struct {
-	Key     string `json:"key"`
-	Message string `json:"message"`
-}
 
 func (s *Server) deleteBlobs(w http.ResponseWriter, r *http.Request) {
 	body, ok := readLimitedBody(w, r, maxDeleteBody, "request too large")
@@ -49,8 +35,8 @@ func (s *Server) deleteBlobs(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteError(w, r, http.StatusBadRequest, "keys must not be empty")
 		return
 	}
-	if len(request.Keys) > storage.MaxDeleteKeys {
-		httputil.WriteError(w, r, http.StatusBadRequest, fmt.Sprintf("too many keys (max %d)", storage.MaxDeleteKeys))
+	if len(request.Keys) > adminapi.MaxDeleteKeys {
+		httputil.WriteError(w, r, http.StatusBadRequest, fmt.Sprintf("too many keys (max %d)", adminapi.MaxDeleteKeys))
 		return
 	}
 	keys := make([]string, 0, len(request.Keys))
@@ -67,9 +53,9 @@ func (s *Server) deleteBlobs(w http.ResponseWriter, r *http.Request) {
 		storageFailure(w, r, err, "delete blobs failed")
 		return
 	}
-	resp := DeleteBlobsResponse{Deleted: len(keys) - len(failed), Failed: make([]DeleteError, 0, len(failed))}
+	resp := adminapi.DeleteBlobsResponse{Deleted: len(keys) - len(failed), Failed: make([]adminapi.KeyFailure, 0, len(failed))}
 	for _, f := range failed {
-		resp.Failed = append(resp.Failed, DeleteError(f))
+		resp.Failed = append(resp.Failed, adminapi.KeyFailure(f))
 	}
 	if len(failed) > 0 {
 		hlog.FromRequest(r).Error().Int("failed", len(failed)).Str("first_key", failed[0].Key).
@@ -80,20 +66,6 @@ func (s *Server) deleteBlobs(w http.ResponseWriter, r *http.Request) {
 
 // maxListLimit is S3's own page cap.
 const maxListLimit = 1000
-
-// ListBlobsResponse is the body of GET /internal/blobs.
-type ListBlobsResponse struct {
-	Blobs []BlobInfo `json:"blobs"`
-	// NextCursor resumes the listing; null once it is complete.
-	NextCursor *string `json:"next_cursor"`
-}
-
-// BlobInfo describes a stored blob.
-type BlobInfo struct {
-	Key          string    `json:"key"`
-	Size         int64     `json:"size"`
-	LastModified time.Time `json:"last_modified"`
-}
 
 func (s *Server) listBlobs(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
@@ -128,23 +100,17 @@ func (s *Server) listBlobs(w http.ResponseWriter, r *http.Request) {
 	}
 	// S3 cannot filter by age, so a page may hold fewer than limit blobs, or
 	// none, while the listing goes on.
-	resp := ListBlobsResponse{Blobs: make([]BlobInfo, 0, len(page.Objects))}
+	resp := adminapi.ListBlobsResponse{Blobs: make([]adminapi.Blob, 0, len(page.Objects))}
 	for _, o := range page.Objects {
 		if !olderThan.IsZero() && !o.LastModified.Before(olderThan) {
 			continue
 		}
-		resp.Blobs = append(resp.Blobs, BlobInfo{Key: o.Key, Size: o.Size, LastModified: o.LastModified.UTC()})
+		resp.Blobs = append(resp.Blobs, adminapi.Blob{Key: o.Key, Size: o.Size, LastModified: o.LastModified.UTC()})
 	}
 	if page.Truncated {
 		resp.NextCursor = &page.LastKey
 	}
 	httputil.WriteJSON(w, r, http.StatusOK, resp)
-}
-
-// DeleteUserResponse is the body of DELETE /internal/users/{userId}.
-type DeleteUserResponse struct {
-	Deleted int  `json:"deleted"`
-	Done    bool `json:"done"`
 }
 
 func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
@@ -153,7 +119,7 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteError(w, r, http.StatusBadRequest, "invalid user id")
 		return
 	}
-	page, err := s.Storage.ListObjects(r.Context(), userID+"/", "", storage.MaxDeleteKeys)
+	page, err := s.Storage.ListObjects(r.Context(), userID+"/", "", adminapi.MaxDeleteKeys)
 	if err != nil {
 		storageFailure(w, r, err, "list user blobs failed")
 		return
@@ -173,7 +139,7 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteError(w, r, http.StatusInternalServerError, fmt.Sprintf("%d blobs could not be deleted", len(failed)))
 		return
 	}
-	httputil.WriteJSON(w, r, http.StatusOK, DeleteUserResponse{Deleted: len(keys), Done: !page.Truncated})
+	httputil.WriteJSON(w, r, http.StatusOK, adminapi.DeleteUserResponse{Deleted: len(keys), Done: !page.Truncated})
 }
 
 func userPrefix(prefix string) bool {

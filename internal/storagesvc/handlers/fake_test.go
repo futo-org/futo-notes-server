@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"futo-notes-server/internal/storagesvc/adminapi"
 	"futo-notes-server/internal/storagesvc/storage"
 )
 
@@ -189,7 +190,7 @@ func (m *memStorage) ListObjects(_ context.Context, prefix, startAfter string, l
 }
 
 func (m *memStorage) DeleteObjects(_ context.Context, keys []string) ([]storage.DeleteError, error) {
-	if len(keys) > storage.MaxDeleteKeys {
+	if len(keys) > adminapi.MaxDeleteKeys {
 		return nil, errors.New("too many keys")
 	}
 	m.mu.Lock()

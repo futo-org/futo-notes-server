@@ -24,6 +24,7 @@ import (
 	"futo-notes-server/internal/hosted/storageclient"
 	"futo-notes-server/internal/hostedauth"
 	"futo-notes-server/internal/objects"
+	"futo-notes-server/internal/storagesvc/adminapi"
 	"futo-notes-server/internal/storagesvc/handlers"
 	"futo-notes-server/internal/storagesvc/storage"
 )
@@ -115,7 +116,7 @@ func newStorageEnv(t *testing.T) *storageEnv {
 	t.Cleanup(func() {
 		ctx := context.Background()
 		for {
-			page, err := store.inner.ListObjects(ctx, store.ns, "", storage.MaxDeleteKeys)
+			page, err := store.inner.ListObjects(ctx, store.ns, "", adminapi.MaxDeleteKeys)
 			if err != nil {
 				t.Errorf("cleanup list: %v", err)
 				return
@@ -240,7 +241,7 @@ func (e *storageEnv) inLedger(key string) bool {
 func (e *storageEnv) lastModified(key string) time.Time {
 	e.t.Helper()
 	owner, _, _ := strings.Cut(key, "/")
-	page, err := e.store.ListObjects(e.t.Context(), owner+"/", "", storage.MaxDeleteKeys)
+	page, err := e.store.ListObjects(e.t.Context(), owner+"/", "", adminapi.MaxDeleteKeys)
 	if err != nil {
 		e.t.Fatal(err)
 	}
@@ -389,7 +390,7 @@ func TestAccountPurgeEmptiesStorageAndRowsAndResumes(t *testing.T) {
 	}
 	storedFor := func(userID string) int {
 		t.Helper()
-		page, err := e.store.ListObjects(ctx, userID+"/", "", storage.MaxDeleteKeys)
+		page, err := e.store.ListObjects(ctx, userID+"/", "", adminapi.MaxDeleteKeys)
 		if err != nil {
 			t.Fatal(err)
 		}

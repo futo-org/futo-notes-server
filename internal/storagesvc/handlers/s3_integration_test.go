@@ -10,6 +10,7 @@ import (
 	"uuid"
 
 	"futo-notes-server/internal/blobframe"
+	"futo-notes-server/internal/storagesvc/adminapi"
 	"futo-notes-server/internal/storagesvc/storage"
 )
 
@@ -39,7 +40,7 @@ func newS3Env(t *testing.T) (*env, string) {
 	t.Cleanup(func() {
 		for range 100 {
 			resp := e.do(http.MethodDelete, "/internal/users/"+user, e.admin(), nil, nil)
-			var body DeleteUserResponse
+			var body adminapi.DeleteUserResponse
 			resp.json(t, &body)
 			if body.Done {
 				return
@@ -93,7 +94,7 @@ func TestS3EndToEnd(t *testing.T) {
 	}
 
 	resp = e.deleteJSON("/internal/blobs", e.admin(), map[string][]string{"keys": {up.Key, absent}})
-	var deleted DeleteBlobsResponse
+	var deleted adminapi.DeleteBlobsResponse
 	resp.json(t, &deleted)
 	if deleted.Deleted != 2 || len(deleted.Failed) != 0 {
 		t.Fatalf("delete: %+v", deleted)
@@ -120,18 +121,18 @@ func TestS3PurgeUserPages(t *testing.T) {
 	e, user := newS3Env(t)
 	store := e.server.Storage
 	ctx := context.Background()
-	for range storage.MaxDeleteKeys + 3 {
+	for range adminapi.MaxDeleteKeys + 3 {
 		if err := store.PutObject(ctx, user+"/"+uuid.NewV7().String(), strings.NewReader("x"), 1); err != nil {
 			t.Fatal(err)
 		}
 	}
-	var got []DeleteUserResponse
+	var got []adminapi.DeleteUserResponse
 	for range 3 {
-		var body DeleteUserResponse
+		var body adminapi.DeleteUserResponse
 		e.do(http.MethodDelete, "/internal/users/"+user, e.admin(), nil, nil).json(t, &body)
 		got = append(got, body)
 	}
-	want := []DeleteUserResponse{{Deleted: storage.MaxDeleteKeys}, {Deleted: 3, Done: true}, {Deleted: 0, Done: true}}
+	want := []adminapi.DeleteUserResponse{{Deleted: adminapi.MaxDeleteKeys}, {Deleted: 3, Done: true}, {Deleted: 0, Done: true}}
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("calls %+v, want %+v", got, want)

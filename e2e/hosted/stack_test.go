@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"futo-notes-server/internal/db"
+	"futo-notes-server/internal/storagesvc/adminapi"
 	"futo-notes-server/internal/storagesvc/storage"
 )
 
@@ -359,7 +360,7 @@ func (s *stack) keys(t *testing.T, region, prefix string) []string {
 	var keys []string
 	after := ""
 	for {
-		page, err := s.buckets[region].ListObjects(context.Background(), prefix, after, storage.MaxDeleteKeys)
+		page, err := s.buckets[region].ListObjects(context.Background(), prefix, after, adminapi.MaxDeleteKeys)
 		if err != nil {
 			t.Fatalf("listing %s/%s: %v", region, prefix, err)
 		}

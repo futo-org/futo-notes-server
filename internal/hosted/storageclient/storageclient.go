@@ -19,10 +19,8 @@ import (
 
 	"futo-notes-server/internal/hosted/config"
 	"futo-notes-server/internal/hostedauth"
+	"futo-notes-server/internal/storagesvc/adminapi"
 )
-
-// MaxDeleteKeys is the most keys one DELETE /internal/blobs call takes.
-const MaxDeleteKeys = 1000
 
 const (
 	// defaultTimeout bounds one HTTP attempt. A call scans or deletes at most
@@ -91,26 +89,18 @@ func New(regions []config.Region, minter *hostedauth.Minter, meter otelmetric.Me
 	return c, nil
 }
 
-// KeyFailure is a key storage could not delete.
-type KeyFailure struct {
-	Key     string `json:"key"`
-	Message string `json:"message"`
-}
-
-// DeleteBlobs deletes keys from region's bucket, MaxDeleteKeys per call. Keys
+// DeleteBlobs deletes keys from region's bucket, adminapi.MaxDeleteKeys per call. Keys
 // already gone count as deleted; it returns the keys storage reported it
 // could not delete. On error, keys in calls that did not complete may or may
 // not have been deleted.
-func (c *Client) DeleteBlobs(ctx context.Context, region string, keys []string) ([]KeyFailure, error) {
-	var failed []KeyFailure
-	for start := 0; start < len(keys); start += MaxDeleteKeys {
-		body, err := json.Marshal(map[string][]string{"keys": keys[start:min(start+MaxDeleteKeys, len(keys))]})
+func (c *Client) DeleteBlobs(ctx context.Context, region string, keys []string) ([]adminapi.KeyFailure, error) {
+	var failed []adminapi.KeyFailure
+	for start := 0; start < len(keys); start += adminapi.MaxDeleteKeys {
+		body, err := json.Marshal(map[string][]string{"keys": keys[start:min(start+adminapi.MaxDeleteKeys, len(keys))]})
 		if err != nil {
 			return failed, err
 		}
-		var response struct {
-			Failed []KeyFailure `json:"failed"`
-		}
+		var response adminapi.DeleteBlobsResponse
 		if err := c.call(ctx, region, opDeleteBlobs, http.MethodDelete, "/internal/blobs", nil, body, &response); err != nil {
 			return failed, err
 		}
@@ -119,17 +109,10 @@ func (c *Client) DeleteBlobs(ctx context.Context, region string, keys []string) 
 	return failed, nil
 }
 
-// Blob is a blob in a region's bucket.
-type Blob struct {
-	Key          string    `json:"key"`
-	Size         int64     `json:"size"`
-	LastModified time.Time `json:"last_modified"`
-}
-
 // ListBlobs lists region's blobs under prefix ("" for all, or "<userId>/")
 // last modified before olderThan, in key order, calling page with each
 // non-empty page until the listing ends.
-func (c *Client) ListBlobs(ctx context.Context, region, prefix string, olderThan time.Time, page func([]Blob) error) error {
+func (c *Client) ListBlobs(ctx context.Context, region, prefix string, olderThan time.Time, page func([]adminapi.Blob) error) error {
 	cursor := ""
 	for {
 		query := url.Values{"older_than": {olderThan.UTC().Format(time.RFC3339Nano)}}
@@ -139,10 +122,7 @@ func (c *Client) ListBlobs(ctx context.Context, region, prefix string, olderThan
 		if cursor != "" {
 			query.Set("cursor", cursor)
 		}
-		var response struct {
-			Blobs      []Blob  `json:"blobs"`
-			NextCursor *string `json:"next_cursor"`
-		}
+		var response adminapi.ListBlobsResponse
 		if err := c.call(ctx, region, opListBlobs, http.MethodGet, "/internal/blobs", query, nil, &response); err != nil {
 			return err
 		}
@@ -170,10 +150,7 @@ func (c *Client) ListBlobs(ctx context.Context, region, prefix string, olderThan
 func (c *Client) PurgeUser(ctx context.Context, region, userID string) (int, error) {
 	total := 0
 	for {
-		var response struct {
-			Deleted int  `json:"deleted"`
-			Done    bool `json:"done"`
-		}
+		var response adminapi.DeleteUserResponse
 		if err := c.call(ctx, region, opPurgeUser, http.MethodDelete, "/internal/users/"+url.PathEscape(userID), nil, nil, &response); err != nil {
 			return total, err
 		}

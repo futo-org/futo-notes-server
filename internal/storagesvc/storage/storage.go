@@ -73,10 +73,8 @@ type Storage interface {
 	// ListObjects lists up to limit keys under prefix that sort after
 	// startAfter.
 	ListObjects(ctx context.Context, prefix, startAfter string, limit int) (ListPage, error)
-	// DeleteObjects removes up to 1000 keys. Keys already gone count as
-	// removed; the result lists only keys that could not be removed.
+	// DeleteObjects removes up to adminapi.MaxDeleteKeys keys. Keys already
+	// gone count as removed; the result lists only keys that could not be
+	// removed.
 	DeleteObjects(ctx context.Context, keys []string) ([]DeleteError, error)
 }
-
-// MaxDeleteKeys is the most keys one DeleteObjects call accepts, S3's limit.
-const MaxDeleteKeys = 1000
