@@ -10,6 +10,7 @@
 <dt>Email</dt><dd>{{.Account.User.Email}}</dd>
 </dl>
 </section>
+{{with .Billing}}{{template "billing" $}}{{end -}}
 <section class="card" aria-labelledby="region-heading">
 <h2 id="region-heading">Region</h2>
 {{with .Region -}}
@@ -26,5 +27,38 @@
 <dt>Blobs</dt><dd>{{.Account.Blobs}}</dd>
 <dt>Stored</dt><dd><data value="{{.Account.StoredBytes}}">{{humanBytes .Account.StoredBytes}}</data></dd>
 </dl>
+</section>
+{{- end}}
+
+
+{{define "billing" -}}
+<section class="card" aria-labelledby="billing-heading">
+<h2 id="billing-heading">Subscription</h2>
+{{with .Billing.Current -}}
+<dl>
+<dt>Status</dt><dd data-billing-status="{{.Status}}">{{if $.Billing.Entitled}}Active{{else}}Inactive{{end}} ({{.Status}})</dd>
+<dt>Bought</dt><dd data-billing-source="{{.Source}}">{{if eq .Source "web"}}On the web{{else if eq .Source "app_store"}}In the App Store{{else}}On Google Play{{end}}</dd>
+{{with .ExpiresAt}}<dt>{{if $.Billing.Current.WillRenew}}Renews{{else}}Ends{{end}}</dt><dd><time datetime="{{isoTime .}}">{{utcTime .}}</time></dd>{{end}}
+</dl>
+{{- else -}}
+<p>No subscription yet.</p>
+{{- end}}
+{{if not .Billing.Entitled -}}
+<p>Without a subscription your notes stay readable, but your devices cannot sync changes.</p>
+{{if .WebPayments -}}
+<form method="post" action="/dashboard/billing/checkout" hx-post="/dashboard/billing/checkout">
+{{template "csrf-field" .}}
+<button type="submit">Subscribe</button>
+</form>
+{{- end}}
+{{- end}}
+{{with .Billing.Current}}{{if and (eq .Source "web") $.WebPayments -}}
+<form method="post" action="/dashboard/billing/portal" hx-post="/dashboard/billing/portal">
+{{template "csrf-field" $}}
+<button type="submit" class="secondary">Manage subscription</button>
+</form>
+{{- else if ne .Source "web" -}}
+<p class="muted">Manage it in the subscription settings of the store you bought it in.</p>
+{{- end}}{{end}}
 </section>
 {{- end}}

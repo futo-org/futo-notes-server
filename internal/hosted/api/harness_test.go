@@ -21,6 +21,7 @@ import (
 	"futo-notes-server/internal/dbtest"
 	"futo-notes-server/internal/events"
 	"futo-notes-server/internal/hosted/api"
+	"futo-notes-server/internal/hosted/billing"
 	"futo-notes-server/internal/hosted/config"
 	"futo-notes-server/internal/hosted/hostedtest"
 	"futo-notes-server/internal/hostedauth"
@@ -60,6 +61,13 @@ func newHarness(t *testing.T) *harness {
 // newHarnessWith is newHarness with configure applied to the API's
 // configuration.
 func newHarnessWith(t *testing.T, configure func(*config.Config)) *harness {
+	t.Helper()
+	return newHarnessWithBilling(t, func(config.Config) billing.Providers { return billing.Providers{} }, configure)
+}
+
+// newHarnessWithBilling is newHarnessWith with the payment providers
+// providers builds from the final configuration; any turns billing on.
+func newHarnessWithBilling(t *testing.T, providers func(config.Config) billing.Providers, configure func(*config.Config)) *harness {
 	t.Helper()
 	database := hostedtest.Postgres(t)
 	h := &harness{t: t, database: database, signers: map[string]*hostedauth.ReceiptSigner{},
@@ -125,6 +133,7 @@ func newHarnessWith(t *testing.T, configure func(*config.Config)) *harness {
 		Hub:      h.hub,
 		Metrics:  metrics,
 		Version:  "test",
+		Billing:  providers(cfg),
 	})
 	if err != nil {
 		t.Fatal(err)

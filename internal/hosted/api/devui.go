@@ -31,7 +31,8 @@ func handleDevUI(w http.ResponseWriter, _ *http.Request) {
 }
 
 // devJobRoutes mounts POST /dev/jobs/*, which run a storage job or the
-// pairing sweep at once on this replica, outside the schedule, its advisory
+// pairing sweep (and, in devBillingRoutes, a billing job) at once on this
+// replica, outside the schedule, its advisory
 // lock and its once-per-interval bookkeeping, as the self-hosted /dev/jobs/*
 // do.
 func (s *Server) devJobRoutes(r chi.Router) {
@@ -39,7 +40,7 @@ func (s *Server) devJobRoutes(r chi.Router) {
 		return hostedjobs.CollectBlobs(r.Context(), s.database, s.storage)
 	}))
 	r.Post("/dev/jobs/account-purge", handleDevJob(func(r *http.Request) (hostedjobs.PurgeResult, error) {
-		return hostedjobs.PurgeAccounts(r.Context(), s.database, s.storage)
+		return hostedjobs.PurgeAccounts(r.Context(), s.JobBilling())
 	}))
 	r.Post("/dev/jobs/reconciliation", s.handleDevReconciliation)
 	r.Post("/dev/jobs/pairing-sweep", handleDevJob(func(r *http.Request) (pairingSweep, error) {

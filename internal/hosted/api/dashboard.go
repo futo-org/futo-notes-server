@@ -23,6 +23,7 @@ import (
 
 	"futo-notes-server/internal/auth"
 	"futo-notes-server/internal/hosted/account"
+	"futo-notes-server/internal/hosted/billing"
 	"futo-notes-server/internal/hosted/config"
 	"futo-notes-server/internal/syncapi"
 )
@@ -118,6 +119,10 @@ type dashboardView struct {
 	// Reauthenticate asks the user to sign in again before deleting.
 	Reauthenticate bool
 	ReauthPath     string
+	// Billing is the account's billing state; nil while billing is off.
+	Billing *billing.State
+	// WebPayments reports that a web provider is configured.
+	WebPayments bool
 }
 
 type dashboardDevice struct {
@@ -140,6 +145,8 @@ func (s *Server) dashboardActions() []dashboardAction {
 		{deletePath, "DELETE /api/account", s.handleDashboardDelete},
 		{dashboardPath + "/restore", "POST /api/account/restore", s.handleDashboardRestore},
 		{dashboardPath + "/sign-out", "POST /api/auth/logout", s.handleDashboardSignOut},
+		{dashboardPath + "/billing/checkout", "POST /api/billing/checkout", s.handleDashboardCheckout},
+		{dashboardPath + "/billing/portal", "GET /api/billing/portal", s.handleDashboardPortal},
 	}
 }
 
@@ -362,7 +369,65 @@ func (s *Server) renderOverview(w http.ResponseWriter, r *http.Request, a accoun
 	if region, ok := s.regions[a.RegionID]; ok {
 		v.Region = &region
 	}
+	if s.providers.Any() {
+		state, err := s.billing.State(r.Context(), a.User.ID)
+		if err != nil {
+			dashboardServerError(w, r, "reading billing state", err)
+			return
+		}
+		v.Billing = &state
+		v.WebPayments = s.providers.Web != nil
+	}
 	renderDashboard(w, r, "overview", v)
+}
+
+// handleDashboardCheckout is the dashboard's POST /api/billing/checkout: it
+// sends the browser to the web checkout.
+func (s *Server) handleDashboardCheckout(w http.ResponseWriter, r *http.Request) {
+	user := principalFrom(r).Session.User
+	target, err := s.checkoutURL(r.Context(), user.ID, user.Email)
+	if err != nil {
+		dashboardBillingError(w, r, "creating checkout", err)
+		return
+	}
+	redirectAway(w, r, target)
+}
+
+// handleDashboardPortal is the dashboard's GET /api/billing/portal: it sends
+// the browser to the web provider's subscription page.
+func (s *Server) handleDashboardPortal(w http.ResponseWriter, r *http.Request) {
+	user := principalFrom(r).Session.User
+	target, err := s.portalURL(r.Context(), user.ID, user.Email)
+	if err != nil {
+		dashboardBillingError(w, r, "creating portal session", err)
+		return
+	}
+	redirectAway(w, r, target)
+}
+
+func dashboardBillingError(w http.ResponseWriter, r *http.Request, action string, err error) {
+	switch {
+	case errors.Is(err, errBillingUnavailable):
+		renderDashboardError(w, r, http.StatusServiceUnavailable, "Paying on the web is not available yet. Subscribe in the app instead.")
+	case errors.Is(err, errAlreadySubscribed):
+		renderDashboardError(w, r, http.StatusConflict, "You already have an active subscription.")
+	case errors.Is(err, errManagedByStore):
+		renderDashboardError(w, r, http.StatusConflict, "Your subscription was bought in an app store. Manage it in that store's subscription settings.")
+	default:
+		dashboardServerError(w, r, action, err)
+	}
+}
+
+// redirectAway sends the browser to a payment provider's page. htmx gets
+// HX-Redirect, a full page load that the CSP's form-action does not govern;
+// a form posted without JavaScript gets a 303.
+func redirectAway(w http.ResponseWriter, r *http.Request, target string) {
+	if isHTMX(r) {
+		w.Header().Set("HX-Redirect", target)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	http.Redirect(w, r, target, http.StatusSeeOther)
 }
 
 // showOverview renders the caller's current overview after an action.
@@ -500,6 +565,7 @@ func (s *Server) handleDashboardDelete(w http.ResponseWriter, r *http.Request) {
 		dashboardServerError(w, r, "requesting account deletion", err)
 		return
 	}
+	s.cancelSubscriptions(r.Context(), principalFrom(r).Session.User.ID)
 	s.showOverview(w, r)
 }
 

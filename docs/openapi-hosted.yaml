@@ -37,6 +37,17 @@ info:
       second wrapping of the vault key, under a recovery key
       (`recovery_key_salt`, `recovery_key_kdf`,
       `recovery_encrypted_vault_key`). See `putCollectionKey`.
+    - **Billing.** When the deployment has a payment provider (the
+      capability document's `billing` is `true`), an account writes only
+      while it has a subscription (tag `billing`). Without one, object
+      create, update and delete, the batch claim, the key `PUT` and
+      collection delete answer
+      `402 {"code": "subscription_required", "error": "subscription required"}`,
+      and `POST /api/storage/token` issues a read-only storage token, so the
+      notes stay readable. Reads, the event stream, pairing, account,
+      sessions, region, restore and billing are never refused for it. The
+      order is `401`, then the pending-deletion `403`, then `402`. With no
+      provider, `billing` is `false` and nothing is refused for it.
     - **Pending deletion.** Between `DELETE /api/account` and the purge 30
       days later, every sync operation except logout, the pairing relay,
       and `POST /api/storage/token`, answer
@@ -74,8 +85,9 @@ info:
     `/dashboard` (server-rendered HTML for browsers, behind the session
     cookie and CSRF tokens; every state-changing page calls the same service
     code as the JSON operation it matches) and, when `DEV_UI` is set, a
-    manual test page at `/dev` with its `/dev/jobs/*` and `/dev/email/*`
-    triggers. Those are
+    manual test page at `/dev` with its `/dev/jobs/*`, `/dev/email/*` and
+    `/dev/billing/*` triggers, and the mock web payment provider's checkout
+    and portal pages under `/dev/billing`. Those are
     pages and test tooling, not API: clients must not
     depend on them, so they are listed in `x-internal-routes` rather than
     described as operations.
@@ -96,8 +108,18 @@ x-internal-routes:
   - POST /dashboard/region
   - POST /dashboard/restore
   - POST /dashboard/sign-out
+  - GET /dev/billing/checkout
+  - GET /dev/billing/portal
+  - POST /dashboard/billing/checkout
+  - POST /dashboard/billing/portal
+  - POST /dev/billing/checkout
+  - POST /dev/billing/events/{kind}
+  - POST /dev/billing/lapsed-at
+  - POST /dev/billing/portal
   - POST /dev/email/{template}
   - POST /dev/jobs/account-purge
+  - POST /dev/jobs/billing-lapses
+  - POST /dev/jobs/billing-reconciliation
   - POST /dev/jobs/blob-gc
   - POST /dev/jobs/pairing-sweep
   - POST /dev/jobs/reconciliation
@@ -122,6 +144,8 @@ tags:
     description: Signed-in devices
   - name: pairing
     description: The relay that hands the vault key from an unlocked device to a new one
+  - name: billing
+    description: Subscriptions on the web, the App Store and Play, and the provider webhooks
   - name: sync
     description: The self-hosted sync contract, with receipts in place of staged blobs
 
@@ -134,9 +158,10 @@ paths:
       summary: Capability discovery
       description: |
         Same document as self-hosted, plus `blob_storage`. The hosted values
-        are fixed: `auth_mode: "oidc"`, `signup: "open"`, `billing: false`,
-        `blob_storage: "regional"`. Choose the blob transport from
-        `blob_storage`, not from `auth_mode`.
+        are fixed, `auth_mode: "oidc"`, `signup: "open"` and
+        `blob_storage: "regional"`, except `billing`: `true` when the
+        deployment has a payment provider, so writes need a subscription.
+        Choose the blob transport from `blob_storage`, not from `auth_mode`.
       responses:
         "200":
           description: Server capabilities
@@ -472,6 +497,11 @@ paths:
         concurrent requests, all end up with one token to keep. Presenting it
         once the replacement has itself been exchanged is treated as theft:
         it signs the session out (`401`).
+
+        When billing is on and the account has no subscription, the access
+        token's scope is `blobs.read`: storage serves its blobs but refuses
+        uploads (`403 write_not_allowed`). Exchange again after subscribing
+        for a token that may write.
       requestBody:
         required: true
         content:
@@ -500,7 +530,9 @@ paths:
                     type: string
                     description: |
                       Ed25519 JWT for the storage service: `aud` = region id,
-                      `sub` = user id, `scope` = `blobs`.
+                      `sub` = user id, `scope` = `blobs` (read and write), or
+                      `blobs.read` (read only) for an account without a
+                      subscription while billing is on.
                   expires_at:
                     type: string
                     format: date-time
@@ -582,6 +614,11 @@ paths:
         Schedules the purge 30 days from now and signs out every other
         session. Requesting it again keeps the original schedule. Until the
         purge, `POST /api/account/restore` cancels it.
+
+        Web and Play subscriptions stop renewing at the end of their paid
+        period. An App Store subscription cannot be cancelled by the server:
+        `GET /api/billing` says its `source`, and the app tells the user to
+        cancel it in their Apple ID settings.
 
         The session must have signed in within the last **10 minutes** (the
         identity provider's `auth_time`). Otherwise sign in again with
@@ -902,6 +939,253 @@ paths:
         "500":
           $ref: "#/components/responses/HostedServerError"
 
+  /api/billing:
+    get:
+      operationId: getBilling
+      tags: [billing]
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      summary: The account's subscription
+      description: |
+        Whether the account may write, its current subscription, the token
+        the apps pass to the stores, and which ways to pay this deployment
+        offers. The subscription fields describe the subscription that
+        entitles the account and runs longest, or else the one with the
+        latest news; they are `null` for an account that never subscribed.
+      responses:
+        "200":
+          $ref: "#/components/responses/Billing"
+        "401":
+          $ref: "#/components/responses/HostedUnauthorized"
+        "500":
+          $ref: "#/components/responses/HostedServerError"
+
+  /api/billing/checkout:
+    post:
+      operationId: createCheckout
+      tags: [billing]
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      summary: Start a web checkout
+      description: |
+        The web payment provider's checkout page for this account. Open it in
+        a browser; the provider tells the server when it completes, and
+        `GET /api/billing` then reports the subscription.
+      responses:
+        "200":
+          $ref: "#/components/responses/BillingURL"
+        "401":
+          $ref: "#/components/responses/HostedUnauthorized"
+        "409":
+          description: |
+            `already_subscribed`: a subscription from any source already
+            entitles the account, so it would pay twice
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostedError"
+        "500":
+          $ref: "#/components/responses/HostedServerError"
+        "503":
+          $ref: "#/components/responses/BillingUnavailable"
+
+  /api/billing/portal:
+    get:
+      operationId: getBillingPortal
+      tags: [billing]
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      summary: Open the web subscription portal
+      description: |
+        The web payment provider's self-service page, to cancel or change a
+        web subscription. A subscription bought in an app store is managed
+        in that store's own screen instead.
+      responses:
+        "200":
+          $ref: "#/components/responses/BillingURL"
+        "401":
+          $ref: "#/components/responses/HostedUnauthorized"
+        "409":
+          description: |
+            `managed_by_store`: the account's subscription came from the App
+            Store or Play; open the store's subscription screen
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostedError"
+        "500":
+          $ref: "#/components/responses/HostedServerError"
+        "503":
+          $ref: "#/components/responses/BillingUnavailable"
+
+  /api/billing/app-store/transactions:
+    post:
+      operationId: submitAppStoreTransaction
+      tags: [billing]
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      summary: Submit an App Store purchase
+      description: |
+        After a StoreKit 2 purchase or "Restore Purchases", post the
+        transaction's JWS representation. The server verifies it with Apple
+        and binds the subscription to this account, so entitlement does not
+        wait for Apple's notification. Buy with `appAccountToken` set to
+        `store_account_token` from `GET /api/billing`.
+
+        A subscription belongs to the FUTO account it was bought under and
+        never moves: submitting it from another account answers `409`.
+        Once its account is purged, the next account to submit it gets it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [signed_transaction]
+              properties:
+                signed_transaction:
+                  type: string
+                  minLength: 1
+                  description: The transaction's `jwsRepresentation`
+      responses:
+        "200":
+          $ref: "#/components/responses/Billing"
+        "400":
+          $ref: "#/components/responses/InvalidPurchase"
+        "401":
+          $ref: "#/components/responses/HostedUnauthorized"
+        "409":
+          $ref: "#/components/responses/StoreSubscriptionOwnedElsewhere"
+        "500":
+          $ref: "#/components/responses/HostedServerError"
+        "503":
+          $ref: "#/components/responses/BillingUnavailable"
+
+  /api/billing/play/purchases:
+    post:
+      operationId: submitPlayPurchase
+      tags: [billing]
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      summary: Submit a Play purchase
+      description: |
+        After a Play Billing purchase, post its product and purchase token.
+        The server verifies and acknowledges it with Google and binds it to
+        this account. Buy with `obfuscatedAccountId` set to
+        `store_account_token` from `GET /api/billing`. Binding works as for
+        `submitAppStoreTransaction`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [product_id, purchase_token]
+              properties:
+                product_id:
+                  type: string
+                  minLength: 1
+                purchase_token:
+                  type: string
+                  minLength: 1
+      responses:
+        "200":
+          $ref: "#/components/responses/Billing"
+        "400":
+          $ref: "#/components/responses/InvalidPurchase"
+        "401":
+          $ref: "#/components/responses/HostedUnauthorized"
+        "409":
+          $ref: "#/components/responses/StoreSubscriptionOwnedElsewhere"
+        "500":
+          $ref: "#/components/responses/HostedServerError"
+        "503":
+          $ref: "#/components/responses/BillingUnavailable"
+
+  /api/billing/webhooks/{provider}:
+    parameters:
+      - name: provider
+        in: path
+        required: true
+        description: The payment source. One that is not configured answers `404`.
+        schema:
+          type: string
+          enum: [web, app_store, play]
+    post:
+      operationId: receiveBillingWebhook
+      tags: [billing]
+      security: []
+      summary: A payment provider's notification
+      description: |
+        For the payment providers, not the apps. Authenticated by the
+        provider's signature over the raw body, not by a session. Each
+        delivery is applied once: the same delivery again answers `200`
+        with `duplicate: true`. A notification older than what the server
+        already knows of a subscription changes nothing, and one about an
+        account that no longer exists is acknowledged and logged.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: The provider's own payload, at most 1 MiB
+      responses:
+        "200":
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [duplicate]
+                additionalProperties: false
+                properties:
+                  duplicate:
+                    type: boolean
+                    description: The delivery had already been applied
+        "400":
+          description: |
+            `invalid_delivery`: the signature does not hold or the payload
+            cannot be decoded. `invalid_request`: the body cannot be read.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostedError"
+        "404":
+          description: "`not_found`: no provider for this source is configured"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostedError"
+        "413":
+          description: "`payload_too_large`: the body is over 1 MiB"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostedError"
+        "500":
+          $ref: "#/components/responses/HostedServerError"
+
   /api/auth:
     get:
       operationId: getCurrentUser
@@ -1051,6 +1335,8 @@ paths:
           description: Deleted
         "401":
           $ref: "#/components/responses/SyncUnauthorized"
+        "402":
+          $ref: "#/components/responses/SubscriptionRequired"
         "403":
           $ref: "#/components/responses/PendingDeletion"
         "404":
@@ -1205,6 +1491,8 @@ paths:
                   - $ref: "#/components/schemas/InvalidRequestError"
         "401":
           $ref: "#/components/responses/SyncUnauthorized"
+        "402":
+          $ref: "#/components/responses/SubscriptionRequired"
         "403":
           $ref: "#/components/responses/PendingDeletion"
         "404":
@@ -1336,6 +1624,8 @@ paths:
                   - $ref: "#/components/schemas/ReceiptRejectedError"
         "401":
           $ref: "#/components/responses/SyncUnauthorized"
+        "402":
+          $ref: "#/components/responses/SubscriptionRequired"
         "403":
           $ref: "#/components/responses/PendingDeletion"
         "404":
@@ -1430,6 +1720,8 @@ paths:
                       - too many entries (max 200)
         "401":
           $ref: "#/components/responses/SyncUnauthorized"
+        "402":
+          $ref: "#/components/responses/SubscriptionRequired"
         "403":
           $ref: "#/components/responses/PendingDeletion"
         "404":
@@ -1521,6 +1813,8 @@ paths:
                   - $ref: "#/components/schemas/ReceiptRejectedError"
         "401":
           $ref: "#/components/responses/SyncUnauthorized"
+        "402":
+          $ref: "#/components/responses/SubscriptionRequired"
         "403":
           $ref: "#/components/responses/PendingDeletion"
         "404":
@@ -1582,6 +1876,8 @@ paths:
                 $ref: "openapi.yaml#/components/schemas/Error"
         "401":
           $ref: "#/components/responses/SyncUnauthorized"
+        "402":
+          $ref: "#/components/responses/SubscriptionRequired"
         "403":
           $ref: "#/components/responses/PendingDeletion"
         "404":
@@ -1867,6 +2163,76 @@ components:
               error:
                 type: string
                 enum: [account pending deletion]
+    SubscriptionRequired:
+      description: |
+        `subscription_required`: billing is on and the account has no
+        subscription, so it may read but not write. Subscribe
+        (`POST /api/billing/checkout`, or an app store purchase), then
+        retry.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [code, error]
+            additionalProperties: false
+            properties:
+              code:
+                type: string
+                enum: [subscription_required]
+              error:
+                type: string
+                enum: [subscription required]
+    Billing:
+      description: The account's billing state
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Billing"
+    BillingURL:
+      description: The page to open in a browser
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [url]
+            additionalProperties: false
+            properties:
+              url:
+                type: string
+                minLength: 1
+    BillingUnavailable:
+      description: "`billing_unavailable`: this deployment has no provider for this way of paying"
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/HostedError"
+    InvalidPurchase:
+      description: |
+        `invalid_purchase`: the store does not vouch for the purchase.
+        `invalid_request`: invalid JSON or a required field missing.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/HostedError"
+    StoreSubscriptionOwnedElsewhere:
+      description: |
+        `store_subscription_owned_elsewhere`: the subscription belongs to
+        another FUTO account, and nothing changed. Tell the user this store
+        account's subscription belongs to another FUTO account: sign in with
+        that one, or subscribe on the web.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/HostedError"
     SyncServerError:
       description: Internal failure
       content:
@@ -2004,6 +2370,12 @@ components:
         | `reauthentication_required` | 403 | Sign in again with `reauthenticate=true` first |
         | `not_found` | 404 | No such route, session or pairing |
         | `pairing_already_keyed` | 409 | A key was already posted to this pairing |
+        | `already_subscribed` | 409 | A subscription already entitles the account |
+        | `managed_by_store` | 409 | The subscription is managed in its app store |
+        | `store_subscription_owned_elsewhere` | 409 | The store subscription belongs to another account |
+        | `invalid_purchase` | 400 | The store does not vouch for the submitted purchase |
+        | `invalid_delivery` | 400 | A provider webhook's signature or payload is invalid |
+        | `billing_unavailable` | 503 | No payment provider for this way of paying |
         | `payload_too_large` | 413 | The request body is over the operation's limit |
         | `method_not_allowed` | 405 | The route does not take this method |
         | `internal_error` | 500 | An internal failure |
@@ -2025,6 +2397,12 @@ components:
         - reauthentication_required
         - not_found
         - pairing_already_keyed
+        - already_subscribed
+        - managed_by_store
+        - store_subscription_owned_elsewhere
+        - invalid_purchase
+        - invalid_delivery
+        - billing_unavailable
         - payload_too_large
         - method_not_allowed
         - internal_error
@@ -2058,7 +2436,9 @@ components:
           enum: [open]
         billing:
           type: boolean
-          enum: [false]
+          description: |
+            `true` when the deployment has a payment provider: writes then
+            need a subscription (tag `billing`).
         mutation_ids:
           $ref: "openapi.yaml#/components/schemas/Capability/properties/mutation_ids"
         blob_storage:
@@ -2068,6 +2448,60 @@ components:
             Blobs are uploaded to and downloaded from the user's region's
             storage service (`POST /api/storage/token`), never this API.
             Absent on self-hosted, which serves blobs itself.
+
+    Billing:
+      type: object
+      required: [entitled, status, source, product_id, expires_at, grace_until, will_renew, store_account_token, rails]
+      additionalProperties: false
+      properties:
+        entitled:
+          type: boolean
+          description: |
+            The account may write: a subscription is active and paid
+            through `expires_at`, or in its store's billing grace period
+            until `grace_until`.
+        status:
+          type: string
+          nullable: true
+          enum: [active, grace, on_hold, expired, revoked]
+          description: "`revoked` is a refund or a revocation."
+        source:
+          type: string
+          nullable: true
+          enum: [web, app_store, play]
+          description: Where the subscription was bought, and so where it is managed
+        product_id:
+          type: string
+          nullable: true
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: End of the paid period
+        grace_until:
+          type: string
+          format: date-time
+          nullable: true
+        will_renew:
+          type: boolean
+        store_account_token:
+          type: string
+          format: uuid
+          description: |
+            Pass it as StoreKit's `appAccountToken` and Play's
+            `obfuscatedAccountId`, so a store purchase names this account.
+        rails:
+          type: object
+          required: [web, app_store, play]
+          additionalProperties: false
+          description: The ways to pay this deployment offers
+          properties:
+            web:
+              type: boolean
+            app_store:
+              type: boolean
+            play:
+              type: boolean
 
     Region:
       type: object

@@ -171,3 +171,39 @@ func TestLoadBaseNeedsOnlyTheDatabase(t *testing.T) {
 		t.Fatalf("base = %#v", base)
 	}
 }
+
+func TestLoadWebBilling(t *testing.T) {
+	cfg, err := config.Load(getenv(validEnv(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WebBilling.Provider != "" || cfg.WebBilling.MockWebhookSecret != nil {
+		t.Fatalf("web billing defaults = %#v", cfg.WebBilling)
+	}
+
+	env := validEnv(t)
+	maps.Copy(env, map[string]string{
+		"DEV_UI":                      "true",
+		"BILLING_WEB_PROVIDER":        "mock",
+		"BILLING_MOCK_WEBHOOK_SECRET": "dev-mock-webhook-secret",
+	})
+	if cfg, err = config.Load(getenv(env)); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WebBilling.Provider != config.WebProviderMock || string(cfg.WebBilling.MockWebhookSecret) != "dev-mock-webhook-secret" {
+		t.Fatalf("web billing = %#v", cfg.WebBilling)
+	}
+
+	for name, change := range map[string]map[string]string{
+		"mock without DEV_UI": {"DEV_UI": "false"},
+		"mock without secret": {"BILLING_MOCK_WEBHOOK_SECRET": ""},
+		"short mock secret":   {"BILLING_MOCK_WEBHOOK_SECRET": "short"},
+		"unknown provider":    {"BILLING_WEB_PROVIDER": "paypal"},
+	} {
+		bad := maps.Clone(env)
+		maps.Copy(bad, change)
+		if _, err := config.Load(getenv(bad)); err == nil {
+			t.Errorf("%s: Load succeeded, want an error", name)
+		}
+	}
+}

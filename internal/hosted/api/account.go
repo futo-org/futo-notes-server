@@ -116,6 +116,7 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 		serverError(w, r, "requesting account deletion", err)
 		return
 	}
+	s.cancelSubscriptions(r.Context(), principalFrom(r).Session.User.ID)
 	s.writeAccount(w, r)
 }
 

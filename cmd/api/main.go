@@ -161,10 +161,14 @@ func run() error {
 	}
 
 	hub := events.NewHub()
-	server, err := api.New(api.Options{Config: cfg, Database: database, Hub: hub, Storage: storage, Metrics: metrics, Version: version})
+	providers := billingProviders(cfg)
+	server, err := api.New(api.Options{
+		Config: cfg, Database: database, Hub: hub, Storage: storage, Metrics: metrics, Version: version, Billing: providers,
+	})
 	if err != nil {
 		return err
 	}
+	log.Info().Bool("billing", providers.Any()).Str("web_provider", cfg.WebBilling.Provider).Msg("payment providers")
 
 	background, stopBackground := context.WithCancel(context.Background())
 	defer stopBackground()
@@ -172,7 +176,7 @@ func run() error {
 	workers.Go(func() { events.Listen(background, cfg.Database.URL, hub) })
 	workers.Go(func() {
 		hostedjobs.Run(background, database, jobs.DefaultSchedule,
-			hostedjobs.Sessions(database, server.Accounts()), hostedjobs.Maintenance(database, storage, regionIDs, jobMetrics), metrics.JobRun)
+			hostedjobs.Sessions(database, server.Accounts()), hostedjobs.Maintenance(server.JobBilling(), regionIDs, jobMetrics), metrics.JobRun)
 	})
 
 	httpSrv := &http.Server{Handler: server.Handler(), ReadHeaderTimeout: readHeaderTimeout}

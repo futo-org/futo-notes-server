@@ -20,6 +20,7 @@ import (
 	"futo-notes-server/internal/db"
 	"futo-notes-server/internal/events"
 	"futo-notes-server/internal/hosted/account"
+	"futo-notes-server/internal/hosted/billing"
 	"futo-notes-server/internal/hosted/config"
 	"futo-notes-server/internal/hosted/mail"
 	"futo-notes-server/internal/hosted/storageclient"
@@ -41,6 +42,9 @@ type Options struct {
 	Metrics *Metrics
 	// Version is reported in the capability document.
 	Version string
+	// Billing are the configured payment providers. With none, billing is
+	// off: the capability document says so and no write is gated.
+	Billing billing.Providers
 }
 
 // Server serves the hosted API. Its embedded Readiness answers the readiness
@@ -60,6 +64,9 @@ type Server struct {
 	oidc      *oidcClient
 	storage   *storageclient.Client
 	mailer    mail.Mailer
+	notifier  *mail.Notifier
+	billing   *billing.Store
+	providers billing.Providers
 }
 
 // New returns a Server for o.
@@ -74,6 +81,7 @@ func New(o Options) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	mailer := mail.New(o.Config.Email)
 	return &Server{
 		cfg:       o.Config,
 		database:  o.Database,
@@ -87,7 +95,10 @@ func New(o Options) (*Server, error) {
 		version:   o.Version,
 		oidc:      newOIDCClient(o.Config.OIDC, o.Config.PublicURL+callbackPath),
 		storage:   o.Storage,
-		mailer:    mail.New(o.Config.Email),
+		mailer:    mailer,
+		notifier:  mail.NewNotifier(o.Database, mailer, o.Config.PublicURL),
+		billing:   billing.NewStore(o.Database),
+		providers: o.Billing,
 	}, nil
 }
 
@@ -122,6 +133,7 @@ func (s *Server) router() chi.Router {
 
 	capability := syncapi.NewCapability(s.version, "oidc", "open")
 	capability.BlobStorage = "regional"
+	capability.Billing = s.providers.Any()
 	r.Get("/", syncapi.HandleCapability(capability))
 	r.Route("/api", func(api chi.Router) {
 		api.Get("/regions", s.handleRegions)
@@ -150,13 +162,16 @@ func (s *Server) router() chi.Router {
 			hosted.Post("/account/restore", s.handleRestoreAccount)
 			hosted.Get("/sessions", s.handleSessions)
 			hosted.Delete("/sessions/{id}", s.handleRevokeSession)
+			s.billingRoutes(hosted)
 		})
+		api.Post("/billing/webhooks/{provider}", s.handleBillingWebhook)
 	})
 	s.dashboardRoutes(r)
 	if s.cfg.DevUI {
 		r.Get("/dev", handleDevUI)
 		s.devJobRoutes(r)
 		r.With(s.authenticate(hostedErrors)).Post("/dev/email/{template}", s.handleDevEmail)
+		s.devBillingRoutes(r)
 		log.Info().Str("path", "/dev").Msg("dev UI enabled")
 	}
 	return r
@@ -173,17 +188,19 @@ func (s *Server) syncRoutes(r chi.Router) {
 	r.Get("/auth", syncapi.HandleCurrentUser)
 	r.Post("/collections", syncapi.HandleClaimCollection(s.database))
 	r.Get("/collections", syncapi.HandleListCollections(s.database))
+	// Writes need a subscription once billing is on (s.requireEntitled).
+	writes := r.With(s.requireEntitled)
 	r.Get("/collections/{id}", syncapi.HandleGetCollection(s.database))
-	r.Delete("/collections/{id}", syncapi.HandleDeleteCollection(s.database))
+	writes.Delete("/collections/{id}", syncapi.HandleDeleteCollection(s.database))
 	keys := collections.Keys{DB: s.database, Recovery: recoveryEnvelopes{}}
 	r.Get("/collections/{id}/key", syncapi.HandleGetCollectionKey(keys))
-	r.Put("/collections/{id}/key", strictKeyBody(syncapi.HandlePutCollectionKey(keys)))
+	writes.Put("/collections/{id}/key", strictKeyBody(syncapi.HandlePutCollectionKey(keys)))
 	r.Get("/collections/{id}/objects", syncapi.HandleListObjects(s.database))
-	r.Post("/collections/{id}/objects", syncapi.HandleCreateObject(s.database, s.publisher, blobs))
-	r.Post("/collections/{id}/objects/batch", s.handleBatchObjects(blobs))
+	writes.Post("/collections/{id}/objects", syncapi.HandleCreateObject(s.database, s.publisher, blobs))
+	writes.Post("/collections/{id}/objects/batch", s.handleBatchObjects(blobs))
 	r.Get("/collections/{id}/objects/{objectId}", syncapi.HandleGetObject(s.database))
-	r.Put("/collections/{id}/objects/{objectId}", syncapi.HandleUpdateObject(s.database, s.publisher, blobs))
-	r.Delete("/collections/{id}/objects/{objectId}", syncapi.HandleDeleteObject(s.database, s.publisher))
+	writes.Put("/collections/{id}/objects/{objectId}", syncapi.HandleUpdateObject(s.database, s.publisher, blobs))
+	writes.Delete("/collections/{id}/objects/{objectId}", syncapi.HandleDeleteObject(s.database, s.publisher))
 	r.Get("/collections/{id}/create-mutations/{mutationId}", syncapi.HandleRecoverCreate(s.database))
 	r.Get("/sync/events", s.metrics.countStreams(syncapi.HandleSyncEvents(s.hub)))
 }
@@ -246,6 +263,25 @@ func (s *Server) authenticate(shape errorShape) func(http.Handler) http.Handler 
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+// requireEntitled refuses a write from an account without a subscription,
+// once billing is on: 402 in the sync shape, which the apps take as a lapsed
+// subscription. It runs after authentication and the pending-deletion check,
+// so 401 and 403 come first.
+func (s *Server) requireEntitled(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.entitled(principalFrom(r)) {
+			syncapi.WriteCodedError(w, http.StatusPaymentRequired, codeSubscriptionRequired, "subscription required")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// entitled reports whether p may write: always while billing is off.
+func (s *Server) entitled(p account.Principal) bool {
+	return p.Entitled || !s.providers.Any()
 }
 
 // requireActiveAccount refuses sync requests while the caller's account is

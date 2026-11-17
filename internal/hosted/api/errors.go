@@ -37,6 +37,16 @@ const (
 	// codeReauthenticationRequired asks the client to sign in again with
 	// reauthenticate=true before deleting the account.
 	codeReauthenticationRequired = "reauthentication_required"
+	// codeSubscriptionRequired answers a write from an account without a
+	// subscription, in the sync shape.
+	codeSubscriptionRequired = "subscription_required"
+	// Billing failures.
+	codeBillingUnavailable         = "billing_unavailable"
+	codeAlreadySubscribed          = "already_subscribed"
+	codeManagedByStore             = "managed_by_store"
+	codeStoreSubscriptionElsewhere = "store_subscription_owned_elsewhere"
+	codeInvalidPurchase            = "invalid_purchase"
+	codeInvalidDelivery            = "invalid_delivery"
 )
 
 // serverError logs an internal failure and answers with a hosted 500.

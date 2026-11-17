@@ -61,7 +61,9 @@ type Config struct {
 	RefreshRotationKey []byte
 	// Email is how the API sends email; without RESEND_API_KEY it logs and
 	// skips every send.
-	Email        hostedmail.Config
+	Email hostedmail.Config
+	// WebBilling is the web payment provider; none when its Provider is "".
+	WebBilling   WebBilling
 	CookieSecure bool
 	DevUI        bool
 	// DrainDelay is how long readiness fails before the listener closes, and
@@ -161,6 +163,9 @@ func Load(getenv Getenv) (Config, error) {
 		return Config{}, err
 	}
 	if cfg.DevUI, err = hostedenv.Bool(getenv, "DEV_UI", false); err != nil {
+		return Config{}, err
+	}
+	if cfg.WebBilling, err = loadWebBilling(getenv, cfg.DevUI); err != nil {
 		return Config{}, err
 	}
 	if cfg.DrainDelay, err = hostedenv.Millis(getenv, "DRAIN_DELAY_MS", 15*time.Second, 0); err != nil {
