@@ -24,6 +24,7 @@ import (
 	"futo-notes-server/internal/hosted/hostedtest"
 	"futo-notes-server/internal/hostedauth"
 	"futo-notes-server/internal/mockoidc"
+	"futo-notes-server/internal/mockoidc/mockoidctest"
 )
 
 const (
@@ -65,7 +66,7 @@ func newHarnessWith(t *testing.T, configure func(*config.Config)) *harness {
 
 	h.api = httptest.NewUnstartedServer(nil)
 	publicURL := "http://" + h.api.Listener.Addr().String()
-	h.issuer = mockoidc.StartTestServer(t, mockoidc.Config{
+	h.issuer = mockoidctest.Start(t, mockoidc.Config{
 		ClientID:     clientID,
 		ClientSecret: clientSecret,
 		RedirectURIs: []string{publicURL + "/api/auth/oidc/callback"},

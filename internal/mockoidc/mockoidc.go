@@ -18,12 +18,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"slices"
 	"strings"
 	"sync"
-	"testing"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -48,8 +46,6 @@ type Config struct {
 	// does.
 	RedirectURIs           []string
 	PostLogoutRedirectURIs []string
-	// Now replaces time.Now when set.
-	Now func() time.Time
 }
 
 // Identity is what a login asserts about the user.
@@ -99,9 +95,6 @@ func New(cfg Config) (*Provider, error) {
 	if len(cfg.RedirectURIs) == 0 {
 		return nil, errors.New("at least one redirect URI is required")
 	}
-	if cfg.Now == nil {
-		cfg.Now = time.Now
-	}
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return nil, fmt.Errorf("generate signing key: %w", err)
@@ -113,24 +106,6 @@ func New(cfg Config) (*Provider, error) {
 		codes:      map[string]authCode{},
 		tokens:     map[string]accessToken{},
 	}, nil
-}
-
-// StartTestServer runs a Provider on an httptest server for the duration of
-// t. cfg.Issuer is filled in with the server's URL. It returns the server; its
-// URL is the issuer.
-func StartTestServer(t testing.TB, cfg Config) *httptest.Server {
-	t.Helper()
-	srv := httptest.NewUnstartedServer(nil)
-	cfg.Issuer = "http://" + srv.Listener.Addr().String()
-	p, err := New(cfg)
-	if err != nil {
-		srv.Close()
-		t.Fatalf("mockoidc: %v", err)
-	}
-	srv.Config.Handler = p.Handler()
-	srv.Start()
-	t.Cleanup(srv.Close)
-	return srv
 }
 
 // Issuer returns the issuer URL tokens are stamped with.
@@ -258,7 +233,7 @@ func (p *Provider) issueCode(w http.ResponseWriter, r *http.Request, params url.
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	now := p.cfg.Now()
+	now := time.Now()
 	code := randomString(32)
 	p.mu.Lock()
 	p.codes[code] = authCode{
@@ -304,7 +279,7 @@ func (p *Provider) token(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	now := p.cfg.Now()
+	now := time.Now()
 	p.mu.Lock()
 	code, found := p.codes[r.PostForm.Get("code")]
 	delete(p.codes, r.PostForm.Get("code"))
@@ -384,7 +359,7 @@ func (p *Provider) userinfo(w http.ResponseWriter, r *http.Request) {
 	p.mu.Lock()
 	tok, found := p.tokens[bearer]
 	p.mu.Unlock()
-	if !ok || !found || p.cfg.Now().After(tok.expiresAt) {
+	if !ok || !found || time.Now().After(tok.expiresAt) {
 		w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)
 		writeOAuthError(w, http.StatusUnauthorized, "invalid_token", "unknown or expired access token")
 		return

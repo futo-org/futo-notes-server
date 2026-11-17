@@ -1,4 +1,4 @@
-package mockoidc
+package mockoidc_test
 
 import (
 	"context"
@@ -14,6 +14,9 @@ import (
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
+
+	"futo-notes-server/internal/mockoidc"
+	"futo-notes-server/internal/mockoidc/mockoidctest"
 )
 
 const (
@@ -23,8 +26,8 @@ const (
 	testPostLogout   = "http://app.test/"
 )
 
-func testConfig() Config {
-	return Config{
+func testConfig() mockoidc.Config {
+	return mockoidc.Config{
 		ClientID:               testClientID,
 		ClientSecret:           testClientSecret,
 		RedirectURIs:           []string{testRedirect},
@@ -79,7 +82,7 @@ func callbackQuery(t *testing.T, resp *http.Response) url.Values {
 }
 
 func TestCodeFlowWithLoginForm(t *testing.T) {
-	srv := StartTestServer(t, testConfig())
+	srv := mockoidctest.Start(t, testConfig())
 	rp := newRelyingParty(t, srv.URL)
 	ctx := context.Background()
 
@@ -159,7 +162,7 @@ func testAuthorize(t *testing.T, srv *httptest.Server, rp relyingParty, sub, pkc
 }
 
 func TestTestAuthorizeShortcut(t *testing.T) {
-	srv := StartTestServer(t, testConfig())
+	srv := mockoidctest.Start(t, testConfig())
 	rp := newRelyingParty(t, srv.URL)
 	ctx := context.Background()
 	pkce := oauth2.GenerateVerifier()
@@ -186,7 +189,7 @@ func TestTestAuthorizeShortcut(t *testing.T) {
 }
 
 func TestTokenEndpointRejects(t *testing.T) {
-	srv := StartTestServer(t, testConfig())
+	srv := mockoidctest.Start(t, testConfig())
 	rp := newRelyingParty(t, srv.URL)
 	ctx := context.Background()
 
@@ -241,7 +244,7 @@ func TestTokenEndpointRejects(t *testing.T) {
 }
 
 func TestAuthorizeRejects(t *testing.T) {
-	srv := StartTestServer(t, testConfig())
+	srv := mockoidctest.Start(t, testConfig())
 	rp := newRelyingParty(t, srv.URL)
 	base, _ := url.Parse(rp.oauth.AuthCodeURL("s", oauth2.S256ChallengeOption(oauth2.GenerateVerifier())))
 
@@ -274,7 +277,7 @@ func TestAuthorizeRejects(t *testing.T) {
 }
 
 func TestUserinfoRejectsUnknownToken(t *testing.T) {
-	srv := StartTestServer(t, testConfig())
+	srv := mockoidctest.Start(t, testConfig())
 	rp := newRelyingParty(t, srv.URL)
 	_, err := rp.provider.UserInfo(context.Background(), oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "nope", TokenType: "Bearer"}))
 	if err == nil {
@@ -283,7 +286,7 @@ func TestUserinfoRejectsUnknownToken(t *testing.T) {
 }
 
 func TestEndSession(t *testing.T) {
-	srv := StartTestServer(t, testConfig())
+	srv := mockoidctest.Start(t, testConfig())
 
 	resp, err := noRedirects.Get(srv.URL + "/end_session?" + url.Values{"post_logout_redirect_uri": {testPostLogout}, "state": {"bye"}}.Encode())
 	if err != nil {
@@ -308,7 +311,7 @@ func TestIssuerWithPath(t *testing.T) {
 	srv := httptest.NewUnstartedServer(nil)
 	cfg := testConfig()
 	cfg.Issuer = "http://" + srv.Listener.Addr().String() + "/oidc"
-	p, err := New(cfg)
+	p, err := mockoidc.New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,20 +339,20 @@ func TestIssuerWithPath(t *testing.T) {
 }
 
 func TestNewRejectsBadConfig(t *testing.T) {
-	cases := map[string]func(*Config){
-		"no issuer":       func(c *Config) { c.Issuer = "" },
-		"relative issuer": func(c *Config) { c.Issuer = "/oidc" },
-		"issuer query":    func(c *Config) { c.Issuer = "http://x.test?a=b" },
-		"no client id":    func(c *Config) { c.ClientID = "" },
-		"no secret":       func(c *Config) { c.ClientSecret = "" },
-		"no redirect":     func(c *Config) { c.RedirectURIs = nil },
+	cases := map[string]func(*mockoidc.Config){
+		"no issuer":       func(c *mockoidc.Config) { c.Issuer = "" },
+		"relative issuer": func(c *mockoidc.Config) { c.Issuer = "/oidc" },
+		"issuer query":    func(c *mockoidc.Config) { c.Issuer = "http://x.test?a=b" },
+		"no client id":    func(c *mockoidc.Config) { c.ClientID = "" },
+		"no secret":       func(c *mockoidc.Config) { c.ClientSecret = "" },
+		"no redirect":     func(c *mockoidc.Config) { c.RedirectURIs = nil },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
 			cfg := testConfig()
 			cfg.Issuer = "http://localhost:8092"
 			mutate(&cfg)
-			if _, err := New(cfg); err == nil {
+			if _, err := mockoidc.New(cfg); err == nil {
 				t.Fatal("accepted")
 			}
 		})
