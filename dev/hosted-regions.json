@@ -1,0 +1,23 @@
+[
+  {
+    "id": "us-east",
+    "name": "US East",
+    "description": "Dev region served by the us-east storage service.",
+    "endpoint": "http://localhost:3015",
+    "receipt_public_keys": "-----BEGIN PUBLIC KEY-----\nkid: dev-us-east-1\n\nMCowBQYDK2VwAyEAQGQ7BdjDfan/tl+ALSVldSPP6DNW63u6Y/LKwjOcfEk=\n-----END PUBLIC KEY-----\n"
+  },
+  {
+    "id": "eu-central",
+    "name": "EU Central",
+    "description": "Dev region served by the eu-central storage service.",
+    "endpoint": "http://localhost:3016",
+    "receipt_public_keys": "-----BEGIN PUBLIC KEY-----\nkid: dev-eu-central-1\n\nMCowBQYDK2VwAyEAqTuLNZFmwa3AyXRTsf7unn+YsCghgNShgCHJ8IlWHIg=\n-----END PUBLIC KEY-----\n"
+  },
+  {
+    "id": "ap-southeast",
+    "name": "Asia Pacific Southeast",
+    "description": "Dev region served by the ap-southeast storage service.",
+    "endpoint": "http://localhost:3017",
+    "receipt_public_keys": "-----BEGIN PUBLIC KEY-----\nkid: dev-ap-southeast-1\n\nMCowBQYDK2VwAyEABlGLcn59vhOW49esdpWbmgkkQf82tNnUvmYDUKYUgJQ=\n-----END PUBLIC KEY-----\n"
+  }
+]
