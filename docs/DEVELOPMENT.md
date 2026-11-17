@@ -88,6 +88,7 @@ mise run docker:start     # compose.hosted.yml: Postgres, MinIO, victoria-metric
 mise run test:integration # every suite, against that stack
 mise run lint
 mise run k8s:validate     # helm template | kubeconform for charts/
+mise run hosted-stack:smoke # release bundle up, client smoke test, down
 mise run docker:stop      # add -v to drop the Postgres volume
 ```
 
@@ -287,4 +288,7 @@ publishes `futotech/notes-server:go-candidate` (moving) alongside
 
 Release tags produce Linux amd64/arm64/armv6, macOS amd64/arm64, and Windows
 amd64 binaries plus SHA-256 checksums. `scripts/build-release.sh <version>`
-produces the same files locally.
+produces the same files locally. It also builds the hosted `api`, `storage` and
+`mock-oidc` binaries and the hosted test-stack bundle into `dist/hosted/`,
+published as a separate package for the apps' tests; see
+[Hosted test stack](Hosted%20test%20stack.md).
