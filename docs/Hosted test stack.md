@@ -61,14 +61,19 @@ macOS, not Windows.
    `HOSTED_STACK_POSTGRES_PORT` and `HOSTED_STACK_MINIO_PORT` move them.
    `HOSTED_STACK_DIR` holds the state and `logs/<service>.log`. The API accepts
    app redirects on `tech.futo.notes` and `tech.futo.notes.dev`, and on
-   loopback. Under Docker-in-Docker (`DOCKER_HOST=tcp://docker:2376`) the
+   loopback. Anyone can sign up unless `HOSTED_STACK_ALLOWED_EMAIL_DOMAINS`
+   (comma-separated, empty by default) sets the API's
+   `ALLOWED_EMAIL_DOMAINS`: then a new account needs a verified email at one
+   of those domains, and is otherwise refused with
+   `error=signup_not_allowed` on the redirect back to the app. Under Docker-in-Docker (`DOCKER_HOST=tcp://docker:2376`) the
    launcher reaches the containers at that host.
 3. **Sign in.** The app points at `HOSTED_STACK_API_URL` and starts an app
    sign-in at `/api/auth/oidc/start`, with its `redirect_uri`, PKCE challenge
    and `state`. That redirects to `HOSTED_STACK_ISSUER/authorize?...`, which
    shows a form. A test does not fill it in. It replaces the path with
    `/test/authorize`, keeps the query, and adds `sub=<test user>` (and
-   optionally `email=` and `name=`). Then it follows the redirects with a
+   optionally `email=`, `name=`, and `email_verified=false` to play an
+   unverified address). Then it follows the redirects with a
    cookie jar, back through the API's callback to the app's `redirect_uri`,
    which carries the one-time `code`. The app swaps it at
    `POST /api/auth/oidc/token`. Every new `sub` is a new account. The next

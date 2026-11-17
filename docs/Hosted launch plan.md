@@ -33,6 +33,7 @@ Status:
 | Family Sharing | **Off** for the App Store subscription. |
 | Store product id | `com.futo.notes.sync.monthly`, the same on the App Store and Play. |
 | Privacy policy | `https://docs.futo.cloud/legal/privacy`. |
+| Sign-up restriction | `ALLOWED_EMAIL_DOMAINS` (comma-separated, exact domain match, empty = open) limits **new** accounts to a verified email at a listed domain. **Existing users always sign in.** Refusals: a dashboard 403 page or the app redirect's `error=signup_not_allowed`; the capability's `signup` stays `"open"`. |
 | Account deletion | Requires a **recent sign-in** (A7). |
 | One store account, two FUTO accounts | The subscription stays with the account it was bought under (C1). |
 | Client CI | The server **releases the hosted binaries plus a compose bundle** the apps' test harness can start. |

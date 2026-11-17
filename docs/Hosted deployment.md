@@ -63,6 +63,7 @@ plain-http cookies). Every prod release sets the following.
 | `oidcIssuer` | the Zitadel instance URL, exactly as its discovery document's `issuer` |
 | `oidcClientId` | the Zitadel application's client id |
 | `appRedirectSchemes` | the custom URL schemes the apps sign in through: `[tech.futo.notes]` (the release apps, and the chart default) in prod, `[tech.futo.notes, tech.futo.notes.dev]` in staging so dev builds can sign in too. Loopback `http://127.0.0.1:<port>` and `http://[::1]:<port>` are always allowed (desktop); `http` and `https` are refused, so claimed `https` app links are not accepted. |
+| `allowedEmailDomains` | renders `ALLOWED_EMAIL_DOMAINS`: the email domains a **new** account may sign up with, e.g. `[futo.org, futo.tech]`; `[]` (the chart default) lets anyone sign up. See Sign-up restriction below. |
 | `regions` | the regions file (format below) |
 | `resendApiUrl` | `https://api.resend.com` (the default; `RESEND_API_URL`) |
 | `emailFromAddress` | the `From` of every email (`EMAIL_FROM_ADDRESS`). The default, `FUTO Notes <noreply@notes.futo.cloud>`, is a **placeholder**: confirm the sending domain, verify it in Resend, then set this. |
@@ -285,6 +286,35 @@ directly.
   would give the same person a different account in each service (see
   [MANAGED-LAUNCH.md](MANAGED-LAUNCH.md)). Email is not unique on hosted: the
   identity provider owns it, and an address can move between accounts.
+- `email_verified` must be in the ID token (the same **User Info inside ID
+  Token** setting) whenever `allowedEmailDomains` is set; without it every
+  new account is refused.
+
+## Sign-up restriction
+
+`ALLOWED_EMAIL_DOMAINS` (chart value `allowedEmailDomains`) limits who can
+create an account. It is a comma-separated list such as
+`futo.org,futo.tech`; entries are trimmed and lowercased, and the API
+refuses to start on one containing `@`, `*` or a space, or without a dot.
+Empty or unset, the default, lets anyone sign up.
+
+- It applies only when a sign-in would **create** an account, that is, no
+  account has the ID token's `sub` yet. **Existing users are never locked
+  out**: an account that exists signs in even if its domain was removed from
+  the list or its email changed to another domain.
+- A new account needs `email_verified: true` in the ID token and an email
+  whose domain, the part after the last `@`, is exactly one listed, in any
+  case. Subdomains are not implied: list `eng.futo.org` to admit it.
+- A refused dashboard sign-in gets a `403` page, "Sign-ups are limited to
+  approved email domains.", and an app's sign-in returns to its
+  `redirect_uri` with `error=signup_not_allowed`. Neither creates an account
+  or a session, and neither names the allowed domains. `auth.logins` counts
+  them as `outcome=signup_not_allowed`.
+- The capability document's `signup` stays `"open"`.
+- To try it locally, set `ALLOWED_EMAIL_DOMAINS` for `mise run api:dev`
+  (`HOSTED_STACK_ALLOWED_EMAIL_DOMAINS` for the hosted test stack); `/dev`
+  shows whether sign-up is restricted, and mock-oidc's sign-in form has an
+  "Email not verified" box (`email_verified=false` on `/test/authorize`).
 
 ## App Store and Google Play
 
@@ -503,7 +533,7 @@ Metrics worth alerting on:
 | `storage_client.errors` (`region`, `operation`) | api | a region's internal endpoint failing |
 | `tokens.refreshes` (`outcome=reuse_detected`) | api | a spike means stolen refresh tokens or a client bug |
 | `receipts.verification_failures` (`reason`) | api | `invalid` after a receipt key change means step 2 was missed |
-| `auth.logins` (`outcome`) | api | `provider_error` means Zitadel is down or misconfigured |
+| `auth.logins` (`outcome`) | api | `provider_error` means Zitadel is down or misconfigured; `signup_not_allowed` counts new accounts `ALLOWED_EMAIL_DOMAINS` refused |
 | `db.pool.waits`, `db.pool.connections` | api | pool exhaustion (`DB_POOL_MAX`, default 10 per pod) |
 | `sse.streams` | api | open sync streams per pod |
 | `auth.failures` (`kind`, `reason`) | storage | a rise in `invalid` 401s, e.g. tokens for another region or a kid the region does not trust after a rotation |
