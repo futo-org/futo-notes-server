@@ -91,7 +91,8 @@ macOS, not Windows.
    and removes the Compose project `futo-notes-hosted-stack` with its data. A
    failed `up` cleans up after itself, after printing each service's log tail.
 
-Only one stack per machine runs at a time: the Compose project name is fixed.
+Several stacks can run on one machine: give each its own
+`HOSTED_STACK_PROJECT`, `HOSTED_STACK_DIR` and ports.
 The API defaults to port 3125, clear of 3005 and of the 3105 this repo's
 comparison harness uses.
 
