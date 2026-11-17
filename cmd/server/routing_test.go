@@ -133,9 +133,12 @@ func redirectTo(method, location string) routingResponse {
 	return temporaryRedirect(method, location, location)
 }
 
+// routingMethods are the methods every path is tried with: the standard ones,
+// an extension method, and a standard name in the wrong case.
 var routingMethods = []string{
 	http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch,
 	http.MethodDelete, http.MethodOptions, http.MethodTrace, http.MethodConnect,
+	"PROPFIND", "get",
 }
 
 // apiRoute is one path under /api/ and the methods registered for it.
