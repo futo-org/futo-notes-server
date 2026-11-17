@@ -32,6 +32,8 @@ import (
 	"futo-notes-server/internal/hosted/config"
 	"futo-notes-server/internal/hosted/hosteddb"
 	"futo-notes-server/internal/hosted/hostedjobs"
+	"futo-notes-server/internal/hosted/storageclient"
+	"futo-notes-server/internal/hostedauth"
 	"futo-notes-server/internal/jobs"
 )
 
@@ -159,6 +161,19 @@ func run() error {
 		return fmt.Errorf("creating metrics: %w", err)
 	}
 
+	storage, err := storageclient.New(cfg.Regions, hostedauth.NewMinter(cfg.SigningKey), meter)
+	if err != nil {
+		return fmt.Errorf("creating storage client: %w", err)
+	}
+	jobMetrics, err := hostedjobs.NewMetrics(meter)
+	if err != nil {
+		return fmt.Errorf("creating job metrics: %w", err)
+	}
+	regionIDs := make([]string, 0, len(cfg.Regions))
+	for _, region := range cfg.Regions {
+		regionIDs = append(regionIDs, region.ID)
+	}
+
 	hub := events.NewHub()
 	server, err := api.New(api.Options{Config: cfg, Database: database, Hub: hub, Metrics: metrics, Version: version})
 	if err != nil {
@@ -171,7 +186,7 @@ func run() error {
 	workers.Go(func() { events.Listen(background, cfg.Database.URL, hub) })
 	workers.Go(func() {
 		hostedjobs.Run(background, database, jobs.DefaultSchedule,
-			hostedjobs.Sessions(database, server.Accounts()), hostedjobs.Maintenance(database), metrics.JobRun)
+			hostedjobs.Sessions(database, server.Accounts()), hostedjobs.Maintenance(database, storage, regionIDs, jobMetrics), metrics.JobRun)
 	})
 
 	httpSrv := &http.Server{Handler: server.Handler(), ReadHeaderTimeout: readHeaderTimeout}

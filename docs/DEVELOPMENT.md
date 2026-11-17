@@ -164,6 +164,15 @@ because only loopback IP literals are allowed app redirect targets.
 refuses to start while either has migrations pending. In Kubernetes the chart's
 pre-install/pre-upgrade hook Job runs it.
 
+Every API replica runs the background jobs (`internal/hosted/hostedjobs`); a
+job takes a Postgres advisory lock and is skipped if it started on any replica
+within its interval (`hosted_job_runs`). Hourly: session reaping, expired OIDC
+logins. Every 6 hours: mutation result expiry, blob GC, orphan reconciliation
+(each region's keys older than 48h that the ledger does not know) and account
+purge (accounts past the 30-day grace: storage prefix first, then the rows).
+The storage jobs call each region's `/internal/*` endpoints at the region's
+`endpoint` from the regions file, so the API must be able to reach it.
+
 The end-to-end client flow against a dev stack:
 
 1. `GET /api/auth/oidc/start?redirect_uri=http://127.0.0.1:<port>/cb&code_challenge=<S256>&state=<s>`

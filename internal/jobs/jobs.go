@@ -33,10 +33,11 @@ const (
 	mutationResultLifetime = 30 * 24 * time.Hour
 	// stagedBlobLifetime is how long a blob stays staged before GC removes it.
 	stagedBlobLifetime = 24 * time.Hour
-	// retainedBlobLifetime is how long a blob stays retained before GC
-	// removes it.
-	retainedBlobLifetime = 365 * 24 * time.Hour
 )
+
+// RetainedBlobLifetime is how long a blob stays retained before GC removes
+// it. The hosted blob GC uses the same rule.
+const RetainedBlobLifetime = 365 * 24 * time.Hour
 
 // SessionReapResult reports what ReapSessions deleted.
 type SessionReapResult struct {
@@ -279,7 +280,7 @@ func eligibleBlobKeys(ctx context.Context, database *db.DB) ([]string, error) {
 // blobExpiryCutoffs returns the timestamps before which staged and retained
 // blobs are eligible for garbage collection.
 func blobExpiryCutoffs(now time.Time) (stagedBefore, retainedBefore string) {
-	return db.Timestamp(now.Add(-stagedBlobLifetime)), db.Timestamp(now.Add(-retainedBlobLifetime))
+	return db.Timestamp(now.Add(-stagedBlobLifetime)), db.Timestamp(now.Add(-RetainedBlobLifetime))
 }
 
 // purgeBlobRow deletes key's ledger row if it is still eligible and not locked
