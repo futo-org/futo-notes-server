@@ -1,0 +1,12 @@
+{{- include "storage.region" . }}
+{{- /* REGION_ID and S3_BUCKET come from .Values.region, after .Values.env so a
+region's release cannot end up half-overridden. The chart Secret is first in
+envFrom and extraEnvFrom last: for duplicate keys Kubernetes takes the LAST
+envFrom source, so extraEnvFrom acts as an override. */}}
+{{- $_ := set .Values "env" (concat .Values.env (list
+  (dict "name" "REGION_ID" "value" .Values.region)
+  (dict "name" "S3_BUCKET" "value" .Values.s3Bucket))) }}
+{{- $_ := set .Values "envFrom" (concat
+  (list (dict "secretRef" (dict "name" (include "notes-common.fullname" .))))
+  (.Values.extraEnvFrom | default (list))) }}
+{{- include "notes-common.deployment" . }}
