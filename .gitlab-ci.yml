@@ -21,9 +21,9 @@ variables:
 test:go:
   extends: .skip-soak-schedule
   stage: test
-  image: golang:1.27-bookworm
+  image: golang:1.27-bookworm@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea
   services:
-    - name: postgres:16
+    - name: postgres:16@sha256:dd2bf3ce2dc83a81674cf7f217fcfd8a5009a4b325dda5b843bfee82a06cff6f
       alias: postgres
   variables:
     POSTGRES_USER: futo_notes
@@ -49,9 +49,9 @@ test:go:
 test:image:
   extends: .skip-soak-schedule
   stage: test
-  image: docker:29
+  image: docker:29@sha256:4bbc7223f81db790097c6dea42fb93e05b8fead4f0431fbe6ccaba6e8473201c
   services:
-    - docker:29-dind
+    - docker:29-dind@sha256:4bbc7223f81db790097c6dea42fb93e05b8fead4f0431fbe6ccaba6e8473201c
   variables:
     DOCKER_TLS_CERTDIR: /certs
   script:
@@ -70,9 +70,9 @@ test:image:
 test:adoption:
   extends: .skip-soak-schedule
   stage: adoption
-  image: golang:1.27-bookworm
+  image: golang:1.27-bookworm@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea
   services:
-    - name: postgres:16
+    - name: postgres:16@sha256:dd2bf3ce2dc83a81674cf7f217fcfd8a5009a4b325dda5b843bfee82a06cff6f
       alias: postgres
   variables:
     POSTGRES_USER: futo_notes
@@ -116,7 +116,7 @@ test:adoption:
 build:binaries:
   extends: .skip-soak-schedule
   stage: build
-  image: golang:1.27-bookworm
+  image: golang:1.27-bookworm@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea
   script:
     - VERSION=${CI_COMMIT_TAG:-$CI_COMMIT_SHORT_SHA}
     - ./scripts/build-release.sh "$VERSION"
@@ -127,7 +127,7 @@ build:binaries:
 
 soak:staging:
   stage: test
-  image: alpine:3.22
+  image: alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
   before_script:
     - apk add --no-cache bash coreutils curl jq ripgrep
   script:
@@ -149,9 +149,9 @@ soak:staging:
 
 publish:candidate-image:
   stage: publish
-  image: docker:29
+  image: docker:29@sha256:4bbc7223f81db790097c6dea42fb93e05b8fead4f0431fbe6ccaba6e8473201c
   services:
-    - docker:29-dind
+    - docker:29-dind@sha256:4bbc7223f81db790097c6dea42fb93e05b8fead4f0431fbe6ccaba6e8473201c
   variables:
     DOCKER_TLS_CERTDIR: /certs
     DOCKERHUB_IMAGE: docker.io/futotech/notes-server
@@ -178,9 +178,9 @@ publish:candidate-image:
 
 publish:image:
   stage: publish
-  image: docker:29
+  image: docker:29@sha256:4bbc7223f81db790097c6dea42fb93e05b8fead4f0431fbe6ccaba6e8473201c
   services:
-    - docker:29-dind
+    - docker:29-dind@sha256:4bbc7223f81db790097c6dea42fb93e05b8fead4f0431fbe6ccaba6e8473201c
   variables:
     DOCKER_TLS_CERTDIR: /certs
     DOCKERHUB_IMAGE: docker.io/futotech/notes-server
@@ -209,7 +209,7 @@ publish:image:
 
 publish:binaries:
   stage: publish
-  image: curlimages/curl:8.12.1
+  image: curlimages/curl:8.23.0@sha256:3fb7e13e5d179a845c97d78204f3f1064d1907037f26a3ebf91710571151fd93
   needs:
     - job: build:binaries
       artifacts: true
