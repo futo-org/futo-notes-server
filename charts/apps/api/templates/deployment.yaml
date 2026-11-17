@@ -6,6 +6,8 @@ values of their own, so a release overrides them there. */}}
   (dict "name" "OIDC_CLIENT_ID" "value" .Values.oidcClientId)
   (dict "name" "APP_REDIRECT_SCHEMES" "value" (join "," .Values.appRedirectSchemes))
   (dict "name" "REGIONS_FILE" "value" "/etc/notes-api/regions.json")
+  (dict "name" "RESEND_API_URL" "value" .Values.resendApiUrl)
+  (dict "name" "EMAIL_FROM_ADDRESS" "value" .Values.emailFromAddress)
 ) (include "api.postgresEnv" . | fromYamlArray)) }}
 {{- /* The chart Secret is first in envFrom and extraEnvFrom last: for
 duplicate keys Kubernetes takes the LAST envFrom source, so extraEnvFrom acts
