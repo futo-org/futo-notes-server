@@ -17,7 +17,7 @@ To sign out this browser, use <strong>Sign out</strong> at the top.</p>
 <tbody>
 {{- range .Devices}}
 <tr>
-<td class="ua">{{if .UserAgent}}{{.UserAgent}}{{else}}Unknown device{{end}}{{if .Current}} <span class="tag">This device</span>{{end}}</td>
+<td class="ua">{{if .DeviceName}}{{.DeviceName}}{{else if .UserAgent}}{{.UserAgent}}{{else}}Unknown device{{end}}{{if .Current}} <span class="tag">This device</span>{{end}}</td>
 <td><time datetime="{{isoTime .CreatedAt}}">{{utcTime .CreatedAt}}</time></td>
 <td><time datetime="{{isoTime .LastUsedAt}}">{{utcTime .LastUsedAt}}</time></td>
 <td>

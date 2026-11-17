@@ -21,6 +21,9 @@ const (
 	touchInterval = 10 * time.Minute
 	// maxUserAgent caps the stored User-Agent.
 	maxUserAgent = 512
+	// MaxDeviceName is the longest device name an app may give, in
+	// characters.
+	MaxDeviceName = 100
 )
 
 // Principal is the caller an authenticated request acts as.
@@ -44,18 +47,27 @@ type execer interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
-// createSession opens a session for userID through q and returns its raw
-// token and id.
-func (s *Store) createSession(ctx context.Context, q execer, userID, userAgent string) (token, sessionID string, err error) {
+// Device is what the device list shows for a session.
+type Device struct {
+	// Name is what the app calls the device, at most MaxDeviceName
+	// characters; "" when it gave none, and the list falls back to UserAgent.
+	Name      string
+	UserAgent string
+}
+
+// createSession opens a session for userID on device through q and returns
+// its raw token and id.
+func (s *Store) createSession(ctx context.Context, q execer, userID string, device Device) (token, sessionID string, err error) {
+	userAgent := device.UserAgent
 	if len(userAgent) > maxUserAgent {
 		userAgent = userAgent[:maxUserAgent]
 	}
 	now := s.now()
 	token, sessionID = auth.GenerateToken(), uuid.NewV7().String()
 	_, err = q.ExecContext(ctx, `INSERT INTO sessions
-		(id, user_id, access_token_hash, expires_at, created_at, last_used_at, user_agent)
-		VALUES ($1, $2, $3, $4, $5, $5, $6)`,
-		sessionID, userID, auth.HashToken(token), now.Add(SessionTTL), now, userAgent)
+		(id, user_id, access_token_hash, expires_at, created_at, last_used_at, user_agent, device_name)
+		VALUES ($1, $2, $3, $4, $5, $5, $6, $7)`,
+		sessionID, userID, auth.HashToken(token), now.Add(SessionTTL), now, userAgent, nullable(device.Name))
 	if err != nil {
 		return "", "", err
 	}
@@ -65,7 +77,7 @@ func (s *Store) createSession(ctx context.Context, q execer, userID, userAgent s
 // CreateSession opens a session for userID, recording userAgent for the
 // device list, and returns its raw token. Only the token's hash is stored.
 func (s *Store) CreateSession(ctx context.Context, userID, userAgent string) (string, error) {
-	token, _, err := s.createSession(ctx, s.database, userID, userAgent)
+	token, _, err := s.createSession(ctx, s.database, userID, Device{UserAgent: userAgent})
 	return token, err
 }
 
@@ -121,11 +133,14 @@ type DeviceSession struct {
 	LastUsedAt time.Time
 	ExpiresAt  time.Time
 	UserAgent  string
+	// DeviceName is "" when the app gave none.
+	DeviceName string
 }
 
 // Sessions lists the user's live sessions, most recently used first.
 func (s *Store) Sessions(ctx context.Context, userID string) ([]DeviceSession, error) {
-	rows, err := s.database.QueryContext(ctx, `SELECT id, created_at, last_used_at, expires_at, user_agent
+	rows, err := s.database.QueryContext(ctx, `SELECT id, created_at, last_used_at, expires_at, user_agent,
+			coalesce(device_name, '')
 		FROM sessions WHERE user_id = $1 AND expires_at > $2
 		ORDER BY last_used_at DESC, id`, userID, s.now())
 	if err != nil {
@@ -135,7 +150,7 @@ func (s *Store) Sessions(ctx context.Context, userID string) ([]DeviceSession, e
 	sessions := []DeviceSession{}
 	for rows.Next() {
 		var d DeviceSession
-		if err := rows.Scan(&d.ID, &d.CreatedAt, &d.LastUsedAt, &d.ExpiresAt, &d.UserAgent); err != nil {
+		if err := rows.Scan(&d.ID, &d.CreatedAt, &d.LastUsedAt, &d.ExpiresAt, &d.UserAgent, &d.DeviceName); err != nil {
 			return nil, err
 		}
 		sessions = append(sessions, d)

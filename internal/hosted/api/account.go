@@ -135,11 +135,19 @@ type sessionResponse struct {
 	LastUsedAt time.Time `json:"last_used_at"`
 	ExpiresAt  time.Time `json:"expires_at"`
 	UserAgent  string    `json:"user_agent"`
+	DeviceName *string   `json:"device_name"`
 	Current    bool      `json:"current"`
 }
 
 type sessionsResponse struct {
 	Sessions []sessionResponse `json:"sessions"`
+}
+
+func nullable(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 // handleSessions serves GET /api/sessions, the caller's signed-in devices.
@@ -158,6 +166,7 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 			LastUsedAt: d.LastUsedAt.UTC(),
 			ExpiresAt:  d.ExpiresAt.UTC(),
 			UserAgent:  d.UserAgent,
+			DeviceName: nullable(d.DeviceName),
 			Current:    d.ID == p.Session.ID,
 		})
 	}

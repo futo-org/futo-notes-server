@@ -14,7 +14,8 @@ create index idx_users_purge_at on users (purge_at) where purge_at is not null;
 alter table sessions
     add column created_at timestamptz not null default now(),
     add column last_used_at timestamptz not null default now(),
-    add column user_agent text not null default '';
+    add column user_agent text not null default '',
+    add column device_name text;
 
 create index idx_sessions_user on sessions (user_id);
 create index idx_sessions_expires_at on sessions (expires_at);

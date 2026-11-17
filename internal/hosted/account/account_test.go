@@ -57,7 +57,7 @@ func appSession(t *testing.T, store *account.Store, user auth.User) account.AppS
 	if err != nil {
 		t.Fatal(err)
 	}
-	session, err := store.RedeemAppCode(t.Context(), code, verifier, "test-device/1.0")
+	session, err := store.RedeemAppCode(t.Context(), code, verifier, account.Device{UserAgent: "test-device/1.0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -357,10 +357,10 @@ func TestAppCodesAreSingleUseAndBoundToTheChallenge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.RedeemAppCode(ctx, code, verifier+"x", "ua"); !errors.Is(err, account.ErrCodeVerifier) {
+	if _, err := store.RedeemAppCode(ctx, code, verifier+"x", account.Device{UserAgent: "ua"}); !errors.Is(err, account.ErrCodeVerifier) {
 		t.Fatalf("wrong verifier = %v, want ErrCodeVerifier", err)
 	}
-	if _, err := store.RedeemAppCode(ctx, code, verifier, "ua"); !errors.Is(err, account.ErrInvalidCode) {
+	if _, err := store.RedeemAppCode(ctx, code, verifier, account.Device{UserAgent: "ua"}); !errors.Is(err, account.ErrInvalidCode) {
 		t.Fatalf("code after a wrong verifier = %v, want it spent", err)
 	}
 
@@ -368,14 +368,14 @@ func TestAppCodesAreSingleUseAndBoundToTheChallenge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	session, err := store.RedeemAppCode(ctx, code, verifier, "ua")
+	session, err := store.RedeemAppCode(ctx, code, verifier, account.Device{UserAgent: "ua"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if session.User != user || session.Token == "" || session.RefreshToken == "" {
 		t.Fatalf("session = %#v", session)
 	}
-	if _, err := store.RedeemAppCode(ctx, code, verifier, "ua"); !errors.Is(err, account.ErrInvalidCode) {
+	if _, err := store.RedeemAppCode(ctx, code, verifier, account.Device{UserAgent: "ua"}); !errors.Is(err, account.ErrInvalidCode) {
 		t.Fatalf("replayed code = %v, want ErrInvalidCode", err)
 	}
 
@@ -384,7 +384,7 @@ func TestAppCodesAreSingleUseAndBoundToTheChallenge(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.advance(2 * time.Minute)
-	if _, err := store.RedeemAppCode(ctx, code, verifier, "ua"); !errors.Is(err, account.ErrInvalidCode) {
+	if _, err := store.RedeemAppCode(ctx, code, verifier, account.Device{UserAgent: "ua"}); !errors.Is(err, account.ErrInvalidCode) {
 		t.Fatalf("expired code = %v, want ErrInvalidCode", err)
 	}
 }

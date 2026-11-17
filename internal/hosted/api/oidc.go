@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/rs/zerolog/hlog"
@@ -282,10 +283,13 @@ func redirectApp(w http.ResponseWriter, r *http.Request, login account.Login, pa
 	http.Redirect(w, r, target.String(), http.StatusFound)
 }
 
-// appTokenRequest is the body of POST /api/auth/oidc/token.
+// appTokenRequest is the body of POST /api/auth/oidc/token. DeviceName is
+// what the device list calls the new session; without it the list shows the
+// User-Agent.
 type appTokenRequest struct {
-	Code         string `json:"code"`
-	CodeVerifier string `json:"code_verifier"`
+	Code         string  `json:"code"`
+	CodeVerifier string  `json:"code_verifier"`
+	DeviceName   *string `json:"device_name"`
 }
 
 // appTokenResponse is what an app gets for its one-time code. The session
@@ -307,7 +311,15 @@ func (s *Server) handleOIDCToken(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, r, "code and code_verifier are required")
 		return
 	}
-	session, err := s.accounts.RedeemAppCode(r.Context(), body.Code, body.CodeVerifier, r.UserAgent())
+	device := account.Device{UserAgent: r.UserAgent()}
+	if body.DeviceName != nil {
+		device.Name = strings.TrimSpace(*body.DeviceName)
+		if n := utf8.RuneCountInString(device.Name); n < 1 || n > account.MaxDeviceName {
+			badRequest(w, r, fmt.Sprintf("device_name must be 1 to %d characters", account.MaxDeviceName))
+			return
+		}
+	}
+	session, err := s.accounts.RedeemAppCode(r.Context(), body.Code, body.CodeVerifier, device)
 	switch {
 	case errors.Is(err, account.ErrInvalidCode):
 		httputil.WriteError(w, r, http.StatusBadRequest, codeInvalidCode, "Invalid or expired code")

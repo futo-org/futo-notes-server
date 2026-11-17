@@ -35,6 +35,7 @@
     <div class="row">
       <a href="/api/auth/oidc/start">Dashboard sign-in</a>
       <a href="/dashboard">Open dashboard</a>
+      <input id="device-name" placeholder="device name for app sign-in (optional)">
       <button id="app-login">App sign-in</button>
       <button id="logout">Log out</button>
       <button id="forget">Forget tab tokens</button>
@@ -119,6 +120,7 @@ async function appLogin() {
   const state = b64url(crypto.getRandomValues(new Uint8Array(16)));
   store.setItem("verifier", verifier);
   store.setItem("state", state);
+  store.setItem("device-name", $("device-name").value.trim());
   const redirect = location.origin + "/dev";
   const params = new URLSearchParams({ redirect_uri: redirect, code_challenge: challenge, code_challenge_method: "S256", state });
   // The callback is served at PUBLIC_URL, so start there for its state cookie.
@@ -130,7 +132,9 @@ async function finishAppLogin() {
   history.replaceState(null, "", "/dev");
   if (q.get("state") !== store.getItem("state")) return show(400, "state mismatch");
   if (q.has("error")) return show(400, "sign-in failed: " + q.get("error"));
-  const res = await call("POST", "/api/auth/oidc/token", { code: q.get("code"), code_verifier: store.getItem("verifier") });
+  const body = { code: q.get("code"), code_verifier: store.getItem("verifier") };
+  if (store.getItem("device-name")) body.device_name = store.getItem("device-name");
+  const res = await call("POST", "/api/auth/oidc/token", body);
   if (res.status === 200) { store.setItem("token", res.body.token); store.setItem("refresh", res.body.storage_refresh_token); store.removeItem("refresh-prev"); }
   refreshWho();
 }

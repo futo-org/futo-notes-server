@@ -361,6 +361,13 @@ paths:
                 code_verifier:
                   type: string
                   minLength: 1
+                device_name:
+                  type: string
+                  description: |
+                    What the device list calls this session, for example
+                    `Pixel 9`: 1 to 100 characters once surrounding
+                    whitespace is trimmed. Without it the list shows the
+                    request's `User-Agent`.
       responses:
         "200":
           description: Signed in
@@ -383,7 +390,9 @@ paths:
                     $ref: "openapi.yaml#/components/schemas/User"
         "400":
           description: |
-            `invalid_request`: invalid JSON or a missing field.
+            `invalid_request`: invalid JSON, a missing field, or a
+            `device_name` that is blank or over 100 characters (the code is
+            not spent).
             `invalid_code`: an unknown, used or expired code.
             `code_verifier_mismatch`: a verifier that does not match the
             challenge (the code is spent).
@@ -1683,7 +1692,7 @@ components:
 
     Session:
       type: object
-      required: [id, created_at, last_used_at, expires_at, user_agent, current]
+      required: [id, created_at, last_used_at, expires_at, user_agent, device_name, current]
       additionalProperties: false
       properties:
         id:
@@ -1702,6 +1711,12 @@ components:
         user_agent:
           type: string
           description: The `User-Agent` that signed in; may be empty
+        device_name:
+          type: string
+          nullable: true
+          description: |
+            The `device_name` the app signed in with; `null` when it gave
+            none (show `user_agent` instead)
         current:
           type: boolean
           description: Whether this is the session making the request

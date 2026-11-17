@@ -181,6 +181,53 @@ func TestAppSignIn(t *testing.T) {
 	}
 }
 
+func TestAppSignInDeviceName(t *testing.T) {
+	h := newHarness(t)
+	sub := h.newSub()
+	code := h.client().appCode(sub, "http://127.0.0.1:43123/callback").Query().Get("code")
+	app := h.client()
+	token := func(deviceName any) response {
+		return app.do(http.MethodPost, "/api/auth/oidc/token",
+			map[string]any{"code": code, "code_verifier": verifier, "device_name": deviceName}, "User-Agent", "reqwest/0.12")
+	}
+	// A rejected name does not spend the code.
+	for _, name := range []string{"", "   ", strings.Repeat("é", 101)} {
+		expectHostedError(t, token(name), http.StatusBadRequest, "invalid_request")
+	}
+	var tokens appTokens
+	res := token("  " + strings.Repeat("é", 99) + "x\t")
+	if res.status != http.StatusOK {
+		t.Fatalf("token with a 100-character name = %d %s", res.status, res.body)
+	}
+	res.json(t, &tokens)
+
+	type session struct {
+		UserAgent  string  `json:"user_agent"`
+		DeviceName *string `json:"device_name"`
+		Current    bool    `json:"current"`
+	}
+	var listed struct {
+		Sessions []session `json:"sessions"`
+	}
+	app.bearer = tokens.Token
+	app.expect(http.MethodGet, "/api/sessions", nil, http.StatusOK).json(t, &listed)
+	if len(listed.Sessions) != 1 || listed.Sessions[0].DeviceName == nil ||
+		*listed.Sessions[0].DeviceName != strings.Repeat("é", 99)+"x" || listed.Sessions[0].UserAgent != "reqwest/0.12" {
+		t.Fatalf("sessions = %#v", listed.Sessions)
+	}
+
+	// Without a name the list keeps the User-Agent and says so with null.
+	browser := h.dashboardLogin(sub)
+	browser.expect(http.MethodGet, "/api/sessions", nil, http.StatusOK).json(t, &listed)
+	for _, s := range listed.Sessions {
+		if s.Current && s.DeviceName != nil {
+			t.Fatalf("dashboard session device_name = %q, want null", *s.DeviceName)
+		}
+	}
+	expectContains(t, browser.expect(http.MethodGet, "/dashboard/devices", nil, http.StatusOK),
+		`<td class="ua">`+strings.Repeat("é", 99)+`x</td>`, `<td class="ua">Go-http-client/1.1 <span class="tag">This device</span>`)
+}
+
 func TestAppSignInRejectsDisallowedRedirects(t *testing.T) {
 	h := newHarness(t)
 	c := h.client()

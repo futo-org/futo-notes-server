@@ -107,9 +107,9 @@ type AppSession struct {
 }
 
 // RedeemAppCode spends a one-time code: if codeVerifier answers the code's
-// PKCE challenge it opens a session for the code's user, with a storage
-// refresh token. The code is spent even when the verifier is wrong.
-func (s *Store) RedeemAppCode(ctx context.Context, code, codeVerifier, userAgent string) (AppSession, error) {
+// PKCE challenge it opens a session on device for the code's user, with a
+// storage refresh token. The code is spent even when the verifier is wrong.
+func (s *Store) RedeemAppCode(ctx context.Context, code, codeVerifier string, device Device) (AppSession, error) {
 	tx, err := s.database.BeginTx(ctx, nil)
 	if err != nil {
 		return AppSession{}, err
@@ -145,7 +145,7 @@ func (s *Store) RedeemAppCode(ctx context.Context, code, codeVerifier, userAgent
 		return AppSession{}, err
 	}
 	var sessionID string
-	if session.Token, sessionID, err = s.createSession(ctx, tx, session.User.ID, userAgent); err != nil {
+	if session.Token, sessionID, err = s.createSession(ctx, tx, session.User.ID, device); err != nil {
 		return AppSession{}, err
 	}
 	if session.RefreshToken, err = s.issueRefreshToken(ctx, tx, sessionID); err != nil {

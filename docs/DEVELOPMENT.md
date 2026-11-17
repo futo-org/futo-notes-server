@@ -239,7 +239,8 @@ cookie and lands back on `/dashboard`. The dev page links there too.
 - First visit with no region: choose one (offered once; it cannot change).
 - Overview: name, email, region, usage, and a banner with the purge date and
   **Cancel deletion** while a deletion is pending.
-- Devices: every session with user agent and UTC times; **Sign out** on any
+- Devices: every session with the device name the app signed in with (else
+  its user agent) and UTC times; **Sign out** on any
   device but this one (this browser signs out from the header instead).
 - Delete account: explains the 30-day grace and needs `DELETE` typed to
   confirm; every other device is signed out at once.
