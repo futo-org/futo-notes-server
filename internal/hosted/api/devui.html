@@ -139,7 +139,11 @@ third note</textarea></div>
   <section class="card">
     <h2>Billing</h2>
     <p class="muted">With <code>BILLING_WEB_PROVIDER=mock</code> the web checkout and portal are pages of this API; completing one
-      sends a signed webhook through <code>/api/billing/webhooks/web</code>. Without a subscription, writes answer 402 and storage
+      sends a signed webhook through <code>/api/billing/webhooks/web</code>. With <code>BILLING_WEB_PROVIDER=stripe</code> and sandbox
+      keys (docs/DEVELOPMENT.md), checkout is Stripe's embedded checkout: "Open checkout" opens the one-time page an app gets,
+      "Dashboard checkout panel" the panel the dashboard swaps in; pay with card 4242 4242 4242 4242, any future date and CVC.
+      The account is entitled as soon as the checkout completes; <code>stripe listen</code> forwards later changes.
+      Without a subscription, writes answer 402 and storage
       tokens are read-only (exchange again after subscribing). Synthetic events act on the signed-in user's subscriptions directly:
       grant adds a 30-day web one; lapse reports them expired; expire lets their paid period end with no news; refund revokes them.
       Then run the lapse job to record the lapse, and move it back 83 days (warning) or 90 (purge); emails land in
@@ -149,6 +153,7 @@ third note</textarea></div>
       <button id="checkout-open">Open checkout</button>
       <button id="checkout-complete">Complete a mock checkout now</button>
       <button id="portal-open">Open portal</button>
+      <a href="/dashboard/billing/subscribe" target="_blank" rel="noopener">Dashboard checkout panel</a>
     </div>
     <div class="row">
       <button data-billing-event="grant">Grant</button>
