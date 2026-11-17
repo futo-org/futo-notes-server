@@ -2,8 +2,9 @@ package main
 
 import (
 	"bytes"
-	"encoding/binary"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -49,38 +50,20 @@ func sparseStore(t testing.TB, sizes map[string]int64) *blobs.Store {
 	return store
 }
 
-type frame struct {
-	Key    string
-	Status blobframe.Status
-	Blob   []byte
-}
-
-func decodeFrames(t testing.TB, payload []byte) []frame {
+func decodeFrames(t testing.TB, payload []byte) []blobframe.Frame {
 	t.Helper()
-	var frames []frame
-	for offset := 0; offset < len(payload); {
-		if len(payload)-offset < 2 {
-			t.Fatalf("truncated key length at %d", offset)
+	var frames []blobframe.Frame
+	r := bytes.NewReader(payload)
+	for {
+		f, err := blobframe.ReadFrame(r)
+		if errors.Is(err, io.EOF) {
+			return frames
 		}
-		keyLen := int(binary.BigEndian.Uint16(payload[offset:]))
-		offset += 2
-		if len(payload)-offset < keyLen+5 {
-			t.Fatalf("truncated frame header at %d", offset)
+		if err != nil {
+			t.Fatalf("frame %d: %v", len(frames), err)
 		}
-		f := frame{Key: string(payload[offset : offset+keyLen])}
-		offset += keyLen
-		f.Status = blobframe.Status(payload[offset])
-		offset++
-		blobLen := int(binary.BigEndian.Uint32(payload[offset:]))
-		offset += 4
-		if blobLen > len(payload)-offset {
-			t.Fatalf("truncated blob at %d: want %d, have %d", offset, blobLen, len(payload)-offset)
-		}
-		f.Blob = payload[offset : offset+blobLen]
-		offset += blobLen
 		frames = append(frames, f)
 	}
-	return frames
 }
 
 func TestStreamBlobBatch(t *testing.T) {
