@@ -53,7 +53,7 @@ func (s *Server) handleDevReconciliation(w http.ResponseWriter, r *http.Request)
 	if id := q.Get("region"); id != "" {
 		i := slices.IndexFunc(regions, func(region config.Region) bool { return region.ID == id })
 		if i < 0 {
-			httputil.WriteError(w, r, http.StatusBadRequest, fmt.Sprintf("unknown region %q", id))
+			badRequest(w, r, fmt.Sprintf("unknown region %q", id))
 			return
 		}
 		regions = regions[i : i+1]
@@ -62,7 +62,7 @@ func (s *Server) handleDevReconciliation(w http.ResponseWriter, r *http.Request)
 	if value := q.Get("now"); value != "" {
 		var err error
 		if now, err = time.Parse(time.RFC3339, value); err != nil {
-			httputil.WriteError(w, r, http.StatusBadRequest, "now must be an RFC 3339 time")
+			badRequest(w, r, "now must be an RFC 3339 time")
 			return
 		}
 	}

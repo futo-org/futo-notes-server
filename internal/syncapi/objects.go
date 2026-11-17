@@ -13,10 +13,15 @@ import (
 
 const maxPullLimit = 1000
 
+// CodeReceiptUsed is the code of the 409 for a receipt an earlier mutation
+// already spent. Only the hosted API claims receipts.
+const CodeReceiptUsed = "receipt_used"
+
 // BlobReader decodes the body of an object create or update, which names the
 // blob the object will point at: a staged blob_key on the self-hosted server,
 // a storage receipt on the hosted API. The text of a returned error is the
-// 400 message. Readers find the caller with SessionFrom.
+// 400 message, with its code when it is a CodedError. Readers find the caller
+// with SessionFrom.
 type BlobReader interface {
 	ReadCreate(r *http.Request) (BlobClaim, error)
 	ReadUpdate(r *http.Request) (version int64, claim BlobClaim, err error)
@@ -32,7 +37,7 @@ type BlobClaim struct {
 func ReadyClaim(blob objects.Blob) BlobClaim { return BlobClaim{blob: blob} }
 
 // DeferredClaim is a claim verify checks, returning the blob or, as its
-// error, the 400 message. Handlers call verify only when the mutation will
+// error, the 400 message (coded when a CodedError). Handlers call verify only when the mutation will
 // run: a retry under a Mutation-Id that already carries a result is answered
 // with that result whatever the claim now says, so a receipt that expired
 // since the first attempt cannot turn a replay into a 400.
@@ -86,7 +91,7 @@ func WriteObjectError(w http.ResponseWriter, r *http.Request, action string, err
 	case errors.Is(err, objects.ErrBlobNotStaged):
 		WriteError(w, http.StatusConflict, "blob is not staged")
 	case errors.Is(err, objects.ErrReceiptUsed):
-		WriteError(w, http.StatusConflict, "receipt already used")
+		WriteCodedError(w, http.StatusConflict, CodeReceiptUsed, "receipt already used")
 	case errors.Is(err, objects.ErrMutationMismatch):
 		WriteError(w, http.StatusConflict, "Mutation-Id reused for different intent")
 	case errors.Is(err, objects.ErrMutationPending):
@@ -184,7 +189,7 @@ func HandleCreateObject(database *db.DB, publisher events.Publisher, blobs BlobR
 		}
 		claim, err := blobs.ReadCreate(r)
 		if err != nil {
-			WriteError(w, http.StatusBadRequest, err.Error())
+			writeBadRequest(w, err)
 			return
 		}
 		m := objects.Mutation{UserID: SessionFrom(r).User.ID, CollectionID: r.PathValue("id"), MutationID: mID}
@@ -201,7 +206,7 @@ func HandleCreateObject(database *db.DB, publisher events.Publisher, blobs BlobR
 		}
 		blob, err := claim.resolve()
 		if err != nil {
-			WriteError(w, http.StatusBadRequest, err.Error())
+			writeBadRequest(w, err)
 			return
 		}
 		response, err := store.Create(r.Context(), m, blob)
@@ -225,7 +230,7 @@ func HandleUpdateObject(database *db.DB, publisher events.Publisher, blobs BlobR
 		}
 		version, claim, err := blobs.ReadUpdate(r)
 		if err != nil {
-			WriteError(w, http.StatusBadRequest, err.Error())
+			writeBadRequest(w, err)
 			return
 		}
 		m := objects.Mutation{UserID: SessionFrom(r).User.ID, CollectionID: r.PathValue("id"), ObjectID: r.PathValue("objectId"), MutationID: mID}
@@ -242,7 +247,7 @@ func HandleUpdateObject(database *db.DB, publisher events.Publisher, blobs BlobR
 		}
 		blob, err := claim.resolve()
 		if err != nil {
-			WriteError(w, http.StatusBadRequest, err.Error())
+			writeBadRequest(w, err)
 			return
 		}
 		response, err := store.Update(r.Context(), m, blob, version)

@@ -18,8 +18,11 @@ info:
     (`iss` = region id, `aud` = `notes-api`, `sub`, `key`, `size`, 24h) that
     the client hands to the API when an object claims the blob.
 
-    Every error body is `{"statusCode", "message", "requestId"}`; the
-    `X-Request-Id` response header carries the same request id.
+    Every error body is `{"statusCode", "code", "message", "requestId"}`;
+    the `X-Request-Id` response header carries the same request id. `code`
+    is stable (the `ErrorCode` schema lists them); branch on it, never on
+    `message`, which is for people and may change. Each response below
+    names the codes it can carry.
 
     | Limit | Value |
     |---|---|
@@ -89,7 +92,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/UploadResponse"
         "400":
-          description: Empty body (`empty body`), or the body ended early (`could not read body`)
+          description: "`invalid_request`: an empty body, or the body ended early"
           content:
             application/json:
               schema:
@@ -97,13 +100,13 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "411":
-          description: No `Content-Length` (for example a chunked body)
+          description: "`length_required`: no `Content-Length` (for example a chunked body)"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
         "413":
-          description: "`Content-Length` over 100 MiB (`blob too large`)"
+          description: "`payload_too_large`: `Content-Length` over 100 MiB"
           content:
             application/json:
               schema:
@@ -175,7 +178,7 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "416":
-          description: The range starts past the end of the blob
+          description: "`range_not_satisfiable`: the range starts past the end of the blob"
           headers:
             Content-Range:
               required: true
@@ -244,10 +247,10 @@ paths:
                 format: binary
         "400":
           description: |
-            Invalid JSON (`invalid json`), empty `keys` (`keys must not be
-            empty`), more than 200 keys (`too many keys (max 200)`), a
-            non-string key (`keys must be strings`), or a key over 128
-            characters (`key too long (max 128 chars)`).
+            `invalid_request`: invalid JSON (`invalid json`), empty `keys`
+            (`keys must not be empty`), more than 200 keys (`too many keys
+            (max 200)`), a non-string key (`keys must be strings`), or a key
+            over 128 characters (`key too long (max 128 chars)`).
           content:
             application/json:
               schema:
@@ -255,7 +258,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "413":
-          description: Request body over 64 KiB (`request too large`)
+          description: "`payload_too_large`: request body over 64 KiB"
           content:
             application/json:
               schema:
@@ -295,8 +298,9 @@ paths:
                 $ref: "#/components/schemas/DeleteBlobsResponse"
         "400":
           description: |
-            Invalid JSON, empty `keys`, more than 1000 keys, or a key that is
-            not `<userId>/<blobId>` (lowercase `userId`).
+            `invalid_request`: invalid JSON, empty `keys`, more than 1000
+            keys, or a key that is not `<userId>/<blobId>` (lowercase
+            `userId`).
           content:
             application/json:
               schema:
@@ -304,7 +308,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "413":
-          description: Request body over 128 KiB (`request too large`)
+          description: "`payload_too_large`: request body over 128 KiB"
           content:
             application/json:
               schema:
@@ -360,7 +364,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ListBlobsResponse"
         "400":
-          description: Bad `prefix`, `older_than` or `limit`
+          description: "`invalid_request`: a bad `prefix`, `older_than` or `limit`"
           content:
             application/json:
               schema:
@@ -391,7 +395,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/PurgeUserResponse"
         "400":
-          description: "`userId` is not a lowercase canonical UUID"
+          description: "`invalid_request`: `userId` is not a lowercase canonical UUID"
           content:
             application/json:
               schema:
@@ -465,21 +469,21 @@ components:
   responses:
     Unauthorized:
       description: |
-        No Bearer token (`Expected Bearer token`), or one that is expired,
-        for another region, of the wrong kind, or otherwise invalid
-        (`Invalid token`).
+        `unauthorized`: no Bearer token. `invalid_token`: one that is
+        expired, for another region, of the wrong kind, or otherwise
+        invalid.
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
     NotFound:
-      description: Not Found
+      description: "`not_found`"
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
     StorageError:
-      description: S3 failed (`Storage error`)
+      description: "`internal_error`: S3 failed"
       content:
         application/json:
           schema:
@@ -488,15 +492,46 @@ components:
   schemas:
     Error:
       type: object
-      required: [statusCode, message, requestId]
+      required: [statusCode, code, message, requestId]
       additionalProperties: false
       properties:
         statusCode:
           type: integer
+        code:
+          $ref: "#/components/schemas/ErrorCode"
         message:
           type: string
+          description: For people; may change. Branch on `code`.
         requestId:
           type: string
+    ErrorCode:
+      type: string
+      description: |
+        The stable code of an error body.
+
+        | Code | Status | Meaning |
+        |---|---|---|
+        | `invalid_request` | 400 | The request is malformed |
+        | `unauthorized` | 401 | No Bearer token |
+        | `invalid_token` | 401 | The token is expired, for another region, of the wrong kind, or invalid |
+        | `not_found` | 404 | No such blob or route |
+        | `method_not_allowed` | 405 | The route does not take this method |
+        | `length_required` | 411 | No `Content-Length` |
+        | `payload_too_large` | 413 | The body is over the limit |
+        | `range_not_satisfiable` | 416 | The range starts past the end of the blob |
+        | `internal_error` | 500 | S3 or another internal failure |
+        | `client_closed_request` | 499 | Logged only: the client left before the answer |
+      enum:
+        - invalid_request
+        - unauthorized
+        - invalid_token
+        - not_found
+        - method_not_allowed
+        - length_required
+        - payload_too_large
+        - range_not_satisfiable
+        - internal_error
+        - client_closed_request
     BlobKey:
       type: string
       description: "`<userId>/<blobId>`"

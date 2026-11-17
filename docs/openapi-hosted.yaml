@@ -32,20 +32,27 @@ info:
     - **Pending deletion.** Between `DELETE /api/account` and the purge 30
       days later, every sync operation except logout, and
       `POST /api/storage/token`, answer
-      `403 {"error": "account pending deletion"}`. Account, session and
-      restore operations keep working.
+      `403 {"code": "account_pending_deletion", "error": "account pending deletion"}`.
+      Account, session and restore operations keep working.
 
     ## Two error shapes
 
     - Operations of the sync contract (tag `sync`, plus `GET /`) keep its
-      body, `{"error": "..."}`, and its two `401` bodies.
+      body, `{"error": "..."}`, and its two `401` bodies. Failures only the
+      hosted API has (a pending deletion, a rejected or spent receipt) add
+      the stable `code` the sync contract's `invalid_session` body already
+      carries: `{"code": "...", "error": "..."}`.
     - Operations only the hosted API serves answer
-      `{"statusCode", "message", "requestId"}`, with `requestId` equal to the
-      `X-Request-Id` response header. Unknown paths (`404`) and methods
-      (`405`) answer this shape too, on every path.
+      `{"statusCode", "code", "message", "requestId"}`, with `requestId`
+      equal to the `X-Request-Id` response header. Unknown paths (`404`) and
+      methods (`405`) answer this shape too, on every path.
 
     The exception is the `403` for a pending deletion, which keeps the sync
     shape on `POST /api/storage/token` as well, so clients handle it once.
+
+    **Branch on `code`, never on the message.** Codes are stable and listed
+    in the `ErrorCode` schema; messages are for people and may change. Each
+    response below names the codes it can carry.
 
     Any operation may answer `500` when the database fails, in the shape of
     its surface. A handler panic answers the sync `500` body on every route.
@@ -219,8 +226,9 @@ paths:
                 type: string
         "400":
           description: |
-            `redirect_uri is not allowed`, `code_challenge_method must be
-            S256`, or `code_challenge must be an S256 challenge`
+            `invalid_request`: `redirect_uri` is not allowed,
+            `code_challenge_method` is not `S256`, or `code_challenge` is not
+            an S256 challenge
           headers:
             X-Request-Id:
               $ref: "#/components/headers/RequestId"
@@ -231,7 +239,7 @@ paths:
         "500":
           $ref: "#/components/responses/HostedServerError"
         "503":
-          description: The identity provider cannot be reached (`Identity provider unavailable`)
+          description: "`provider_unavailable`: the identity provider cannot be reached"
           headers:
             X-Request-Id:
               $ref: "#/components/headers/RequestId"
@@ -297,11 +305,10 @@ paths:
                 type: string
         "400":
           description: |
-            Missing, mismatched, unknown or already-used state, or a nonce
-            mismatch (`Invalid login state`); or, for a dashboard sign-in,
-            the provider's error (`Sign-in was not completed: <error>`) or a
-            callback with neither `code` nor `error` (`Sign-in was not
-            completed: missing code`).
+            `invalid_login_state`: missing, mismatched, unknown or
+            already-used state, or a nonce mismatch. Or, for a dashboard
+            sign-in, `sign_in_not_completed`: the provider's error, or a
+            callback with neither `code` nor `error`.
           headers:
             X-Request-Id:
               $ref: "#/components/headers/RequestId"
@@ -315,9 +322,8 @@ paths:
           $ref: "#/components/responses/HostedServerError"
         "502":
           description: |
-            The provider sent no code, or the code exchange or ID token
-            verification failed (`Could not complete sign-in with the
-            identity provider`)
+            `provider_error`: the code exchange or ID token verification
+            failed
           headers:
             X-Request-Id:
               $ref: "#/components/headers/RequestId"
@@ -375,10 +381,10 @@ paths:
                     $ref: "openapi.yaml#/components/schemas/User"
         "400":
           description: |
-            Invalid JSON (`Invalid JSON body`), a missing field (`code and
-            code_verifier are required`), an unknown, used or expired code
-            (`Invalid or expired code`), or a verifier that does not match
-            the challenge (`code_verifier does not match code_challenge`)
+            `invalid_request`: invalid JSON or a missing field.
+            `invalid_code`: an unknown, used or expired code.
+            `code_verifier_mismatch`: a verifier that does not match the
+            challenge (the code is spent).
           headers:
             X-Request-Id:
               $ref: "#/components/headers/RequestId"
@@ -456,7 +462,7 @@ paths:
                       endpoint:
                         type: string
         "400":
-          description: Invalid JSON (`Invalid JSON body`) or no `refresh_token` (`refresh_token is required`)
+          description: "`invalid_request`: invalid JSON or no `refresh_token`"
           headers:
             X-Request-Id:
               $ref: "#/components/headers/RequestId"
@@ -466,10 +472,11 @@ paths:
                 $ref: "#/components/schemas/HostedError"
         "401":
           description: |
-            Unknown or revoked refresh token, or one whose replacement can no
-            longer be derived after a server key rotation (`Invalid refresh
-            token`): sign in again. Or a token whose replacement was already
-            exchanged, which also signs the session out
+            `refresh_token_invalid`: an unknown or revoked refresh token, or
+            one whose replacement can no longer be derived after a server key
+            rotation; sign in again (the session, if any, is kept).
+            `refresh_token_reused`: a token whose replacement was already
+            exchanged; the session has been signed out.
           headers:
             X-Request-Id:
               $ref: "#/components/headers/RequestId"
@@ -480,7 +487,7 @@ paths:
         "403":
           $ref: "#/components/responses/PendingDeletion"
         "409":
-          description: No region has been chosen yet
+          description: "`region_required`: no region has been chosen yet"
           headers:
             X-Request-Id:
               $ref: "#/components/headers/RequestId"
@@ -548,7 +555,7 @@ paths:
         "200":
           $ref: "#/components/responses/Account"
         "400":
-          description: Invalid JSON (`Invalid JSON body`) or an unknown region (`Unknown region`)
+          description: "`invalid_request`: invalid JSON or an unknown region"
           headers:
             X-Request-Id:
               $ref: "#/components/headers/RequestId"
@@ -559,7 +566,7 @@ paths:
         "401":
           $ref: "#/components/responses/HostedUnauthorized"
         "409":
-          description: A region is already chosen (`Region already chosen`); it is fixed
+          description: "`region_already_chosen`: a region is already chosen; it is fixed"
           headers:
             X-Request-Id:
               $ref: "#/components/headers/RequestId"
@@ -585,7 +592,7 @@ paths:
         "401":
           $ref: "#/components/responses/HostedUnauthorized"
         "409":
-          description: The grace period is over and the purge may have begun; the account can no longer be restored
+          description: "`purge_started`: the grace period is over and the purge may have begun; the account can no longer be restored"
           headers:
             X-Request-Id:
               $ref: "#/components/headers/RequestId"
@@ -648,7 +655,7 @@ paths:
         "401":
           $ref: "#/components/responses/HostedUnauthorized"
         "404":
-          description: No such session of the caller's (`Session not found`)
+          description: "`not_found`: no such session of the caller's"
           headers:
             X-Request-Id:
               $ref: "#/components/headers/RequestId"
@@ -996,10 +1003,10 @@ paths:
         pass the receipt it returned here. The receipt must be signed by the
         caller's region, name the caller as `sub`, be unexpired (24h), and
         name a key the API has never seen; the object's `blob_key` and
-        `size_bytes` come from it. Anything else is `400 invalid receipt`,
-        and a receipt already spent by an earlier mutation is
-        `409 receipt already used`; upload again for a fresh receipt and
-        retry under a **new** `Mutation-Id`.
+        `size_bytes` come from it. Anything else is `400 invalid receipt`
+        with a `code` saying why, and a receipt already spent by an earlier
+        mutation is `409` `receipt_used`; upload again for a fresh receipt
+        and retry under a **new** `Mutation-Id`.
 
         A replayed `Mutation-Id` returns the recorded outcome (`201` with
         `replayed: true`, or the recorded `404`/`409`) **before** the
@@ -1023,18 +1030,20 @@ paths:
                 $ref: "openapi.yaml#/components/schemas/CreateMutationSuccess"
         "400":
           description: |
-            The body is not a JSON object (`invalid json`), the receipt is
-            missing or fails verification (`invalid receipt`), or the
-            `Mutation-Id` header is invalid (`invalid Mutation-Id`)
+            The body is not a JSON object (`invalid json`) or the
+            `Mutation-Id` header is invalid (`invalid Mutation-Id`), as on
+            self-hosted. Or the receipt is rejected (`ReceiptRejectedError`).
           content:
             application/json:
               schema:
-                type: object
-                required: [error]
-                properties:
-                  error:
-                    type: string
-                    enum: [invalid json, invalid receipt, invalid Mutation-Id]
+                oneOf:
+                  - type: object
+                    required: [error]
+                    properties:
+                      error:
+                        type: string
+                        enum: [invalid json, invalid Mutation-Id]
+                  - $ref: "#/components/schemas/ReceiptRejectedError"
         "401":
           $ref: "#/components/responses/SyncUnauthorized"
         "403":
@@ -1116,18 +1125,20 @@ paths:
         "400":
           description: |
             The body is not a JSON object (`invalid json`), `version` is
-            missing or below 1 (`invalid version`), the receipt is missing or
-            fails verification (`invalid receipt`), or the `Mutation-Id`
-            header is invalid (`invalid Mutation-Id`)
+            missing or below 1 (`invalid version`), or the `Mutation-Id`
+            header is invalid (`invalid Mutation-Id`), as on self-hosted. Or
+            the receipt is rejected (`ReceiptRejectedError`).
           content:
             application/json:
               schema:
-                type: object
-                required: [error]
-                properties:
-                  error:
-                    type: string
-                    enum: [invalid json, invalid version, invalid receipt, invalid Mutation-Id]
+                oneOf:
+                  - type: object
+                    required: [error]
+                    properties:
+                      error:
+                        type: string
+                        enum: [invalid json, invalid version, invalid Mutation-Id]
+                  - $ref: "#/components/schemas/ReceiptRejectedError"
         "401":
           $ref: "#/components/responses/SyncUnauthorized"
         "403":
@@ -1380,8 +1391,8 @@ components:
             $ref: "#/components/schemas/Account"
     HostedUnauthorized:
       description: |
-        No session token (`Unauthorized`), or one naming no live session
-        (`Session expired or invalid`), which also carries
+        `unauthorized`: no session token. `invalid_session`: one naming no
+        live session, which also carries
         `WWW-Authenticate: Bearer realm="futo-notes", error="invalid_token"`
       headers:
         X-Request-Id:
@@ -1395,7 +1406,7 @@ components:
           schema:
             $ref: "#/components/schemas/HostedError"
     HostedServerError:
-      description: Internal failure (`Internal server error`)
+      description: "`internal_error`: an internal failure"
       headers:
         X-Request-Id:
           $ref: "#/components/headers/RequestId"
@@ -1422,15 +1433,18 @@ components:
               - $ref: "#/components/schemas/InvalidSessionError"
     PendingDeletion:
       description: |
-        The account is scheduled for deletion. Restore it with
-        `POST /api/account/restore` to sync again.
+        `account_pending_deletion`: the account is scheduled for deletion.
+        Restore it with `POST /api/account/restore` to sync again.
       content:
         application/json:
           schema:
             type: object
-            required: [error]
+            required: [code, error]
             additionalProperties: false
             properties:
+              code:
+                type: string
+                enum: [account_pending_deletion]
               error:
                 type: string
                 enum: [account pending deletion]
@@ -1445,14 +1459,17 @@ components:
   schemas:
     HostedError:
       type: object
-      required: [statusCode, message, requestId]
+      required: [statusCode, code, message, requestId]
       additionalProperties: false
       properties:
         statusCode:
           type: integer
           description: The response status
+        code:
+          $ref: "#/components/schemas/ErrorCode"
         message:
           type: string
+          description: For people; may change. Branch on `code`.
         requestId:
           type: string
           minLength: 1
@@ -1480,15 +1497,84 @@ components:
 
     ReceiptUsedError:
       type: object
-      required: [error]
+      required: [code, error]
+      additionalProperties: false
       description: |
         The receipt's key is already in the ledger: an earlier mutation
         spent it. Upload again for a fresh receipt and retry under a new
         Mutation-Id.
       properties:
+        code:
+          type: string
+          enum: [receipt_used]
         error:
           type: string
           enum: [receipt already used]
+
+    ReceiptRejectedError:
+      type: object
+      required: [code, error]
+      additionalProperties: false
+      description: |
+        The receipt cannot be claimed:
+
+        - `receipt_invalid`: missing, malformed, or not signed by a region
+          the API trusts
+        - `receipt_expired`: older than 24h; upload again
+        - `receipt_wrong_region`: signed by another region than the
+          account's
+        - `receipt_wrong_user`: issued to another user
+        - `region_required`: the account has no region yet
+      properties:
+        code:
+          type: string
+          enum: [receipt_invalid, receipt_expired, receipt_wrong_region, receipt_wrong_user, region_required]
+        error:
+          type: string
+          enum: [invalid receipt]
+
+    ErrorCode:
+      type: string
+      description: |
+        The stable code of a hosted error body.
+
+        | Code | Status | Meaning |
+        |---|---|---|
+        | `invalid_request` | 400 | The request is malformed or names something unknown |
+        | `unauthorized` | 401 | No session token |
+        | `invalid_session` | 401 | The session token names no live session |
+        | `invalid_login_state` | 400 | The sign-in callback's state is missing, wrong, used or expired |
+        | `sign_in_not_completed` | 400 | The user did not complete a dashboard sign-in |
+        | `provider_error` | 502 | The identity provider rejected the sign-in |
+        | `provider_unavailable` | 503 | The identity provider cannot be reached |
+        | `invalid_code` | 400 | The app's one-time code is unknown, used or expired |
+        | `code_verifier_mismatch` | 400 | The app's PKCE verifier does not match its challenge |
+        | `refresh_token_invalid` | 401 | Sign in again |
+        | `refresh_token_reused` | 401 | The session has been signed out |
+        | `region_required` | 409 | Choose a region first |
+        | `region_already_chosen` | 409 | The region is fixed |
+        | `purge_started` | 409 | The account can no longer be restored |
+        | `not_found` | 404 | No such route or session |
+        | `method_not_allowed` | 405 | The route does not take this method |
+        | `internal_error` | 500 | An internal failure |
+      enum:
+        - invalid_request
+        - unauthorized
+        - invalid_session
+        - invalid_login_state
+        - sign_in_not_completed
+        - provider_error
+        - provider_unavailable
+        - invalid_code
+        - code_verifier_mismatch
+        - refresh_token_invalid
+        - refresh_token_reused
+        - region_required
+        - region_already_chosen
+        - purge_started
+        - not_found
+        - method_not_allowed
+        - internal_error
 
     MutationPendingError:
       type: object

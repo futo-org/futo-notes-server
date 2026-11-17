@@ -13,7 +13,7 @@ func TestRestoreIsRefusedOnceThePurgeIsDue(t *testing.T) {
 		tokens.User.ID); err != nil {
 		t.Fatal(err)
 	}
-	expectHostedError(t, app.do(http.MethodPost, "/api/account/restore", nil), http.StatusConflict)
+	expectHostedError(t, app.do(http.MethodPost, "/api/account/restore", nil), http.StatusConflict, "purge_started")
 	var account accountBody
 	app.expect(http.MethodGet, "/api/account", nil, http.StatusOK).json(t, &account)
 	if account.Deletion == nil {

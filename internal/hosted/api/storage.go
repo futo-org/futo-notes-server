@@ -42,27 +42,27 @@ func (s *Server) handleStorageToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if body.RefreshToken == "" {
-		httputil.WriteError(w, r, http.StatusBadRequest, "refresh_token is required")
+		badRequest(w, r, "refresh_token is required")
 		return
 	}
 	exchange, err := s.accounts.ExchangeRefreshToken(r.Context(), body.RefreshToken)
 	switch {
 	case errors.Is(err, account.ErrInvalidRefreshToken):
 		s.metrics.refresh(r.Context(), "invalid")
-		httputil.WriteError(w, r, http.StatusUnauthorized, "Invalid refresh token")
+		httputil.WriteError(w, r, http.StatusUnauthorized, codeRefreshTokenInvalid, "Invalid refresh token")
 		return
 	case errors.Is(err, account.ErrRefreshTokenReused):
 		s.metrics.refresh(r.Context(), "reuse_detected")
 		hlog.FromRequest(r).Warn().Msg("storage refresh token reused; session revoked")
-		httputil.WriteError(w, r, http.StatusUnauthorized, "Refresh token already used; the session has been signed out")
+		httputil.WriteError(w, r, http.StatusUnauthorized, codeRefreshTokenReused, "Refresh token already used; the session has been signed out")
 		return
 	case errors.Is(err, account.ErrPendingDeletion):
 		s.metrics.refresh(r.Context(), "pending_deletion")
-		syncapi.WriteError(w, http.StatusForbidden, account.ErrPendingDeletion.Error())
+		writePendingDeletion(w)
 		return
 	case errors.Is(err, account.ErrNoRegion):
 		s.metrics.refresh(r.Context(), "no_region")
-		httputil.WriteError(w, r, http.StatusConflict, "Choose a region before requesting a storage token")
+		httputil.WriteError(w, r, http.StatusConflict, codeRegionRequired, "Choose a region before requesting a storage token")
 		return
 	case err != nil:
 		serverError(w, r, "exchanging storage refresh token", err)
@@ -101,7 +101,10 @@ func (s *Server) handleStorageToken(w http.ResponseWriter, r *http.Request) {
 // unexpired; the store then checks the ledger has never seen its key.
 type receiptBlobs struct {
 	verifier *hostedauth.ReceiptVerifier
-	metrics  *Metrics
+	// regions are the configured region ids, to tell a receipt from another
+	// region apart from a forged one.
+	regions []string
+	metrics *Metrics
 }
 
 // ReadCreate decodes {"receipt": "<jwt>"}. The receipt is verified only if
@@ -132,33 +135,50 @@ func (b receiptBlobs) ReadUpdate(r *http.Request) (int64, syncapi.BlobClaim, err
 	return *body.Version, syncapi.DeferredClaim(func() (objects.Blob, error) { return b.verify(r, body.Receipt) }), nil
 }
 
-var errInvalidReceipt = errors.New("invalid receipt")
+// invalidReceipt is the message of every rejected receipt; its code says why.
+const invalidReceipt = "invalid receipt"
 
 func (b receiptBlobs) verify(r *http.Request, token *string) (objects.Blob, error) {
 	p := principalFrom(r)
-	reason := ""
+	reason, code := "", ""
 	var receipt hostedauth.Receipt
 	switch {
 	case token == nil || *token == "":
-		reason = "missing"
+		reason, code = "missing", codeReceiptInvalid
 	case p.RegionID == "":
-		reason = "no_region"
+		reason, code = "no_region", codeRegionRequired
 	default:
 		var err error
 		receipt, err = b.verifier.Verify(*token, p.RegionID)
 		switch {
 		case errors.Is(err, jwt.ErrTokenExpired):
-			reason = "expired"
+			reason, code = "expired", codeReceiptExpired
+		case err != nil && b.fromOtherRegion(*token, p.RegionID):
+			reason, code = "wrong_region", codeReceiptWrongRegion
 		case err != nil:
-			reason = "invalid"
+			reason, code = "invalid", codeReceiptInvalid
 			hlog.FromRequest(r).Info().Err(err).Msg("rejecting receipt")
 		case receipt.UserID != p.Session.User.ID:
-			reason = "wrong_user"
+			reason, code = "wrong_user", codeReceiptWrongUser
 		}
 	}
 	if reason != "" {
 		b.metrics.receiptFailure(r.Context(), reason)
-		return objects.Blob{}, errInvalidReceipt
+		return objects.Blob{}, &syncapi.CodedError{Code: code, Message: invalidReceipt}
 	}
 	return objects.ReceiptBlob(receipt.Key, receipt.Size), nil
+}
+
+// fromOtherRegion reports whether token is a receipt another configured
+// region signed, valid but for the region it names.
+func (b receiptBlobs) fromOtherRegion(token, region string) bool {
+	for _, other := range b.regions {
+		if other == region {
+			continue
+		}
+		if _, err := b.verifier.Verify(token, other); err == nil || errors.Is(err, jwt.ErrTokenExpired) {
+			return true
+		}
+	}
+	return false
 }

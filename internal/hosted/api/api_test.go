@@ -40,16 +40,19 @@ type accountBody struct {
 
 type errorBody struct {
 	StatusCode int    `json:"statusCode"`
+	Code       string `json:"code"`
 	Message    string `json:"message"`
 	RequestID  string `json:"requestId"`
 }
 
-func expectHostedError(t *testing.T, res response, status int) {
+// expectHostedError checks res is a hosted error with status and code.
+// Messages are for people and are not asserted.
+func expectHostedError(t *testing.T, res response, status int, code string) {
 	t.Helper()
 	var body errorBody
 	res.json(t, &body)
-	if res.status != status || body.StatusCode != status || body.Message == "" || body.RequestID == "" {
-		t.Fatalf("response = %d %s, want a %d hosted error", res.status, res.body, status)
+	if res.status != status || body.StatusCode != status || body.Code != code || body.Message == "" || body.RequestID == "" {
+		t.Fatalf("response = %d %s, want a %d hosted error with code %s", res.status, res.body, status, code)
 	}
 }
 
@@ -92,7 +95,7 @@ func TestDashboardSignInSetsTheSessionCookie(t *testing.T) {
 	}
 
 	browser.expect(http.MethodPost, "/api/auth/logout", nil, http.StatusNoContent)
-	expectHostedError(t, browser.do(http.MethodGet, "/api/account", nil), http.StatusUnauthorized)
+	expectHostedError(t, browser.do(http.MethodGet, "/api/account", nil), http.StatusUnauthorized, "unauthorized")
 	again.expect(http.MethodGet, "/api/account", nil, http.StatusOK)
 }
 
@@ -102,7 +105,7 @@ func TestCallbackRejectsBadState(t *testing.T) {
 	callback := browser.authorize(browser.do(http.MethodGet, "/api/auth/oidc/start", nil), h.newSub())
 
 	// Another browser holds no state cookie for this login.
-	expectHostedError(t, h.client().do(http.MethodGet, callback, nil), http.StatusBadRequest)
+	expectHostedError(t, h.client().do(http.MethodGet, callback, nil), http.StatusBadRequest, "invalid_login_state")
 
 	tampered, err := url.Parse(callback)
 	if err != nil {
@@ -111,11 +114,11 @@ func TestCallbackRejectsBadState(t *testing.T) {
 	q := tampered.Query()
 	q.Set("state", "not-the-state")
 	tampered.RawQuery = q.Encode()
-	expectHostedError(t, browser.do(http.MethodGet, tampered.String(), nil), http.StatusBadRequest)
+	expectHostedError(t, browser.do(http.MethodGet, tampered.String(), nil), http.StatusBadRequest, "invalid_login_state")
 
 	// The rejections above cleared this browser's state cookie, so the login
 	// can no longer complete here either.
-	expectHostedError(t, browser.do(http.MethodGet, callback, nil), http.StatusBadRequest)
+	expectHostedError(t, browser.do(http.MethodGet, callback, nil), http.StatusBadRequest, "invalid_login_state")
 
 	// A successful callback cannot be replayed.
 	fresh := h.client()
@@ -123,7 +126,7 @@ func TestCallbackRejectsBadState(t *testing.T) {
 	if res := fresh.do(http.MethodGet, callback, nil); res.status != http.StatusSeeOther {
 		t.Fatalf("callback = %d %s", res.status, res.body)
 	}
-	expectHostedError(t, fresh.do(http.MethodGet, callback, nil), http.StatusBadRequest)
+	expectHostedError(t, fresh.do(http.MethodGet, callback, nil), http.StatusBadRequest, "invalid_login_state")
 }
 
 func TestAppSignIn(t *testing.T) {
@@ -149,7 +152,7 @@ func TestAppSignIn(t *testing.T) {
 		t.Fatalf("tokens = %#v", tokens)
 	}
 	expectHostedError(t, app.do(http.MethodPost, "/api/auth/oidc/token",
-		map[string]string{"code": code, "code_verifier": verifier}), http.StatusBadRequest)
+		map[string]string{"code": code, "code_verifier": verifier}), http.StatusBadRequest, "invalid_code")
 
 	app.bearer = tokens.Token
 	var sessions struct {
@@ -168,9 +171,9 @@ func TestAppSignIn(t *testing.T) {
 	back = h.client().appCode(sub, "http://[::1]:8080/cb")
 	code = back.Query().Get("code")
 	expectHostedError(t, app.do(http.MethodPost, "/api/auth/oidc/token",
-		map[string]string{"code": code, "code_verifier": verifier + "x"}), http.StatusBadRequest)
+		map[string]string{"code": code, "code_verifier": verifier + "x"}), http.StatusBadRequest, "code_verifier_mismatch")
 	expectHostedError(t, app.do(http.MethodPost, "/api/auth/oidc/token",
-		map[string]string{"code": code, "code_verifier": verifier}), http.StatusBadRequest)
+		map[string]string{"code": code, "code_verifier": verifier}), http.StatusBadRequest, "invalid_code")
 
 	back = h.client().appCode(sub, appScheme+":/oauth")
 	if back.Scheme != appScheme || back.Query().Get("code") == "" {
@@ -195,14 +198,14 @@ func TestAppSignInRejectsDisallowedRedirects(t *testing.T) {
 		res := c.do(http.MethodGet, "/api/auth/oidc/start?"+url.Values{
 			"redirect_uri": {redirect}, "code_challenge": {challenge}, "code_challenge_method": {"S256"},
 		}.Encode(), nil)
-		expectHostedError(t, res, http.StatusBadRequest)
+		expectHostedError(t, res, http.StatusBadRequest, "invalid_request")
 	}
 	for _, params := range []url.Values{
 		{"redirect_uri": {"http://127.0.0.1:8080/cb"}},
 		{"redirect_uri": {"http://127.0.0.1:8080/cb"}, "code_challenge": {"short"}},
 		{"redirect_uri": {"http://127.0.0.1:8080/cb"}, "code_challenge": {challenge}, "code_challenge_method": {"plain"}},
 	} {
-		expectHostedError(t, c.do(http.MethodGet, "/api/auth/oidc/start?"+params.Encode(), nil), http.StatusBadRequest)
+		expectHostedError(t, c.do(http.MethodGet, "/api/auth/oidc/start?"+params.Encode(), nil), http.StatusBadRequest, "invalid_request")
 	}
 }
 
@@ -211,16 +214,16 @@ func TestRegionChoiceAndStorageTokens(t *testing.T) {
 	app, tokens := h.appLogin(h.newSub())
 
 	res := app.do(http.MethodPost, "/api/storage/token", map[string]string{"refresh_token": tokens.StorageRefreshToken})
-	expectHostedError(t, res, http.StatusConflict)
+	expectHostedError(t, res, http.StatusConflict, "region_required")
 
-	expectHostedError(t, app.do(http.MethodPut, "/api/account/region", map[string]string{"region_id": "mars"}), http.StatusBadRequest)
+	expectHostedError(t, app.do(http.MethodPut, "/api/account/region", map[string]string{"region_id": "mars"}), http.StatusBadRequest, "invalid_request")
 	var account accountBody
 	app.expect(http.MethodPut, "/api/account/region", map[string]string{"region_id": "us-east"}, http.StatusOK).json(t, &account)
 	if account.Region == nil || account.Region.ID != "us-east" || account.Region.Endpoint != "http://storage-us-east.test" {
 		t.Fatalf("account after choosing = %#v", account)
 	}
 	for _, region := range []string{"us-east", "eu-central"} {
-		expectHostedError(t, app.do(http.MethodPut, "/api/account/region", map[string]string{"region_id": region}), http.StatusConflict)
+		expectHostedError(t, app.do(http.MethodPut, "/api/account/region", map[string]string{"region_id": region}), http.StatusConflict, "region_already_chosen")
 	}
 
 	var issued struct {
@@ -276,8 +279,8 @@ func TestRegionChoiceAndStorageTokens(t *testing.T) {
 	}
 	anonymous.expect(http.MethodPost, "/api/storage/token", map[string]string{"refresh_token": issued.RefreshToken}, http.StatusOK)
 	expectHostedError(t, anonymous.do(http.MethodPost, "/api/storage/token",
-		map[string]string{"refresh_token": "unknown"}), http.StatusUnauthorized)
-	expectHostedError(t, anonymous.do(http.MethodPost, "/api/storage/token", map[string]string{}), http.StatusBadRequest)
+		map[string]string{"refresh_token": "unknown"}), http.StatusUnauthorized, "refresh_token_invalid")
+	expectHostedError(t, anonymous.do(http.MethodPost, "/api/storage/token", map[string]string{}), http.StatusBadRequest, "invalid_request")
 }
 
 func TestRefreshTokenReuseRevokesTheSession(t *testing.T) {
@@ -292,7 +295,7 @@ func TestRefreshTokenReuseRevokesTheSession(t *testing.T) {
 	// now reuse however soon it comes back.
 	app.expect(http.MethodPost, "/api/storage/token", map[string]string{"refresh_token": first.RefreshToken}, http.StatusOK)
 	expectHostedError(t, app.do(http.MethodPost, "/api/storage/token",
-		map[string]string{"refresh_token": tokens.StorageRefreshToken}), http.StatusUnauthorized)
+		map[string]string{"refresh_token": tokens.StorageRefreshToken}), http.StatusUnauthorized, "refresh_token_reused")
 	if res := app.do(http.MethodGet, "/api/collections", nil); res.status != http.StatusUnauthorized ||
 		res.body != `{"code":"invalid_session","error":"session expired or invalid"}`+"\n" {
 		t.Fatalf("session after reuse = %d %s, want it revoked", res.status, res.body)
@@ -342,11 +345,11 @@ func TestReceiptsThroughObjectEndpoints(t *testing.T) {
 	}
 
 	res = app.do(http.MethodPost, objectsPath, map[string]string{"receipt": receipt}, "Mutation-Id", "create-2")
-	if res.status != http.StatusConflict || res.body != `{"error":"receipt already used"}`+"\n" {
+	if res.status != http.StatusConflict || res.body != `{"code":"receipt_used","error":"receipt already used"}`+"\n" {
 		t.Fatalf("reused receipt = %d %s", res.status, res.body)
 	}
 
-	invalid := `{"error":"invalid receipt"}` + "\n"
+	rejected := func(code string) string { return `{"code":"` + code + `","error":"invalid receipt"}` + "\n" }
 	otherUser, _ := h.receipt("us-east", "0195e2a1-0000-7000-8000-00000000abcd", 1)
 	wrongRegion, _ := h.receipt("eu-central", userID, 1)
 	expiredSigner, err := hostedauth.NewReceiptSigner(h.keys["us-east"], "us-east",
@@ -358,16 +361,19 @@ func TestReceiptsThroughObjectEndpoints(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for name, body := range map[string]any{
-		"wrong user":   map[string]string{"receipt": otherUser},
-		"wrong region": map[string]string{"receipt": wrongRegion},
-		"expired":      map[string]string{"receipt": expired},
-		"missing":      map[string]string{},
-		"garbage":      map[string]string{"receipt": "not.a.jwt"},
-		"staged key":   map[string]any{"blob_key": key, "size_bytes": 1},
+	for name, c := range map[string]struct {
+		body any
+		code string
+	}{
+		"wrong user":   {map[string]string{"receipt": otherUser}, "receipt_wrong_user"},
+		"wrong region": {map[string]string{"receipt": wrongRegion}, "receipt_wrong_region"},
+		"expired":      {map[string]string{"receipt": expired}, "receipt_expired"},
+		"missing":      {map[string]string{}, "receipt_invalid"},
+		"garbage":      {map[string]string{"receipt": "not.a.jwt"}, "receipt_invalid"},
+		"staged key":   {map[string]any{"blob_key": key, "size_bytes": 1}, "receipt_invalid"},
 	} {
-		if res := app.do(http.MethodPost, objectsPath, body); res.status != http.StatusBadRequest || res.body != invalid {
-			t.Fatalf("%s receipt = %d %s, want 400 invalid receipt", name, res.status, res.body)
+		if res := app.do(http.MethodPost, objectsPath, c.body); res.status != http.StatusBadRequest || res.body != rejected(c.code) {
+			t.Fatalf("%s receipt = %d %s, want 400 invalid receipt with code %s", name, res.status, res.body, c.code)
 		}
 	}
 	if res := app.do(http.MethodPost, objectsPath, "not an object"); res.status != http.StatusBadRequest || res.body != `{"error":"invalid json"}`+"\n" {
@@ -380,7 +386,8 @@ func TestReceiptsThroughObjectEndpoints(t *testing.T) {
 		res.body != `{"error":"invalid version"}`+"\n" {
 		t.Fatalf("update without version = %d %s", res.status, res.body)
 	}
-	if res := app.do(http.MethodPut, objectPath, map[string]any{"version": 2, "receipt": wrongRegion}); res.status != http.StatusBadRequest || res.body != invalid {
+	if res := app.do(http.MethodPut, objectPath, map[string]any{"version": 2, "receipt": wrongRegion}); res.status != http.StatusBadRequest ||
+		res.body != rejected("receipt_wrong_region") {
 		t.Fatalf("update with a wrong-region receipt = %d %s", res.status, res.body)
 	}
 	var updated objectBody
@@ -401,6 +408,22 @@ func TestReceiptsThroughObjectEndpoints(t *testing.T) {
 	}
 }
 
+func TestReceiptWithoutARegion(t *testing.T) {
+	h := newHarness(t)
+	app, tokens := h.appLogin(h.newSub())
+	var claimed struct {
+		Collection struct {
+			ID string `json:"id"`
+		} `json:"collection"`
+	}
+	app.expect(http.MethodPost, "/api/collections", nil, http.StatusCreated).json(t, &claimed)
+	receipt, _ := h.receipt("us-east", tokens.User.ID, 1)
+	res := app.do(http.MethodPost, "/api/collections/"+claimed.Collection.ID+"/objects", map[string]string{"receipt": receipt})
+	if res.status != http.StatusBadRequest || res.body != `{"code":"region_required","error":"invalid receipt"}`+"\n" {
+		t.Fatalf("receipt before choosing a region = %d %s", res.status, res.body)
+	}
+}
+
 func TestDeletionGatesSyncAndStorageUntilRestored(t *testing.T) {
 	h := newHarness(t)
 	sub := h.newSub()
@@ -418,7 +441,7 @@ func TestDeletionGatesSyncAndStorageUntilRestored(t *testing.T) {
 		t.Fatalf("other device after delete = %d %s, want signed out", res.status, res.body)
 	}
 
-	pending := `{"error":"account pending deletion"}` + "\n"
+	pending := `{"code":"account_pending_deletion","error":"account pending deletion"}` + "\n"
 	for _, req := range []struct{ method, path string }{
 		{http.MethodGet, "/api/auth"},
 		{http.MethodGet, "/api/collections"},
@@ -501,14 +524,14 @@ func TestSessionsListAndRevoke(t *testing.T) {
 	}
 
 	app.expect(http.MethodDelete, "/api/sessions/"+browserSession, nil, http.StatusNoContent)
-	expectHostedError(t, browser.do(http.MethodGet, "/api/account", nil), http.StatusUnauthorized)
-	expectHostedError(t, app.do(http.MethodDelete, "/api/sessions/"+browserSession, nil), http.StatusNotFound)
-	expectHostedError(t, app.do(http.MethodDelete, "/api/sessions/not-a-uuid", nil), http.StatusNotFound)
+	expectHostedError(t, browser.do(http.MethodGet, "/api/account", nil), http.StatusUnauthorized, "invalid_session")
+	expectHostedError(t, app.do(http.MethodDelete, "/api/sessions/"+browserSession, nil), http.StatusNotFound, "not_found")
+	expectHostedError(t, app.do(http.MethodDelete, "/api/sessions/not-a-uuid", nil), http.StatusNotFound, "not_found")
 
 	// Revoking a device revokes its storage refresh token too.
 	app.expect(http.MethodDelete, "/api/sessions/"+secondSession, nil, http.StatusNoContent)
 	expectHostedError(t, app.do(http.MethodPost, "/api/storage/token",
-		map[string]string{"refresh_token": secondTokens.StorageRefreshToken}), http.StatusUnauthorized)
+		map[string]string{"refresh_token": secondTokens.StorageRefreshToken}), http.StatusUnauthorized, "refresh_token_invalid")
 
 	// Another user's session is not found.
 	stranger, _ := h.appLogin(h.newSub())
@@ -518,7 +541,7 @@ func TestSessionsListAndRevoke(t *testing.T) {
 		} `json:"sessions"`
 	}
 	app.expect(http.MethodGet, "/api/sessions", nil, http.StatusOK).json(t, &mine)
-	expectHostedError(t, stranger.do(http.MethodDelete, "/api/sessions/"+mine.Sessions[0].ID, nil), http.StatusNotFound)
+	expectHostedError(t, stranger.do(http.MethodDelete, "/api/sessions/"+mine.Sessions[0].ID, nil), http.StatusNotFound, "not_found")
 }
 
 func TestAuthenticationFailuresKeepEachSurfaceShape(t *testing.T) {
@@ -533,9 +556,9 @@ func TestAuthenticationFailuresKeepEachSurfaceShape(t *testing.T) {
 		res.header.Get("WWW-Authenticate") != `Bearer realm="futo-notes", error="invalid_token"` {
 		t.Fatalf("sync with a dead token = %d %v %s", res.status, res.header, res.body)
 	}
-	expectHostedError(t, c.do(http.MethodGet, "/api/account", nil), http.StatusUnauthorized)
+	expectHostedError(t, c.do(http.MethodGet, "/api/account", nil), http.StatusUnauthorized, "invalid_session")
 	c.bearer = ""
-	expectHostedError(t, c.do(http.MethodGet, "/api/sessions", nil), http.StatusUnauthorized)
+	expectHostedError(t, c.do(http.MethodGet, "/api/sessions", nil), http.StatusUnauthorized, "unauthorized")
 }
 
 func TestRemovedBlobRoutesAreAbsent(t *testing.T) {
@@ -559,7 +582,7 @@ func TestRemovedBlobRoutesAreAbsent(t *testing.T) {
 			t.Fatalf("%s %s = %d %s, want 404", req.method, req.path, res.status, res.body)
 		}
 		if req.method != http.MethodHead {
-			expectHostedError(t, res, http.StatusNotFound)
+			expectHostedError(t, res, http.StatusNotFound, "not_found")
 		}
 	}
 	if res := app.do(http.MethodHead, "/api/collections", nil); res.status != http.StatusOK {

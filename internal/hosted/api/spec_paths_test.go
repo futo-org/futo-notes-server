@@ -237,7 +237,7 @@ func TestSpecSignInFailures(t *testing.T) {
 	// dashboard sign-in, invalid_request back to an app.
 	browser := h.client()
 	s := state(browser.do(http.MethodGet, "/api/auth/oidc/start", nil))
-	expectHostedError(t, browser.do(http.MethodGet, callback(url.Values{"state": {s}}), nil), http.StatusBadRequest)
+	expectHostedError(t, browser.do(http.MethodGet, callback(url.Values{"state": {s}}), nil), http.StatusBadRequest, "sign_in_not_completed")
 	browser = h.client()
 	s = state(browser.do(http.MethodGet, "/api/auth/oidc/start?"+url.Values{
 		"redirect_uri": {"http://127.0.0.1:43123/callback"}, "code_challenge": {challenge}, "state": {"app-state"},
@@ -251,14 +251,14 @@ func TestSpecSignInFailures(t *testing.T) {
 	browser = h.client()
 	s = state(browser.do(http.MethodGet, "/api/auth/oidc/start", nil))
 	expectHostedError(t, browser.do(http.MethodGet, callback(url.Values{"state": {s}, "code": {"unknown-code"}}), nil),
-		http.StatusBadGateway)
+		http.StatusBadGateway, "provider_error")
 
 	// The provider's error ends a dashboard sign-in here, and goes back to
 	// an app.
 	browser = h.client()
 	s = state(browser.do(http.MethodGet, "/api/auth/oidc/start", nil))
 	expectHostedError(t, browser.do(http.MethodGet, callback(url.Values{"state": {s}, "error": {"access_denied"}}), nil),
-		http.StatusBadRequest)
+		http.StatusBadRequest, "sign_in_not_completed")
 	browser = h.client()
 	s = state(browser.do(http.MethodGet, "/api/auth/oidc/start?"+url.Values{
 		"redirect_uri": {"http://127.0.0.1:43123/callback"}, "code_challenge": {challenge}, "state": {"app-state"},
@@ -272,7 +272,7 @@ func TestSpecSignInFailures(t *testing.T) {
 	provider := httptest.NewServer(http.NotFoundHandler())
 	t.Cleanup(provider.Close)
 	down := newHarnessWith(t, func(c *config.Config) { c.OIDC.Issuer = provider.URL })
-	expectHostedError(t, down.client().do(http.MethodGet, "/api/auth/oidc/start", nil), http.StatusServiceUnavailable)
+	expectHostedError(t, down.client().do(http.MethodGet, "/api/auth/oidc/start", nil), http.StatusServiceUnavailable, "provider_unavailable")
 }
 
 func TestSpecReadiness(t *testing.T) {

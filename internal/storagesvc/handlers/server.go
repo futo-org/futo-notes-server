@@ -46,10 +46,10 @@ func (s *Server) routes() chi.Router {
 	r.Use(chimw.Recoverer)
 	r.Use(s.Metrics.Middleware)
 	r.NotFound(func(w http.ResponseWriter, r *http.Request) {
-		httputil.WriteError(w, r, http.StatusNotFound, "Not Found")
+		httputil.WriteError(w, r, http.StatusNotFound, httputil.CodeNotFound, "Not Found")
 	})
 	r.MethodNotAllowed(func(w http.ResponseWriter, r *http.Request) {
-		httputil.WriteError(w, r, http.StatusMethodNotAllowed, "Method Not Allowed")
+		httputil.WriteError(w, r, http.StatusMethodNotAllowed, httputil.CodeMethodNotAllowed, "Method Not Allowed")
 	})
 
 	r.Group(func(r chi.Router) {
@@ -71,6 +71,14 @@ func (s *Server) routes() chi.Router {
 // answer; the client never sees it.
 const statusClientClosedRequest = 499
 
+// Error codes only the storage service uses, besides httputil's.
+const (
+	codeClientClosedRequest = "client_closed_request"
+	codeLengthRequired      = "length_required"
+	codePayloadTooLarge     = "payload_too_large"
+	codeRangeNotSatisfiable = "range_not_satisfiable"
+)
+
 // net/http cancels the request context when the connection fails, while the
 // storage call may surface the body's EOF first. A deadline is the server
 // giving up, not the client leaving.
@@ -80,9 +88,9 @@ func clientGone(r *http.Request) bool { return errors.Is(r.Context().Err(), cont
 func storageFailure(w http.ResponseWriter, r *http.Request, err error, msg string) {
 	if clientGone(r) {
 		hlog.FromRequest(r).Warn().Err(err).Msg(msg + ": client disconnected")
-		httputil.WriteError(w, r, statusClientClosedRequest, "Client closed request")
+		httputil.WriteError(w, r, statusClientClosedRequest, codeClientClosedRequest, "Client closed request")
 		return
 	}
 	hlog.FromRequest(r).Error().Err(err).Msg(msg)
-	httputil.WriteError(w, r, http.StatusInternalServerError, "Storage error")
+	httputil.WriteError(w, r, http.StatusInternalServerError, httputil.CodeInternalError, "Storage error")
 }

@@ -79,7 +79,7 @@ func TestMutationReplayComesBeforeReceiptVerification(t *testing.T) {
 	}
 
 	first = app.do(http.MethodPost, objectsPath, map[string]string{"receipt": receipt}, "Mutation-Id", "replay-used")
-	if first.status != http.StatusConflict || first.body != `{"error":"receipt already used"}`+"\n" {
+	if first.status != http.StatusConflict || first.body != `{"code":"receipt_used","error":"receipt already used"}`+"\n" {
 		t.Fatalf("create with a spent receipt = %d %s", first.status, first.body)
 	}
 	for name, body := range retries(key) {
@@ -96,7 +96,7 @@ func TestMutationReplayComesBeforeReceiptVerification(t *testing.T) {
 		expectSame("conflict retry with "+name, first, app.do(http.MethodPut, objectPath, body, "Mutation-Id", "replay-conflict"))
 	}
 
-	invalid := `{"error":"invalid receipt"}` + "\n"
+	invalid := `{"code":"receipt_expired","error":"invalid receipt"}` + "\n"
 	fresh, freshKey := h.receipt("us-east", userID, 40)
 	if res := app.do(http.MethodPost, objectsPath, map[string]string{"receipt": expired(freshKey)}, "Mutation-Id", "fresh-create"); res.status != http.StatusBadRequest || res.body != invalid {
 		t.Fatalf("fresh create with an expired receipt = %d %s, want 400", res.status, res.body)

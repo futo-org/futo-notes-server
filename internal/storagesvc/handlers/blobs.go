@@ -32,13 +32,13 @@ func (s *Server) uploadBlob(w http.ResponseWriter, r *http.Request) {
 	switch {
 	// Go reports both an absent Content-Length and "Content-Length: 0" as 0.
 	case size < 0 || r.Header.Get("Content-Length") == "":
-		httputil.WriteError(w, r, http.StatusLengthRequired, "Content-Length required")
+		httputil.WriteError(w, r, http.StatusLengthRequired, codeLengthRequired, "Content-Length required")
 		return
 	case size == 0:
-		httputil.WriteError(w, r, http.StatusBadRequest, "empty body")
+		httputil.WriteError(w, r, http.StatusBadRequest, httputil.CodeInvalidRequest, "empty body")
 		return
 	case size > blobframe.MaxBlobBytes:
-		httputil.WriteError(w, r, http.StatusRequestEntityTooLarge, "blob too large")
+		httputil.WriteError(w, r, http.StatusRequestEntityTooLarge, codePayloadTooLarge, "blob too large")
 		return
 	}
 
@@ -47,7 +47,7 @@ func (s *Server) uploadBlob(w http.ResponseWriter, r *http.Request) {
 	if err := s.Storage.PutObject(r.Context(), key, r.Body, size); err != nil {
 		if errors.Is(err, storage.ErrBody) {
 			hlog.FromRequest(r).Warn().Err(err).Msg("upload body ended early")
-			httputil.WriteError(w, r, http.StatusBadRequest, "could not read body")
+			httputil.WriteError(w, r, http.StatusBadRequest, httputil.CodeInvalidRequest, "could not read body")
 			return
 		}
 		storageFailure(w, r, err, "upload blob failed")
@@ -57,7 +57,7 @@ func (s *Server) uploadBlob(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// The object is stored but unclaimable; reconciliation deletes it.
 		hlog.FromRequest(r).Error().Err(err).Str("key", key).Msg("sign receipt failed")
-		httputil.WriteError(w, r, http.StatusInternalServerError, "Internal Server Error")
+		httputil.WriteError(w, r, http.StatusInternalServerError, httputil.CodeInternalError, "Internal Server Error")
 		return
 	}
 	s.Metrics.ReceiptSigned(r.Context())
@@ -71,19 +71,19 @@ func (s *Server) getBlob(w http.ResponseWriter, r *http.Request) {
 	// Another user's key is reported as absent, not forbidden, as the
 	// self-hosted server does.
 	if chi.URLParam(r, "userId") != userID || !ids.IsUUID(blobID) {
-		httputil.WriteError(w, r, http.StatusNotFound, "Not Found")
+		httputil.WriteError(w, r, http.StatusNotFound, httputil.CodeNotFound, "Not Found")
 		return
 	}
 	key := userID + "/" + blobID
 	obj, err := s.Storage.GetObject(r.Context(), key, singleRange(r.Header.Get("Range")))
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
-			httputil.WriteError(w, r, http.StatusNotFound, "Not Found")
+			httputil.WriteError(w, r, http.StatusNotFound, httputil.CodeNotFound, "Not Found")
 			return
 		}
 		if rangeErr, ok := errors.AsType[*storage.RangeError](err); ok {
 			w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", rangeErr.Size))
-			httputil.WriteError(w, r, http.StatusRequestedRangeNotSatisfiable, "Range Not Satisfiable")
+			httputil.WriteError(w, r, http.StatusRequestedRangeNotSatisfiable, codeRangeNotSatisfiable, "Range Not Satisfiable")
 			return
 		}
 		storageFailure(w, r, err, "get blob failed")
@@ -149,7 +149,7 @@ func (s *Server) batchBlobs(w http.ResponseWriter, r *http.Request) {
 	}
 	keys, err := blobframe.ParseRequest(body)
 	if err != nil {
-		httputil.WriteError(w, r, http.StatusBadRequest, err.Error())
+		httputil.WriteError(w, r, http.StatusBadRequest, httputil.CodeInvalidRequest, err.Error())
 		return
 	}
 
@@ -208,7 +208,11 @@ func (s *Server) streamBatch(r *http.Request, w io.Writer, userID string, keys [
 func readLimitedBody(w http.ResponseWriter, r *http.Request, limit int64, tooLarge string) ([]byte, bool) {
 	body, rejection := httpbody.ReadLimited(w, r, limit, tooLarge)
 	if rejection != nil {
-		httputil.WriteError(w, r, rejection.Status, rejection.Message)
+		code := httputil.CodeInvalidRequest
+		if rejection.Status == http.StatusRequestEntityTooLarge {
+			code = codePayloadTooLarge
+		}
+		httputil.WriteError(w, r, rejection.Status, code, rejection.Message)
 		return nil, false
 	}
 	return body, true

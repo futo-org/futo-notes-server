@@ -29,6 +29,38 @@ func WriteError(w http.ResponseWriter, status int, msg string) {
 	WriteJSON(w, status, ErrorResponse{Error: msg})
 }
 
+// CodedErrorResponse is the sync error body with a stable code beside the
+// message, as the invalid-session 401 carries. Only failures the self-hosted
+// server never produces use it, so self-hosted bodies keep their bytes.
+type CodedErrorResponse struct {
+	Code  string `json:"code"`
+	Error string `json:"error"`
+}
+
+// WriteCodedError answers with status and the sync error body carrying code
+// and msg.
+func WriteCodedError(w http.ResponseWriter, status int, code, msg string) {
+	WriteJSON(w, status, CodedErrorResponse{Code: code, Error: msg})
+}
+
+// CodedError is a BlobReader or claim failure answered with a coded 400.
+type CodedError struct {
+	Code    string
+	Message string
+}
+
+func (e *CodedError) Error() string { return e.Message }
+
+// writeBadRequest answers a 400 with err's message, and its code when err is
+// a CodedError.
+func writeBadRequest(w http.ResponseWriter, err error) {
+	if coded, ok := errors.AsType[*CodedError](err); ok {
+		WriteCodedError(w, http.StatusBadRequest, coded.Code, coded.Message)
+		return
+	}
+	WriteError(w, http.StatusBadRequest, err.Error())
+}
+
 // WriteJSON answers with status and v encoded as JSON.
 func WriteJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")

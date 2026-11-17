@@ -104,12 +104,12 @@ func TestBlobEndpointsRejectEverythingButAnAccessToken(t *testing.T) {
 			if resp.status != http.StatusUnauthorized {
 				t.Fatalf("%s %s with %s: status %d", ep.method, ep.path, name, resp.status)
 			}
-			want := "Invalid token"
+			want := "invalid_token"
 			if authorization == "" || !strings.HasPrefix(authorization, "Bearer ") || authorization == "Bearer " {
-				want = "Expected Bearer token"
+				want = "unauthorized"
 			}
-			if msg := resp.errorMessage(t); msg != want {
-				t.Fatalf("%s %s with %s: message %q", ep.method, ep.path, name, msg)
+			if code := resp.errorCode(t); code != want {
+				t.Fatalf("%s %s with %s: code %q, want %q", ep.method, ep.path, name, code, want)
 			}
 		}
 		if resp := e.call(ep, "Bearer "+e.access(userA)); resp.status == http.StatusUnauthorized {

@@ -304,7 +304,7 @@ func TestDashboardDevices(t *testing.T) {
 		strings.Contains(res.body, appCurrent) || strings.Count(res.body, "<tr>") != 3 {
 		t.Fatalf("revoke fragment = %d %s", res.status, res.body)
 	}
-	expectHostedError(t, app.do(http.MethodGet, "/api/account", nil), http.StatusUnauthorized)
+	expectHostedError(t, app.do(http.MethodGet, "/api/account", nil), http.StatusUnauthorized, "invalid_session")
 
 	expectAlertFragment(t, browser.hxSubmit("/dashboard/devices/"+appCurrent+"/revoke", nil), http.StatusNotFound, "already signed out")
 	expectAlertFragment(t, browser.hxSubmit("/dashboard/devices/"+current+"/revoke", nil), http.StatusBadRequest, "Use Sign out")
@@ -313,7 +313,7 @@ func TestDashboardDevices(t *testing.T) {
 	// Without JavaScript the form posts and lands back on the list.
 	otherCurrent, _ := other.sessionIDs()
 	expectRedirect(t, browser.submit("/dashboard/devices/"+otherCurrent+"/revoke", nil), "/dashboard/devices")
-	expectHostedError(t, other.do(http.MethodGet, "/api/account", nil), http.StatusUnauthorized)
+	expectHostedError(t, other.do(http.MethodGet, "/api/account", nil), http.StatusUnauthorized, "invalid_session")
 	expectRenderedError(t, browser.submit("/dashboard/devices/not-a-uuid/revoke", nil), http.StatusNotFound)
 }
 
@@ -346,7 +346,7 @@ func TestDashboardDeleteAndCancel(t *testing.T) {
 		t.Fatalf("deletion = %#v", a.Deletion)
 	}
 	// Every other device is signed out, and sync stops.
-	expectHostedError(t, app.do(http.MethodGet, "/api/account", nil), http.StatusUnauthorized)
+	expectHostedError(t, app.do(http.MethodGet, "/api/account", nil), http.StatusUnauthorized, "invalid_session")
 	browser.expect(http.MethodGet, "/api/collections", nil, http.StatusForbidden)
 
 	res = browser.expect(http.MethodGet, "/dashboard/delete", nil, http.StatusOK)
@@ -568,7 +568,7 @@ func TestDashboardParity(t *testing.T) {
 			if a := viaDashboard.account(); a.Region == nil || a.Region.ID != "us-east" {
 				t.Fatalf("API sees %#v", a.Region)
 			}
-			expectHostedError(t, viaDashboard.do(http.MethodPut, "/api/account/region", map[string]string{"region_id": "eu-central"}), http.StatusConflict)
+			expectHostedError(t, viaDashboard.do(http.MethodPut, "/api/account/region", map[string]string{"region_id": "eu-central"}), http.StatusConflict, "region_already_chosen")
 
 			viaAPI := h.dashboardLogin(h.newSub())
 			viaAPI.expect(http.MethodPut, "/api/account/region", map[string]string{"region_id": "eu-central"}, http.StatusOK)
@@ -587,7 +587,7 @@ func TestDashboardParity(t *testing.T) {
 			if _, others := browser.sessionIDs(); slices.Contains(others, firstID) {
 				t.Fatalf("API still lists %s", firstID)
 			}
-			expectHostedError(t, browser.do(http.MethodDelete, "/api/sessions/"+firstID, nil), http.StatusNotFound)
+			expectHostedError(t, browser.do(http.MethodDelete, "/api/sessions/"+firstID, nil), http.StatusNotFound, "not_found")
 
 			browser.expect(http.MethodDelete, "/api/sessions/"+secondID, nil, http.StatusNoContent)
 			expectLacks(t, browser.expect(http.MethodGet, "/dashboard/devices", nil, http.StatusOK), secondID)
@@ -601,14 +601,14 @@ func TestDashboardParity(t *testing.T) {
 			if a := viaDashboard.account(); a.Deletion == nil {
 				t.Fatal("API sees no deletion")
 			}
-			expectHostedError(t, app.do(http.MethodGet, "/api/account", nil), http.StatusUnauthorized)
+			expectHostedError(t, app.do(http.MethodGet, "/api/account", nil), http.StatusUnauthorized, "invalid_session")
 
 			sub = h.newSub()
 			viaAPI := h.dashboardLogin(sub)
 			app, _ = h.appLogin(sub)
 			viaAPI.expect(http.MethodDelete, "/api/account", nil, http.StatusOK)
 			expectContains(t, viaAPI.expect(http.MethodGet, "/dashboard", nil, http.StatusOK), `scheduled for deletion`)
-			expectHostedError(t, app.do(http.MethodGet, "/api/account", nil), http.StatusUnauthorized)
+			expectHostedError(t, app.do(http.MethodGet, "/api/account", nil), http.StatusUnauthorized, "invalid_session")
 		}},
 		{"POST /dashboard/restore", "POST /api/account/restore", func(t *testing.T) {
 			viaDashboard := h.regionBrowser()
@@ -626,7 +626,7 @@ func TestDashboardParity(t *testing.T) {
 		{"POST /dashboard/sign-out", "POST /api/auth/logout", func(t *testing.T) {
 			viaDashboard := h.regionBrowser()
 			expectRedirect(t, viaDashboard.submit("/dashboard/sign-out", nil), "/dashboard/sign-in")
-			expectHostedError(t, viaDashboard.do(http.MethodGet, "/api/account", nil), http.StatusUnauthorized)
+			expectHostedError(t, viaDashboard.do(http.MethodGet, "/api/account", nil), http.StatusUnauthorized, "unauthorized")
 
 			viaAPI := h.regionBrowser()
 			viaAPI.expect(http.MethodPost, "/api/auth/logout", nil, http.StatusNoContent)

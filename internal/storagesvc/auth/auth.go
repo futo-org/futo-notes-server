@@ -82,11 +82,15 @@ func Admin(v *hostedauth.Verifier, onFailure OnFailure) func(http.Handler) http.
 	}
 }
 
+// codeInvalidToken answers a token that is expired, for another region, of
+// the wrong kind, or otherwise invalid.
+const codeInvalidToken = "invalid_token"
+
 func bearer(w http.ResponseWriter, r *http.Request, kind string, onFailure OnFailure) (string, bool) {
 	token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if !ok || token == "" {
 		onFailure(r.Context(), kind, reasonMissing)
-		httputil.WriteError(w, r, http.StatusUnauthorized, "Expected Bearer token")
+		httputil.WriteError(w, r, http.StatusUnauthorized, httputil.CodeUnauthorized, "Expected Bearer token")
 		return "", false
 	}
 	return token, true
@@ -99,5 +103,5 @@ func reject(w http.ResponseWriter, r *http.Request, kind string, err error, onFa
 	}
 	hlog.FromRequest(r).Info().Err(err).Str("token_kind", kind).Msg("rejected token")
 	onFailure(r.Context(), kind, reason)
-	httputil.WriteError(w, r, http.StatusUnauthorized, "Invalid token")
+	httputil.WriteError(w, r, http.StatusUnauthorized, codeInvalidToken, "Invalid token")
 }

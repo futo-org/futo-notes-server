@@ -28,21 +28,21 @@ func (s *Server) deleteBlobs(w http.ResponseWriter, r *http.Request) {
 		Keys []*string `json:"keys"`
 	}
 	if err := json.Unmarshal(body, &request); err != nil {
-		httputil.WriteError(w, r, http.StatusBadRequest, "invalid json")
+		httputil.WriteError(w, r, http.StatusBadRequest, httputil.CodeInvalidRequest, "invalid json")
 		return
 	}
 	if len(request.Keys) == 0 {
-		httputil.WriteError(w, r, http.StatusBadRequest, "keys must not be empty")
+		httputil.WriteError(w, r, http.StatusBadRequest, httputil.CodeInvalidRequest, "keys must not be empty")
 		return
 	}
 	if len(request.Keys) > adminapi.MaxDeleteKeys {
-		httputil.WriteError(w, r, http.StatusBadRequest, fmt.Sprintf("too many keys (max %d)", adminapi.MaxDeleteKeys))
+		httputil.WriteError(w, r, http.StatusBadRequest, httputil.CodeInvalidRequest, fmt.Sprintf("too many keys (max %d)", adminapi.MaxDeleteKeys))
 		return
 	}
 	keys := make([]string, 0, len(request.Keys))
 	for _, key := range request.Keys {
 		if key == nil || !ids.IsBlobKey(*key) {
-			httputil.WriteError(w, r, http.StatusBadRequest, "keys must be <userId>/<blobId>")
+			httputil.WriteError(w, r, http.StatusBadRequest, httputil.CodeInvalidRequest, "keys must be <userId>/<blobId>")
 			return
 		}
 		keys = append(keys, *key)
@@ -71,14 +71,14 @@ func (s *Server) listBlobs(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	prefix := q.Get("prefix")
 	if prefix != "" && !userPrefix(prefix) {
-		httputil.WriteError(w, r, http.StatusBadRequest, "prefix must be empty or <userId>/")
+		httputil.WriteError(w, r, http.StatusBadRequest, httputil.CodeInvalidRequest, "prefix must be empty or <userId>/")
 		return
 	}
 	var olderThan time.Time
 	if v := q.Get("older_than"); v != "" {
 		t, err := time.Parse(time.RFC3339, v)
 		if err != nil {
-			httputil.WriteError(w, r, http.StatusBadRequest, "older_than must be an RFC 3339 timestamp")
+			httputil.WriteError(w, r, http.StatusBadRequest, httputil.CodeInvalidRequest, "older_than must be an RFC 3339 timestamp")
 			return
 		}
 		olderThan = t
@@ -87,7 +87,7 @@ func (s *Server) listBlobs(w http.ResponseWriter, r *http.Request) {
 	if v := q.Get("limit"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 1 || n > maxListLimit {
-			httputil.WriteError(w, r, http.StatusBadRequest, fmt.Sprintf("limit must be between 1 and %d", maxListLimit))
+			httputil.WriteError(w, r, http.StatusBadRequest, httputil.CodeInvalidRequest, fmt.Sprintf("limit must be between 1 and %d", maxListLimit))
 			return
 		}
 		limit = n
@@ -116,7 +116,7 @@ func (s *Server) listBlobs(w http.ResponseWriter, r *http.Request) {
 func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
 	userID := chi.URLParam(r, "userId")
 	if !ids.IsUserID(userID) {
-		httputil.WriteError(w, r, http.StatusBadRequest, "invalid user id")
+		httputil.WriteError(w, r, http.StatusBadRequest, httputil.CodeInvalidRequest, "invalid user id")
 		return
 	}
 	page, err := s.Storage.ListObjects(r.Context(), userID+"/", "", adminapi.MaxDeleteKeys)
@@ -136,7 +136,7 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
 	if len(failed) > 0 {
 		hlog.FromRequest(r).Error().Int("failed", len(failed)).Str("first_key", failed[0].Key).
 			Str("first_error", failed[0].Message).Msg("some user blobs were not deleted")
-		httputil.WriteError(w, r, http.StatusInternalServerError, fmt.Sprintf("%d blobs could not be deleted", len(failed)))
+		httputil.WriteError(w, r, http.StatusInternalServerError, httputil.CodeInternalError, fmt.Sprintf("%d blobs could not be deleted", len(failed)))
 		return
 	}
 	httputil.WriteJSON(w, r, http.StatusOK, adminapi.DeleteUserResponse{Deleted: len(keys), Done: !page.Truncated})

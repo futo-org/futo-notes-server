@@ -105,15 +105,15 @@ func (s *Server) router() chi.Router {
 		hlog.AccessHandler(httputil.LogAccess),
 		s.metrics.http.Middleware,
 		syncapi.RecoverPanicWith(func(w http.ResponseWriter, r *http.Request) {
-			httputil.WriteError(w, r, http.StatusInternalServerError, "Internal server error")
+			httputil.WriteError(w, r, http.StatusInternalServerError, httputil.CodeInternalError, "Internal server error")
 		}),
 		chimw.GetHead,
 	)
 	r.NotFound(func(w http.ResponseWriter, r *http.Request) {
-		httputil.WriteError(w, r, http.StatusNotFound, "Not found")
+		httputil.WriteError(w, r, http.StatusNotFound, httputil.CodeNotFound, "Not found")
 	})
 	r.MethodNotAllowed(func(w http.ResponseWriter, r *http.Request) {
-		httputil.WriteError(w, r, http.StatusMethodNotAllowed, "Method not allowed")
+		httputil.WriteError(w, r, http.StatusMethodNotAllowed, httputil.CodeMethodNotAllowed, "Method not allowed")
 	})
 
 	r.Get("/", syncapi.HandleCapability(syncapi.NewCapability(s.version, "oidc", "open")))
@@ -158,6 +158,9 @@ func (s *Server) router() chi.Router {
 // service, and object writes name a storage receipt instead of a staged key.
 func (s *Server) syncRoutes(r chi.Router) {
 	blobs := receiptBlobs{verifier: s.receipts, metrics: s.metrics}
+	for _, region := range s.cfg.Regions {
+		blobs.regions = append(blobs.regions, region.ID)
+	}
 	r.Get("/auth", syncapi.HandleCurrentUser)
 	r.Post("/collections", syncapi.HandleClaimCollection(s.database))
 	r.Get("/collections", syncapi.HandleListCollections(s.database))
@@ -201,7 +204,7 @@ func (s *Server) authenticate(shape errorShape) func(http.Handler) http.Handler 
 				if shape == syncErrors {
 					syncapi.WriteUnauthorized(w)
 				} else {
-					httputil.WriteError(w, r, http.StatusUnauthorized, "Unauthorized")
+					httputil.WriteError(w, r, http.StatusUnauthorized, httputil.CodeUnauthorized, "Unauthorized")
 				}
 				return
 			}
@@ -212,7 +215,7 @@ func (s *Server) authenticate(shape errorShape) func(http.Handler) http.Handler 
 				return
 			case errors.Is(err, auth.ErrNoSession):
 				w.Header().Set("WWW-Authenticate", `Bearer realm="futo-notes", error="invalid_token"`)
-				httputil.WriteError(w, r, http.StatusUnauthorized, "Session expired or invalid")
+				httputil.WriteError(w, r, http.StatusUnauthorized, codeInvalidSession, "Session expired or invalid")
 				return
 			case err != nil && shape == syncErrors:
 				syncapi.ServerError(w, r, "validating session", err)
@@ -239,7 +242,7 @@ func (s *Server) authenticate(shape errorShape) func(http.Handler) http.Handler 
 func requireActiveAccount(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if principalFrom(r).PendingDeletion() {
-			syncapi.WriteError(w, http.StatusForbidden, account.ErrPendingDeletion.Error())
+			writePendingDeletion(w)
 			return
 		}
 		next.ServeHTTP(w, r)

@@ -146,15 +146,22 @@ func (r response) json(t *testing.T, v any) {
 	}
 }
 
-// errorMessage checks the error body shape and returns its message.
-func (r response) errorMessage(t *testing.T) string {
+// errorBody checks the error body shape and returns it.
+func (r response) errorBody(t *testing.T) httputil.ErrorResponse {
 	t.Helper()
 	var body httputil.ErrorResponse
 	r.json(t, &body)
-	if body.StatusCode != r.status || body.RequestID == "" || body.RequestID != r.header.Get("X-Request-Id") {
+	if body.StatusCode != r.status || body.Code == "" || body.Message == "" ||
+		body.RequestID == "" || body.RequestID != r.header.Get("X-Request-Id") {
 		t.Fatalf("error body %s for status %d, X-Request-Id %q", r.body, r.status, r.header.Get("X-Request-Id"))
 	}
-	return body.Message
+	return body
+}
+
+// errorCode checks the error body shape and returns its code.
+func (r response) errorCode(t *testing.T) string {
+	t.Helper()
+	return r.errorBody(t).Code
 }
 
 func (e *env) do(method, path, token string, body io.Reader, header map[string]string) response {

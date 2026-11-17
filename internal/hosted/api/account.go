@@ -87,12 +87,12 @@ func (s *Server) handleChooseRegion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, ok := s.regions[body.RegionID]; !ok {
-		httputil.WriteError(w, r, http.StatusBadRequest, "Unknown region")
+		badRequest(w, r, "Unknown region")
 		return
 	}
 	err := s.accounts.ChooseRegion(r.Context(), principalFrom(r).Session.User.ID, body.RegionID)
 	if errors.Is(err, account.ErrRegionChosen) {
-		httputil.WriteError(w, r, http.StatusConflict, "Region already chosen")
+		httputil.WriteError(w, r, http.StatusConflict, codeRegionAlreadyChosen, "Region already chosen")
 		return
 	}
 	if err != nil {
@@ -118,7 +118,7 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRestoreAccount(w http.ResponseWriter, r *http.Request) {
 	err := s.accounts.Restore(r.Context(), principalFrom(r).Session.User.ID)
 	if errors.Is(err, account.ErrPurgeStarted) {
-		httputil.WriteError(w, r, http.StatusConflict, "The deletion grace period is over; the account can no longer be restored")
+		httputil.WriteError(w, r, http.StatusConflict, codePurgeStarted, "The deletion grace period is over; the account can no longer be restored")
 		return
 	}
 	if err != nil {
@@ -169,7 +169,7 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRevokeSession(w http.ResponseWriter, r *http.Request) {
 	err := s.accounts.RevokeSession(r.Context(), principalFrom(r).Session.User.ID, r.PathValue("id"))
 	if errors.Is(err, account.ErrNotFound) {
-		httputil.WriteError(w, r, http.StatusNotFound, "Session not found")
+		httputil.WriteError(w, r, http.StatusNotFound, httputil.CodeNotFound, "Session not found")
 		return
 	}
 	if err != nil {

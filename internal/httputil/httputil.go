@@ -14,23 +14,35 @@ import (
 // the errors of the endpoints only the hosted API serves. The hosted API's
 // sync endpoints keep the sync contract's {"error": ...} body instead.
 type ErrorResponse struct {
-	StatusCode int    `json:"statusCode"`
-	Message    string `json:"message"`
+	StatusCode int `json:"statusCode"`
+	// Code is stable and machine-readable; clients branch on it, never on
+	// Message, which is for people and may change.
+	Code    string `json:"code"`
+	Message string `json:"message"`
 	// RequestID is always present, as both hosted specs require. It is the
 	// X-Request-Id the request ID handler assigned, or "" outside that chain.
 	RequestID string `json:"requestId"`
 }
 
-// WriteError answers with status and an ErrorResponse carrying message and
-// the request id.
-func WriteError(w http.ResponseWriter, r *http.Request, status int, message string) {
+// Error codes both hosted services use. Each service adds its own.
+const (
+	CodeInvalidRequest   = "invalid_request"
+	CodeUnauthorized     = "unauthorized"
+	CodeNotFound         = "not_found"
+	CodeMethodNotAllowed = "method_not_allowed"
+	CodeInternalError    = "internal_error"
+)
+
+// WriteError answers with status and an ErrorResponse carrying code, message
+// and the request id.
+func WriteError(w http.ResponseWriter, r *http.Request, status int, code, message string) {
 	id := ""
 	if requestID, ok := hlog.IDFromRequest(r); ok {
 		id = requestID.String()
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(ErrorResponse{StatusCode: status, Message: message, RequestID: id}); err != nil {
+	if err := json.NewEncoder(w).Encode(ErrorResponse{StatusCode: status, Code: code, Message: message, RequestID: id}); err != nil {
 		hlog.FromRequest(r).Error().Err(err).Msg("writing error response")
 	}
 }

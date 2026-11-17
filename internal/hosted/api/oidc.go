@@ -104,15 +104,15 @@ func (s *Server) handleOIDCStart(w http.ResponseWriter, r *http.Request) {
 	}
 	if redirect := q.Get("redirect_uri"); redirect != "" {
 		if !allowedAppRedirect(redirect, s.cfg.AppRedirectSchemes) {
-			httputil.WriteError(w, r, http.StatusBadRequest, "redirect_uri is not allowed")
+			badRequest(w, r, "redirect_uri is not allowed")
 			return
 		}
 		if method := q.Get("code_challenge_method"); method != "" && method != "S256" {
-			httputil.WriteError(w, r, http.StatusBadRequest, "code_challenge_method must be S256")
+			badRequest(w, r, "code_challenge_method must be S256")
 			return
 		}
 		if !account.ValidCodeChallenge(q.Get("code_challenge")) {
-			httputil.WriteError(w, r, http.StatusBadRequest, "code_challenge must be an S256 challenge")
+			badRequest(w, r, "code_challenge must be an S256 challenge")
 			return
 		}
 		login.AppRedirectURI, login.AppState, login.AppCodeChallenge = redirect, q.Get("state"), q.Get("code_challenge")
@@ -121,7 +121,7 @@ func (s *Server) handleOIDCStart(w http.ResponseWriter, r *http.Request) {
 	oauthConfig, _, err := s.oidc.get(r.Context())
 	if err != nil {
 		hlog.FromRequest(r).Error().Err(err).Msg("starting sign-in")
-		httputil.WriteError(w, r, http.StatusServiceUnavailable, "Identity provider unavailable")
+		httputil.WriteError(w, r, http.StatusServiceUnavailable, codeProviderUnavailable, "Identity provider unavailable")
 		return
 	}
 	if err := s.accounts.SaveLogin(r.Context(), login); err != nil {
@@ -151,13 +151,13 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{Name: stateCookie, Path: callbackPath, MaxAge: -1, HttpOnly: true, Secure: s.cfg.CookieSecure})
 	if err != nil || state == "" || subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(state)) != 1 {
 		s.metrics.login(r.Context(), false, loginInvalidState)
-		httputil.WriteError(w, r, http.StatusBadRequest, "Invalid login state")
+		httputil.WriteError(w, r, http.StatusBadRequest, codeInvalidLoginState, "Invalid login state")
 		return
 	}
 	login, err := s.accounts.TakeLogin(r.Context(), state)
 	if errors.Is(err, account.ErrUnknownLogin) {
 		s.metrics.login(r.Context(), false, loginInvalidState)
-		httputil.WriteError(w, r, http.StatusBadRequest, "Invalid login state")
+		httputil.WriteError(w, r, http.StatusBadRequest, codeInvalidLoginState, "Invalid login state")
 		return
 	}
 	if err != nil {
@@ -171,7 +171,7 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 			redirectApp(w, r, login, url.Values{"error": {providerError}})
 			return
 		}
-		httputil.WriteError(w, r, http.StatusBadRequest, "Sign-in was not completed: "+providerError)
+		httputil.WriteError(w, r, http.StatusBadRequest, codeSignInNotCompleted, "Sign-in was not completed: "+providerError)
 		return
 	}
 	code := q.Get("code")
@@ -181,19 +181,19 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 			redirectApp(w, r, login, url.Values{"error": {"invalid_request"}})
 			return
 		}
-		httputil.WriteError(w, r, http.StatusBadRequest, "Sign-in was not completed: missing code")
+		httputil.WriteError(w, r, http.StatusBadRequest, codeSignInNotCompleted, "Sign-in was not completed: missing code")
 		return
 	}
 	identity, err := s.identify(r.Context(), code, login)
 	if errors.Is(err, errNonceMismatch) {
 		s.metrics.login(r.Context(), login.ForApp(), loginInvalidState)
-		httputil.WriteError(w, r, http.StatusBadRequest, "Invalid login state")
+		httputil.WriteError(w, r, http.StatusBadRequest, codeInvalidLoginState, "Invalid login state")
 		return
 	}
 	if err != nil {
 		s.metrics.login(r.Context(), login.ForApp(), loginProviderError)
 		hlog.FromRequest(r).Error().Err(err).Msg("completing sign-in with the identity provider")
-		httputil.WriteError(w, r, http.StatusBadGateway, "Could not complete sign-in with the identity provider")
+		httputil.WriteError(w, r, http.StatusBadGateway, codeProviderError, "Could not complete sign-in with the identity provider")
 		return
 	}
 	user, err := s.accounts.UpsertUser(r.Context(), identity)
@@ -304,16 +304,16 @@ func (s *Server) handleOIDCToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if body.Code == "" || body.CodeVerifier == "" {
-		httputil.WriteError(w, r, http.StatusBadRequest, "code and code_verifier are required")
+		badRequest(w, r, "code and code_verifier are required")
 		return
 	}
 	session, err := s.accounts.RedeemAppCode(r.Context(), body.Code, body.CodeVerifier, r.UserAgent())
 	switch {
 	case errors.Is(err, account.ErrInvalidCode):
-		httputil.WriteError(w, r, http.StatusBadRequest, "Invalid or expired code")
+		httputil.WriteError(w, r, http.StatusBadRequest, codeInvalidCode, "Invalid or expired code")
 		return
 	case errors.Is(err, account.ErrCodeVerifier):
-		httputil.WriteError(w, r, http.StatusBadRequest, "code_verifier does not match code_challenge")
+		httputil.WriteError(w, r, http.StatusBadRequest, codeCodeVerifierMismatch, "code_verifier does not match code_challenge")
 		return
 	case err != nil:
 		serverError(w, r, "redeeming app code", err)

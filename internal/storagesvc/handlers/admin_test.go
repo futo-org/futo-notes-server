@@ -73,7 +73,9 @@ func TestDeleteBlobsValidation(t *testing.T) {
 		if resp.status != http.StatusBadRequest {
 			t.Fatalf("%s: status %d: %s", name, resp.status, resp.body)
 		}
-		resp.errorMessage(t)
+		if code := resp.errorCode(t); code != "invalid_request" {
+			t.Fatalf("%s: code %q", name, code)
+		}
 	}
 	huge := `{"keys":["` + strings.Repeat("x", maxDeleteBody) + `"]}`
 	if resp := e.do(http.MethodDelete, "/internal/blobs", e.admin(), strings.NewReader(huge), nil); resp.status != http.StatusRequestEntityTooLarge {
@@ -184,10 +186,12 @@ func TestListBlobsValidation(t *testing.T) {
 		if resp.status != http.StatusBadRequest {
 			t.Fatalf("%s: status %d", name, resp.status)
 		}
-		resp.errorMessage(t)
+		if code := resp.errorCode(t); code != "invalid_request" {
+			t.Fatalf("%s: code %q", name, code)
+		}
 	}
 	e.store.listErr = errors.New("s3 down")
-	if _, resp := e.list(url.Values{}); resp.status != http.StatusInternalServerError || resp.errorMessage(t) != "Storage error" {
+	if _, resp := e.list(url.Values{}); resp.status != http.StatusInternalServerError || resp.errorCode(t) != "internal_error" {
 		t.Fatalf("storage failure: status %d: %s", resp.status, resp.body)
 	}
 }
@@ -221,7 +225,7 @@ func TestDeleteUserValidationAndFailures(t *testing.T) {
 	e := newEnv(t)
 	for _, id := range []string{"nobody", strings.ToUpper(userA), userA[:35]} {
 		resp := e.do(http.MethodDelete, "/internal/users/"+id, e.admin(), nil, nil)
-		if resp.status != http.StatusBadRequest || resp.errorMessage(t) != "invalid user id" {
+		if resp.status != http.StatusBadRequest || resp.errorCode(t) != "invalid_request" {
 			t.Fatalf("%q: status %d: %s", id, resp.status, resp.body)
 		}
 	}
@@ -230,13 +234,14 @@ func TestDeleteUserValidationAndFailures(t *testing.T) {
 	e.store.put(stuck, []byte("x"))
 	e.store.deleteFail = map[string]bool{stuck: true}
 	resp := e.do(http.MethodDelete, "/internal/users/"+userA, e.admin(), nil, nil)
-	if resp.status != http.StatusInternalServerError || resp.errorMessage(t) != fmt.Sprintf("%d blobs could not be deleted", 1) {
+	if resp.status != http.StatusInternalServerError || resp.errorCode(t) != "internal_error" ||
+		resp.errorBody(t).Message != fmt.Sprintf("%d blobs could not be deleted", 1) {
 		t.Fatalf("status %d: %s", resp.status, resp.body)
 	}
 
 	e.store.listErr = errors.New("s3 down")
 	resp = e.do(http.MethodDelete, "/internal/users/"+userA, e.admin(), nil, nil)
-	if resp.status != http.StatusInternalServerError || resp.errorMessage(t) != "Storage error" {
+	if resp.status != http.StatusInternalServerError || resp.errorCode(t) != "internal_error" {
 		t.Fatalf("status %d: %s", resp.status, resp.body)
 	}
 }

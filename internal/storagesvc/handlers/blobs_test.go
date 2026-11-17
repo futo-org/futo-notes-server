@@ -66,7 +66,7 @@ func TestUploadsGetDistinctKeys(t *testing.T) {
 func TestUploadRejectsAnEmptyBody(t *testing.T) {
 	e := newEnv(t)
 	resp := e.upload(e.access(userA), nil)
-	if resp.status != http.StatusBadRequest || resp.errorMessage(t) != "empty body" {
+	if resp.status != http.StatusBadRequest || resp.errorCode(t) != "invalid_request" {
 		t.Fatalf("status %d: %s", resp.status, resp.body)
 	}
 	if keys := e.store.keys(); len(keys) != 0 {
@@ -78,7 +78,7 @@ func TestUploadRequiresContentLength(t *testing.T) {
 	e := newEnv(t)
 	// An io.Reader of unknown length goes out chunked.
 	chunked := e.do(http.MethodPost, "/blobs", e.access(userA), io.MultiReader(strings.NewReader("abc")), nil)
-	if chunked.status != http.StatusLengthRequired || chunked.errorMessage(t) != "Content-Length required" {
+	if chunked.status != http.StatusLengthRequired || chunked.errorCode(t) != "length_required" {
 		t.Fatalf("chunked: status %d: %s", chunked.status, chunked.body)
 	}
 
@@ -185,7 +185,7 @@ func TestGetBlob(t *testing.T) {
 		"malformed user id":   "/blobs/nobody/" + uuid.NewV7().String(),
 	} {
 		resp := e.do(http.MethodGet, path, token, nil, nil)
-		if resp.status != http.StatusNotFound || resp.errorMessage(t) != "Not Found" {
+		if resp.status != http.StatusNotFound || resp.errorCode(t) != "not_found" {
 			t.Fatalf("%s: status %d: %s", name, resp.status, resp.body)
 		}
 	}
@@ -222,7 +222,9 @@ func TestGetBlobRanges(t *testing.T) {
 			t.Fatalf("%s: status %d, Content-Range %q", tc.rangeHeader, resp.status, resp.header.Get("Content-Range"))
 		}
 		if tc.status == http.StatusRequestedRangeNotSatisfiable {
-			resp.errorMessage(t)
+			if code := resp.errorCode(t); code != "range_not_satisfiable" {
+				t.Fatalf("%s: code %q", tc.rangeHeader, code)
+			}
 		} else if string(resp.body) != tc.body {
 			t.Fatalf("%s: body %q", tc.rangeHeader, resp.body)
 		}
@@ -253,7 +255,13 @@ func TestBatchValidation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		resp := e.do(http.MethodPost, "/blobs/batch", token, strings.NewReader(tc.body), nil)
-		if resp.status != tc.status || resp.errorMessage(t) != tc.message {
+		code := "invalid_request"
+		if tc.status == http.StatusRequestEntityTooLarge {
+			code = "payload_too_large"
+		}
+		// The message names which check failed; blobframe's messages are
+		// shared with the self-hosted batch route.
+		if body := resp.errorBody(t); resp.status != tc.status || body.Code != code || body.Message != tc.message {
 			t.Fatalf("%s: status %d: %s", tc.name, resp.status, resp.body)
 		}
 	}
@@ -402,11 +410,11 @@ func TestReadiness(t *testing.T) {
 func TestUnknownRoutesUseTheErrorShape(t *testing.T) {
 	e := newEnv(t)
 	resp := e.do(http.MethodGet, "/nope", "", nil, nil)
-	if resp.status != http.StatusNotFound || resp.errorMessage(t) != "Not Found" {
+	if resp.status != http.StatusNotFound || resp.errorCode(t) != "not_found" {
 		t.Fatalf("status %d: %s", resp.status, resp.body)
 	}
 	resp = e.do(http.MethodPut, "/blobs", e.access(userA), nil, nil)
-	if resp.status != http.StatusMethodNotAllowed || resp.errorMessage(t) != "Method Not Allowed" {
+	if resp.status != http.StatusMethodNotAllowed || resp.errorCode(t) != "method_not_allowed" {
 		t.Fatalf("status %d: %s", resp.status, resp.body)
 	}
 }

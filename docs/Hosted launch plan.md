@@ -59,7 +59,9 @@ a status and differ only in the message:
 - 409 on `/api/storage/token`: `refresh_token_rotating` (gone after A1) and `region_required`;
 - 401: `refresh_token_invalid` and `refresh_token_reused`;
 - `PUT /api/account/region` 409: `region_already_chosen`;
-- `POST /api/account/restore` 409: `not_pending_deletion` and `purge_started`;
+- `POST /api/account/restore` 409: `purge_started`. Restoring an account with no
+  deletion pending stays an idempotent 200, so a client can retry after a lost
+  response;
 - receipt 400: `receipt_invalid`, `receipt_expired`, `receipt_wrong_region`, `receipt_wrong_user`;
 - receipt 409: `receipt_used`;
 - 403: `account_pending_deletion`.
