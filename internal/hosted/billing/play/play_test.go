@@ -246,6 +246,35 @@ func TestVerifyRefetches(t *testing.T) {
 	}
 }
 
+// A purchase the app never submitted (killed, offline) is still kept: its
+// notification acknowledges it, but only an entitling one bought through the
+// app, which set the account id.
+func TestVerifyAcknowledgesPendingPurchases(t *testing.T) {
+	for name, tc := range map[string]struct {
+		body    map[string]any
+		wantAck bool
+	}{
+		"active, pending": {purchase("SUBSCRIPTION_STATE_ACTIVE", time.Now().Add(time.Hour), "acknowledgementState", "ACKNOWLEDGEMENT_STATE_PENDING"), true},
+		"no account id":   {purchase("SUBSCRIPTION_STATE_ACTIVE", time.Now().Add(time.Hour), "externalAccountIdentifiers", nil, "acknowledgementState", "ACKNOWLEDGEMENT_STATE_PENDING"), false},
+		"not entitling":   {purchase("SUBSCRIPTION_STATE_PENDING", time.Now().Add(time.Hour), "acknowledgementState", "ACKNOWLEDGEMENT_STATE_PENDING"), false},
+		"acknowledged":    {purchase("SUBSCRIPTION_STATE_ACTIVE", time.Now().Add(time.Hour)), false},
+	} {
+		g := newFakeGoogle(t)
+		g.set(purchaseToken, fakeAnswer{code: http.StatusOK, body: tc.body})
+		header, body := push(t, pushToken(t, g.signingKey, nil), subscriptionNotification(4, purchaseToken))
+		if _, _, err := g.provider(t).Verify(context.Background(), billing.Delivery{Header: header, Body: body}); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		want := []string{getPath}
+		if tc.wantAck {
+			want = append(want, ackPath)
+		}
+		if calls := g.apiCalls(); !slices.Equal(calls, want) {
+			t.Errorf("%s: calls = %v, want %v", name, calls, want)
+		}
+	}
+}
+
 func TestVerifyRevocations(t *testing.T) {
 	expired := purchase("SUBSCRIPTION_STATE_EXPIRED", time.Now().Add(-time.Hour))
 	for name, tc := range map[string]struct {

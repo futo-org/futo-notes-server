@@ -296,8 +296,9 @@ are answered `200` and change nothing.
 
 Notifications only name a purchase token. The API always fetches its state
 with `subscriptionsv2.get`, and never trusts the message. A purchase the app
-submits is acknowledged at once, because Play refunds one left unacknowledged
-for three days. License testers' purchases are stored with `environment = sandbox`.
+submits, or one a notification reports, is acknowledged at once while it
+entitles and carries the account id the app sets, because Play refunds one
+left unacknowledged for three days. License testers' purchases are stored with `environment = sandbox`.
 
 ## Key rotation
 

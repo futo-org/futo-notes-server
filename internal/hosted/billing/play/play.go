@@ -270,12 +270,26 @@ func (p *Provider) Submit(ctx context.Context, purchase billing.Purchase) (billi
 	if ev.AccountToken == "" {
 		return billing.Event{}, fmt.Errorf("%w: purchase has no obfuscatedExternalAccountId", billing.ErrInvalidPurchase)
 	}
-	if s.AcknowledgementState == "ACKNOWLEDGEMENT_STATE_PENDING" && (ev.Status == billing.StatusActive || ev.Status == billing.StatusGrace) {
-		if err := p.productCall(ctx, ev.ProductID, purchase.Token, "acknowledge"); err != nil {
-			return billing.Event{}, fmt.Errorf("acknowledging: %w", err)
-		}
+	if err := p.acknowledge(ctx, purchase.Token, s, ev); err != nil {
+		return billing.Event{}, err
 	}
 	return ev, nil
+}
+
+// acknowledge acknowledges an entitling purchase Google still holds as
+// pending, which Play requires within three days or it refunds it. Both
+// Submit and notifications do it, so a purchase whose app never submitted it
+// (killed, offline) is still kept. A purchase without the account token our
+// app sets was not bought through it and is left alone.
+func (p *Provider) acknowledge(ctx context.Context, token string, s subscription, ev billing.Event) error {
+	if s.AcknowledgementState != "ACKNOWLEDGEMENT_STATE_PENDING" || ev.AccountToken == "" ||
+		(ev.Status != billing.StatusActive && ev.Status != billing.StatusGrace) {
+		return nil
+	}
+	if err := p.productCall(ctx, ev.ProductID, token, "acknowledge"); err != nil {
+		return fmt.Errorf("acknowledging: %w", err)
+	}
+	return nil
 }
 
 // Refresh fetches the subscription with this purchase token.
@@ -372,11 +386,21 @@ func (p *Provider) Verify(ctx context.Context, d billing.Delivery) (string, []bi
 	if purchaseToken == "" {
 		return "", nil, fmt.Errorf("%w: notification without a purchase token", billing.ErrInvalidDelivery)
 	}
-	ev, err := p.Refresh(ctx, purchaseToken)
-	if errors.Is(err, errNotFound) || errors.Is(err, errUnknownProduct) {
+	s, payload, err := p.get(ctx, purchaseToken)
+	if errors.Is(err, errNotFound) {
 		return id, nil, nil
 	}
 	if err != nil {
+		return "", nil, err
+	}
+	ev, err := p.event(purchaseToken, s, payload, time.Now())
+	if errors.Is(err, errUnknownProduct) {
+		return id, nil, nil
+	}
+	if err != nil {
+		return "", nil, err
+	}
+	if err := p.acknowledge(ctx, purchaseToken, s, ev); err != nil {
 		return "", nil, err
 	}
 	// Google reports a revoked subscription as expired; the notification
