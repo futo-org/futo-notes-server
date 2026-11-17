@@ -167,7 +167,9 @@ so a job runs at most once per interval across the deployment.
 | orphan reconciliation | Lists each region's keys older than 48h (receipts expire after 24h, which leaves a margin) and deletes keys the ledger doesn't know |
 | account purge | After the 30-day grace: purges the user's storage prefix, then deletes their rows. Both are idempotent, and the account stays due until both succeed. |
 
-SSE works across replicas through the existing Postgres LISTEN/NOTIFY.
+SSE works across replicas through the existing Postgres LISTEN/NOTIFY. A stream ends with its
+session or when its account goes pending deletion: hosted triggers announce both on
+`notes_session_ends` to every replica, and each stream rechecks its session on every ping.
 
 ## Storage service (`cmd/storage`)
 

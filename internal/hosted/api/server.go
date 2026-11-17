@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
@@ -67,6 +68,9 @@ type Server struct {
 	notifier  *mail.Notifier
 	billing   *billing.Store
 	providers billing.Providers
+	// syncPing is how often sync event streams ping and recheck their
+	// session.
+	syncPing time.Duration
 }
 
 // New returns a Server for o.
@@ -99,6 +103,7 @@ func New(o Options) (*Server, error) {
 		notifier:  mail.NewNotifier(o.Database, mailer, o.Config.PublicURL),
 		billing:   billing.NewStore(o.Database),
 		providers: o.Billing,
+		syncPing:  syncapi.SyncPingInterval,
 	}, nil
 }
 
@@ -202,7 +207,24 @@ func (s *Server) syncRoutes(r chi.Router) {
 	writes.Put("/collections/{id}/objects/{objectId}", syncapi.HandleUpdateObject(s.database, s.publisher, blobs))
 	writes.Delete("/collections/{id}/objects/{objectId}", syncapi.HandleDeleteObject(s.database, s.publisher))
 	r.Get("/collections/{id}/create-mutations/{mutationId}", syncapi.HandleRecoverCreate(s.database))
-	r.Get("/sync/events", s.metrics.countStreams(syncapi.HandleSyncEvents(s.hub)))
+	r.Get("/sync/events", s.metrics.countStreams(syncapi.HandleSyncEventsWhile(s.hub, s.syncPing, s.streamAlive)))
+}
+
+// streamAlive reports whether the caller's sync event stream may stay open.
+// The events listener ends a stream as soon as its session ends or its
+// account goes pending deletion; this recheck bounds what that misses: a
+// session that merely expired, or one ended between authentication and
+// subscription. A failed check ends the stream too, since it cannot vouch
+// for the session.
+func (s *Server) streamAlive(r *http.Request) bool {
+	live, err := s.accounts.SessionLive(r.Context(), principalFrom(r).Session.ID)
+	if err != nil {
+		if r.Context().Err() == nil {
+			hlog.FromRequest(r).Error().Err(err).Msg("rechecking a sync event stream's session")
+		}
+		return false
+	}
+	return live
 }
 
 // errorShape picks how authentication failures are answered: the sync

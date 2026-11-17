@@ -1974,6 +1974,13 @@ paths:
         Changes reach every API replica's streams through Postgres
         `LISTEN/NOTIFY`. A stream ends when its replica's listener
         reconnects; reconnect and pull.
+
+        A stream also ends, with no further event, once its session does
+        (revoked, signed out, signed out by an account deletion, revoked for
+        refresh-token reuse, or expired) or its account goes pending
+        deletion. Revocation, sign-out and deletion end it within seconds,
+        on any replica; anything else by the next `ping`. Reconnecting then
+        gets the 401 or 403.
       responses:
         "200":
           description: Event stream
