@@ -92,8 +92,10 @@ artifacts, and `publish:binaries` waits for it. The bundle's sources are
 `scripts/hosted-stack/`, and its keys come from `dev/hosted-keys/` at build
 time.
 
-The GitLab runner hands each job the host's Docker socket and has no working
-Docker-in-Docker, so `test:hosted-stack` starts its containers on the shared
-host daemon. It gives them a Compose project and ports derived from the job
-ID, so concurrent pipelines don't collide, and publishes them on the job's
-bridge gateway (`HOSTED_STACK_CONTAINER_HOST`), where the job reaches them.
+`test:hosted-stack` runs the stack in the job's Docker-in-Docker service where
+the runner provides one. One runner mounts the host's Docker socket into every
+container instead, which stops Docker-in-Docker from starting. There the job
+starts its containers on the shared host daemon with a Compose project and
+ports derived from the job ID, so concurrent pipelines don't collide, and
+publishes them on the job's bridge gateway (`HOSTED_STACK_CONTAINER_HOST`),
+where the job reaches them.

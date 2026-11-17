@@ -199,29 +199,40 @@ build:binaries:
     expire_in: never
 
 # Starts the hosted test stack from this pipeline's release artifacts and
-# drives a client through it, as the apps' CI does. The launcher reaches the
-# Docker-in-Docker containers through DOCKER_HOST.
+# drives a client through it, as the apps' CI does.
 test:hosted-stack:
   extends: .skip-soak-schedule
   stage: build
-  # Go comes from apk, and GOTOOLCHAIN=auto fetches the version go.mod asks
-  # for. No dind service: the runner mounts the host's Docker socket into every
-  # container, so a dind daemon cannot create its own and exits. The stack's
-  # containers run on the shared host daemon instead, with a Compose project
-  # and ports of this job's own, published on the job's bridge gateway where
-  # the job reaches them.
+  # The image jobs' image, service and TLS setting, so it runs on every runner
+  # they do. Go comes from apk, and GOTOOLCHAIN=auto fetches the version go.mod
+  # asks for.
   image: docker:29@sha256:4bbc7223f81db790097c6dea42fb93e05b8fead4f0431fbe6ccaba6e8473201c
+  services:
+    - docker:29-dind@sha256:4bbc7223f81db790097c6dea42fb93e05b8fead4f0431fbe6ccaba6e8473201c
   needs:
     - job: build:binaries
       artifacts: true
   variables:
+    DOCKER_TLS_CERTDIR: /certs
     GOTOOLCHAIN: auto
   before_script:
     - apk add --no-cache bash curl go
-    - export HOSTED_STACK_CONTAINER_HOST=$(ip route | awk '/^default/ {print $3}')
-    - export COMPOSE_PROJECT_NAME=hosted-stack-$CI_JOB_ID
-    - export HOSTED_STACK_POSTGRES_PORT=$((20000 + CI_JOB_ID % 5000))
-    - export HOSTED_STACK_MINIO_PORT=$((25000 + CI_JOB_ID % 5000))
+    # Where dind runs, DOCKER_HOST is tcp://docker:... and the launcher reaches
+    # the containers there. One runner instead mounts the host's Docker socket
+    # into every container, which kills the dind service, and the image's
+    # entrypoint falls back to that socket. The stack then shares the host
+    # daemon: it takes a Compose project and ports of this job's own and
+    # publishes them on the job's bridge gateway, where the job reaches them.
+    - |
+      case "${DOCKER_HOST:-unix://}" in
+      unix://*)
+        export HOSTED_STACK_CONTAINER_HOST=$(ip route | awk '/^default/ {print $3}')
+        export COMPOSE_PROJECT_NAME=hosted-stack-$CI_JOB_ID
+        export HOSTED_STACK_POSTGRES_PORT=$((20000 + CI_JOB_ID % 5000))
+        export HOSTED_STACK_MINIO_PORT=$((25000 + CI_JOB_ID % 5000))
+        ;;
+      esac
+    - echo "DOCKER_HOST=${DOCKER_HOST:-unset} HOSTED_STACK_CONTAINER_HOST=${HOSTED_STACK_CONTAINER_HOST:-unset}"
     - docker info --format '{{.ServerVersion}}'
   script:
     - ./scripts/hosted-stack-smoke.sh dist "${CI_COMMIT_TAG:-$CI_COMMIT_SHORT_SHA}"
