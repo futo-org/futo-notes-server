@@ -1061,6 +1061,11 @@ paths:
         A subscription belongs to the FUTO account it was bought under and
         never moves: submitting it from another account answers `409`.
         Once its account is purged, the next account to submit it gets it.
+
+        A transaction without an `appAccountToken`, such as an offer-code
+        redemption, is accepted. If the server already knows its
+        subscription, it stays with its owner (`409` from any other
+        account); otherwise it binds to this account.
       requestBody:
         required: true
         content:
@@ -2257,9 +2262,10 @@ components:
     StoreSubscriptionOwnedElsewhere:
       description: |
         `store_subscription_owned_elsewhere`: the subscription belongs to
-        another FUTO account, and nothing changed. Tell the user this store
-        account's subscription belongs to another FUTO account: sign in with
-        that one, or subscribe on the web.
+        another FUTO account, and nothing changed. Tell the user: "This
+        store subscription belongs to another FUTO account. Sign in with that
+        account to use it." Do not point to the web: outside the US the store
+        rules forbid it.
       headers:
         X-Request-Id:
           $ref: "#/components/headers/RequestId"
