@@ -488,7 +488,12 @@ func (s *Server) handleDashboardDelete(w http.ResponseWriter, r *http.Request) {
 
 // handleDashboardRestore is the dashboard's POST /api/account/restore.
 func (s *Server) handleDashboardRestore(w http.ResponseWriter, r *http.Request) {
-	if err := s.accounts.Restore(r.Context(), principalFrom(r).Session.User.ID); err != nil {
+	err := s.accounts.Restore(r.Context(), principalFrom(r).Session.User.ID)
+	if errors.Is(err, account.ErrPurgeStarted) {
+		renderDashboardError(w, r, http.StatusConflict, "The grace period has ended and your account is being deleted. It can no longer be restored.")
+		return
+	}
+	if err != nil {
 		dashboardServerError(w, r, "restoring account", err)
 		return
 	}

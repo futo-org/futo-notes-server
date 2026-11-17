@@ -40,6 +40,11 @@ type GCResult struct {
 // in short transactions, then deletes their keys in each owner's region. The
 // row goes first: when the storage delete fails the key is unknown to the
 // ledger, and ReconcileOrphans deletes it once it is OrphanMinAge old.
+//
+// A purgeable row is kept until it was claimed more than
+// hostedauth.ReceiptTTL ago. The ledger row is what makes a receipt
+// single-use: dropped while the receipt is still valid, the same receipt
+// could claim the key again and point a new object at a deleted blob.
 func CollectBlobs(ctx context.Context, database *db.DB, storage *storageclient.Client) (GCResult, error) {
 	var result GCResult
 	for {
@@ -91,7 +96,8 @@ func purgeLedgerRows(ctx context.Context, database *db.DB) ([]ledgerRow, error) 
 	rows, err := database.QueryContext(ctx, `
 		WITH doomed AS (
 			SELECT blob_key FROM blob_ledger
-			WHERE (state = 'retained' AND state_changed_at < $2) OR state = 'purgeable'
+			WHERE (state = 'retained' AND state_changed_at < $2)
+			   OR (state = 'purgeable' AND created_at < $3)
 			ORDER BY blob_key
 			LIMIT $1
 			FOR UPDATE SKIP LOCKED
@@ -100,7 +106,7 @@ func purgeLedgerRows(ctx context.Context, database *db.DB) ([]ledgerRow, error) 
 			RETURNING b.blob_key, b.user_id
 		)
 		SELECT deleted.blob_key, coalesce(u.region_id, '') FROM deleted LEFT JOIN users u ON u.id = deleted.user_id`,
-		gcBatchSize, time.Now().Add(-jobs.RetainedBlobLifetime))
+		gcBatchSize, time.Now().Add(-jobs.RetainedBlobLifetime), time.Now().Add(-hostedauth.ReceiptTTL))
 	if err != nil {
 		return nil, err
 	}

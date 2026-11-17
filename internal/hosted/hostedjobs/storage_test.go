@@ -271,10 +271,11 @@ func TestBlobGCDeletesExpiredBlobsFromStorage(t *testing.T) {
 		state string
 		age   time.Duration
 	}{
-		"old retained":   {"retained", 366 * 24 * time.Hour},
-		"purgeable":      {"purgeable", 0},
-		"young retained": {"retained", 364 * 24 * time.Hour},
-		"old claimed":    {"claimed", 400 * 24 * time.Hour},
+		"old retained":    {"retained", 366 * 24 * time.Hour},
+		"old purgeable":   {"purgeable", hostedauth.ReceiptTTL + time.Hour},
+		"young purgeable": {"purgeable", hostedauth.ReceiptTTL - time.Hour},
+		"young retained":  {"retained", 364 * 24 * time.Hour},
+		"old claimed":     {"claimed", 400 * 24 * time.Hour},
 	} {
 		keys[name] = e.upload(userID)
 		e.ledger(userID, keys[name], row.state, row.age)
@@ -284,7 +285,11 @@ func TestBlobGCDeletesExpiredBlobsFromStorage(t *testing.T) {
 	if err != nil || result.RowsPurged < 2 || result.KeysDeleted < 2 || result.KeysFailed != 0 {
 		t.Fatalf("GC = %+v, %v", result, err)
 	}
-	for name, kept := range map[string]bool{"old retained": false, "purgeable": false, "young retained": true, "old claimed": true} {
+	for name, kept := range map[string]bool{
+		"old retained": false, "old purgeable": false,
+		"young retained": true, "old claimed": true,
+		"young purgeable": true, // its receipt may still be valid
+	} {
 		if e.stored(keys[name]) != kept || e.inLedger(keys[name]) != kept {
 			t.Fatalf("%s: stored %t, in ledger %t; want both %t", name, e.stored(keys[name]), e.inLedger(keys[name]), kept)
 		}
@@ -293,7 +298,7 @@ func TestBlobGCDeletesExpiredBlobsFromStorage(t *testing.T) {
 	// A storage failure leaves the key stored but forgotten by the ledger;
 	// reconciliation deletes it once it is old enough.
 	stranded := e.upload(userID)
-	e.ledger(userID, stranded, "purgeable", 0)
+	e.ledger(userID, stranded, "purgeable", hostedauth.ReceiptTTL+time.Hour)
 	e.store.deleteBudget.Store(0)
 	if _, err := hostedjobs.CollectBlobs(ctx, e.database, e.client); err == nil {
 		t.Fatal("GC with storage failing reported success")
