@@ -186,22 +186,25 @@ func (e *env) upload(token string, data []byte) response {
 	return e.do(http.MethodPost, "/blobs", token, bytes.NewReader(data), nil)
 }
 
-func (e *env) postJSON(path, token string, v any) response {
+// batch posts v as the body of POST /blobs/batch.
+func (e *env) batch(token string, v any) response {
 	e.t.Helper()
-	data, err := json.Marshal(v)
-	if err != nil {
-		e.t.Fatal(err)
-	}
-	return e.do(http.MethodPost, path, token, bytes.NewReader(data), map[string]string{"Content-Type": "application/json"})
+	return e.sendJSON(http.MethodPost, "/blobs/batch", token, v)
 }
 
-func (e *env) deleteJSON(path, token string, v any) response {
+// deleteBlobs sends v as the body of DELETE /internal/blobs.
+func (e *env) deleteBlobs(token string, v any) response {
+	e.t.Helper()
+	return e.sendJSON(http.MethodDelete, "/internal/blobs", token, v)
+}
+
+func (e *env) sendJSON(method, path, token string, v any) response {
 	e.t.Helper()
 	data, err := json.Marshal(v)
 	if err != nil {
 		e.t.Fatal(err)
 	}
-	return e.do(http.MethodDelete, path, token, bytes.NewReader(data), map[string]string{"Content-Type": "application/json"})
+	return e.do(method, path, token, bytes.NewReader(data), map[string]string{"Content-Type": "application/json"})
 }
 
 func specRouter(t *testing.T) routers.Router {

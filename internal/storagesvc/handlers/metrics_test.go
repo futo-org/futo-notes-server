@@ -29,7 +29,7 @@ func TestMetrics(t *testing.T) {
 	if resp := e.do(http.MethodGet, "/blobs/"+up.Key, e.access(userA), nil, nil); resp.status != http.StatusOK {
 		t.Fatalf("get: %d", resp.status)
 	}
-	e.postJSON("/blobs/batch", e.access(userA), map[string][]string{"keys": {up.Key, userA + "/" + uuid.NewV7().String()}})
+	e.batch(e.access(userA), map[string][]string{"keys": {up.Key, userA + "/" + uuid.NewV7().String()}})
 	expired, _, err := hostedauth.NewMinter(e.apiKey, hostedauth.WithClock(func() time.Time { return time.Now().Add(-48 * time.Hour) })).
 		MintAccess(testRegion, userA)
 	if err != nil {

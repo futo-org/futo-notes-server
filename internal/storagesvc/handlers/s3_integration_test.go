@@ -81,7 +81,7 @@ func TestS3EndToEnd(t *testing.T) {
 		t.Fatalf("absent: %d", resp.status)
 	}
 
-	resp = e.postJSON("/blobs/batch", token, map[string][]string{"keys": {up.Key, absent}})
+	resp = e.batch(token, map[string][]string{"keys": {up.Key, absent}})
 	frames := decodeFrames(t, resp.body)
 	if len(frames) != 2 || frames[0].Status != blobframe.OK || string(frames[0].Blob) != "0123456789" ||
 		frames[1].Status != blobframe.Missing {
@@ -93,7 +93,7 @@ func TestS3EndToEnd(t *testing.T) {
 		t.Fatalf("list: %+v", list)
 	}
 
-	resp = e.deleteJSON("/internal/blobs", e.admin(), map[string][]string{"keys": {up.Key, absent}})
+	resp = e.deleteBlobs(e.admin(), map[string][]string{"keys": {up.Key, absent}})
 	var deleted adminapi.DeleteBlobsResponse
 	resp.json(t, &deleted)
 	if deleted.Deleted != 2 || len(deleted.Failed) != 0 {

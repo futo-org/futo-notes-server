@@ -100,7 +100,7 @@ func (s *stack) login(t *testing.T, sub, userAgent string) *device {
 		} `json:"user"`
 	}
 	d.expectJSON(http.MethodPost, "/api/auth/oidc/token",
-		map[string]string{"code": back.Query().Get("code"), "code_verifier": verifier}, http.StatusOK, &session)
+		map[string]string{"code": back.Query().Get("code"), "code_verifier": verifier}, &session)
 	if session.Token == "" || session.StorageRefreshToken == "" || session.User.ID == "" {
 		t.Fatalf("token exchange returned %+v", session)
 	}
@@ -214,11 +214,11 @@ func (d *device) expect(what string, resp response, status int) {
 }
 
 // expectJSON calls an API path and decodes its body into out (nil to skip),
-// failing unless the status is status.
-func (d *device) expectJSON(method, path string, body any, status int, out any) {
+// failing unless the status is 200.
+func (d *device) expectJSON(method, path string, body, out any) {
 	d.t.Helper()
 	resp := d.api(method, path, body, "")
-	d.expect(method+" "+path, resp, status)
+	d.expect(method+" "+path, resp, http.StatusOK)
 	decode(d.t, resp, out)
 }
 

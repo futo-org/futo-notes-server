@@ -259,11 +259,11 @@ func TestBatchValidation(t *testing.T) {
 	}
 
 	// 128 characters is allowed even when it is more than 128 bytes.
-	resp := e.postJSON("/blobs/batch", token, map[string][]string{"keys": {strings.Repeat("é", blobframe.MaxKeyChars)}})
+	resp := e.batch(token, map[string][]string{"keys": {strings.Repeat("é", blobframe.MaxKeyChars)}})
 	if resp.status != http.StatusOK {
 		t.Fatalf("128-char key: status %d: %s", resp.status, resp.body)
 	}
-	resp = e.postJSON("/blobs/batch", token, map[string][]string{"keys": make([]string, blobframe.MaxKeys)})
+	resp = e.batch(token, map[string][]string{"keys": make([]string, blobframe.MaxKeys)})
 	if resp.status != http.StatusOK {
 		t.Fatalf("200 keys: status %d: %s", resp.status, resp.body)
 	}
@@ -277,7 +277,7 @@ func TestBatchFrameBytes(t *testing.T) {
 	e.store.put(own, []byte("abc"))
 	e.store.put(theirs, []byte("secret"))
 
-	resp := e.postJSON("/blobs/batch", e.access(userA), map[string][]string{"keys": {own, absent, theirs, "junk", own}})
+	resp := e.batch(e.access(userA), map[string][]string{"keys": {own, absent, theirs, "junk", own}})
 	if resp.status != http.StatusOK || resp.header.Get("Content-Type") != "application/octet-stream" {
 		t.Fatalf("status %d, Content-Type %q", resp.status, resp.header.Get("Content-Type"))
 	}
@@ -307,14 +307,14 @@ func TestBatchCapsThePayloadButAlwaysShipsTheFirstBlob(t *testing.T) {
 	e.store.putSynthetic(big, blobframe.MaxBatchBytes+1)
 	e.store.put(small, []byte("x"))
 
-	resp := e.postJSON("/blobs/batch", e.access(userA), map[string][]string{"keys": {big, small}})
+	resp := e.batch(e.access(userA), map[string][]string{"keys": {big, small}})
 	frames := decodeFrames(t, resp.body)
 	if len(frames) != 2 || frames[0].Status != blobframe.OK || len(frames[0].Blob) != blobframe.MaxBatchBytes+1 ||
 		frames[1].Status != blobframe.Omitted {
 		t.Fatalf("frames: %d, statuses %v", len(frames), statuses(frames))
 	}
 
-	resp = e.postJSON("/blobs/batch", e.access(userA), map[string][]string{"keys": {small, big, small}})
+	resp = e.batch(e.access(userA), map[string][]string{"keys": {small, big, small}})
 	frames = decodeFrames(t, resp.body)
 	if got := statuses(frames); !slices.Equal(got, []blobframe.Status{blobframe.OK, blobframe.Omitted, blobframe.OK}) {
 		t.Fatalf("statuses %v", got)
@@ -325,7 +325,7 @@ func TestBatchReportsBlobsOverTheUploadLimitMissing(t *testing.T) {
 	e := newEnv(t)
 	huge := userA + "/" + uuid.NewV7().String()
 	e.store.putSynthetic(huge, blobframe.MaxBlobBytes+1)
-	resp := e.postJSON("/blobs/batch", e.access(userA), map[string][]string{"keys": {huge}})
+	resp := e.batch(e.access(userA), map[string][]string{"keys": {huge}})
 	frames := decodeFrames(t, resp.body)
 	if len(frames) != 1 || frames[0].Status != blobframe.Missing {
 		t.Fatalf("statuses %v", statuses(frames))

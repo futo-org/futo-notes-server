@@ -35,7 +35,7 @@ func TestHostedScenario(t *testing.T) {
 		ID       string `json:"id"`
 		Endpoint string `json:"endpoint"`
 	}
-	phone.expectJSON(http.MethodGet, "/api/regions", nil, http.StatusOK, &regions)
+	phone.expectJSON(http.MethodGet, "/api/regions", nil, &regions)
 	if len(regions) != len(regionIDs) {
 		t.Fatalf("GET /api/regions listed %d regions, want %d", len(regions), len(regionIDs))
 	}
@@ -47,7 +47,7 @@ func TestHostedScenario(t *testing.T) {
 	if resp := phone.exchange(phone.refresh); resp.status != http.StatusConflict {
 		t.Fatalf("storage token before choosing a region: status %d, want 409: %s", resp.status, resp.body)
 	}
-	phone.expectJSON(http.MethodPut, "/api/account/region", map[string]string{"region_id": home}, http.StatusOK, nil)
+	phone.expectJSON(http.MethodPut, "/api/account/region", map[string]string{"region_id": home}, nil)
 	phone.expect("choosing a second region", phone.api(http.MethodPut, "/api/account/region",
 		map[string]string{"region_id": away}, ""), http.StatusConflict)
 
@@ -73,7 +73,7 @@ func TestHostedScenario(t *testing.T) {
 			Current   bool   `json:"current"`
 		} `json:"sessions"`
 	}
-	phone.expectJSON(http.MethodGet, "/api/sessions", nil, http.StatusOK, &sessions)
+	phone.expectJSON(http.MethodGet, "/api/sessions", nil, &sessions)
 	if len(sessions.Sessions) != 2 {
 		t.Fatalf("GET /api/sessions: %+v, want the phone and the laptop", sessions.Sessions)
 	}
@@ -106,7 +106,7 @@ func TestHostedScenario(t *testing.T) {
 	var pulled struct {
 		Objects []object `json:"objects"`
 	}
-	laptop.expectJSON(http.MethodGet, objectPath(collection, "")+"?sinceVersion=0", nil, http.StatusOK, &pulled)
+	laptop.expectJSON(http.MethodGet, objectPath(collection, "")+"?sinceVersion=0", nil, &pulled)
 	if len(pulled.Objects) != 1 || pulled.Objects[0].ID != created.Object.ID || *pulled.Objects[0].BlobKey != up1.Key {
 		t.Fatalf("pull returned %+v, want the created object", pulled.Objects)
 	}
@@ -240,7 +240,7 @@ func TestHostedScenario(t *testing.T) {
 			PurgeAt time.Time `json:"purge_at"`
 		} `json:"deletion"`
 	}
-	phone.expectJSON(http.MethodDelete, "/api/account", nil, http.StatusOK, &account)
+	phone.expectJSON(http.MethodDelete, "/api/account", nil, &account)
 	if account.Deletion == nil || time.Until(account.Deletion.PurgeAt) < 29*24*time.Hour {
 		t.Fatalf("account deletion %+v, want a purge about 30 days out", account.Deletion)
 	}
@@ -251,7 +251,7 @@ func TestHostedScenario(t *testing.T) {
 		t.Fatalf("sync while deletion is pending: %s", resp.body)
 	}
 	phone.expect("storage token while deletion is pending", phone.exchange(phone.refresh), http.StatusForbidden)
-	phone.expectJSON(http.MethodPost, "/api/account/restore", nil, http.StatusOK, &account)
+	phone.expectJSON(http.MethodPost, "/api/account/restore", nil, &account)
 	if account.Deletion != nil {
 		t.Fatalf("restore left deletion %+v", account.Deletion)
 	}
@@ -263,7 +263,7 @@ func TestHostedScenario(t *testing.T) {
 
 	// Delete again and let the grace period lapse: purge empties the
 	// storage prefix and removes every row.
-	phone.expectJSON(http.MethodDelete, "/api/account", nil, http.StatusOK, nil)
+	phone.expectJSON(http.MethodDelete, "/api/account", nil, nil)
 	s.exec(t, `UPDATE users SET purge_at = now() - interval '1 minute' WHERE id = $1`, phone.userID)
 	phone.expect("restore after the grace period", phone.api(http.MethodPost, "/api/account/restore", nil, ""), http.StatusConflict)
 	var purge hostedjobs.PurgeResult
@@ -296,7 +296,7 @@ func currentSession(d *device) string {
 			Current bool   `json:"current"`
 		} `json:"sessions"`
 	}
-	d.expectJSON(http.MethodGet, "/api/sessions", nil, http.StatusOK, &sessions)
+	d.expectJSON(http.MethodGet, "/api/sessions", nil, &sessions)
 	for _, session := range sessions.Sessions {
 		if session.Current {
 			return session.ID

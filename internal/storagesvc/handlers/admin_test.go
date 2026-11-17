@@ -22,7 +22,7 @@ func TestDeleteBlobs(t *testing.T) {
 	for _, k := range []string{a, b, kept} {
 		e.store.put(k, []byte("x"))
 	}
-	resp := e.deleteJSON("/internal/blobs", e.admin(), map[string][]string{"keys": {a, b, gone}})
+	resp := e.deleteBlobs(e.admin(), map[string][]string{"keys": {a, b, gone}})
 	if resp.status != http.StatusOK {
 		t.Fatalf("status %d: %s", resp.status, resp.body)
 	}
@@ -42,7 +42,7 @@ func TestDeleteBlobsReportsPerKeyFailures(t *testing.T) {
 	e.store.put(ok, []byte("x"))
 	e.store.put(stuck, []byte("x"))
 	e.store.deleteFail = map[string]bool{stuck: true}
-	resp := e.deleteJSON("/internal/blobs", e.admin(), map[string][]string{"keys": {ok, stuck}})
+	resp := e.deleteBlobs(e.admin(), map[string][]string{"keys": {ok, stuck}})
 	var body adminapi.DeleteBlobsResponse
 	resp.json(t, &body)
 	if resp.status != http.StatusOK || body.Deleted != 1 || len(body.Failed) != 1 || body.Failed[0].Key != stuck ||
@@ -80,7 +80,7 @@ func TestDeleteBlobsValidation(t *testing.T) {
 		t.Fatalf("huge body: status %d", resp.status)
 	}
 	exactly := tooMany[:adminapi.MaxDeleteKeys]
-	if resp := e.deleteJSON("/internal/blobs", e.admin(), map[string][]string{"keys": exactly}); resp.status != http.StatusOK {
+	if resp := e.deleteBlobs(e.admin(), map[string][]string{"keys": exactly}); resp.status != http.StatusOK {
 		t.Fatalf("1000 keys: status %d: %s", resp.status, resp.body)
 	}
 }

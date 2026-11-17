@@ -52,9 +52,9 @@ func mustKeySet(t *testing.T, keys ...SigningKey) KeySet {
 	return set
 }
 
-func mustVerifier(t *testing.T, keys KeySet, region string, now time.Time) *Verifier {
+func mustVerifier(t *testing.T, keys KeySet, now time.Time) *Verifier {
 	t.Helper()
-	v, err := NewVerifier(keys, region, fixedClock(now))
+	v, err := NewVerifier(keys, testRegion, fixedClock(now))
 	if err != nil {
 		t.Fatalf("new verifier: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestMintAccessVerifies(t *testing.T) {
 	if !exp.Equal(testNow.Add(AccessTokenTTL)) {
 		t.Errorf("expiry %v, want %v", exp, testNow.Add(AccessTokenTTL))
 	}
-	got, err := mustVerifier(t, mustKeySet(t, key), testRegion, testNow.Add(time.Hour)).VerifyAccess(token)
+	got, err := mustVerifier(t, mustKeySet(t, key), testNow.Add(time.Hour)).VerifyAccess(token)
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}
@@ -123,11 +123,11 @@ func TestMintAdminVerifies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
-	v := mustVerifier(t, mustKeySet(t, key), testRegion, testNow.Add(4*time.Minute))
+	v := mustVerifier(t, mustKeySet(t, key), testNow.Add(4*time.Minute))
 	if err := v.VerifyAdmin(token); err != nil {
 		t.Fatalf("verify: %v", err)
 	}
-	expired := mustVerifier(t, mustKeySet(t, key), testRegion, testNow.Add(AdminTokenTTL+clockSkew+time.Second))
+	expired := mustVerifier(t, mustKeySet(t, key), testNow.Add(AdminTokenTTL+clockSkew+time.Second))
 	if err := expired.VerifyAdmin(token); !errors.Is(err, jwt.ErrTokenExpired) {
 		t.Errorf("admin token past 5 min: got %v, want expired", err)
 	}
@@ -156,7 +156,7 @@ func TestVerifyAccessRejects(t *testing.T) {
 	other := mustKey(t, "api-1")
 	ecKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	pubPEM, _ := key.MarshalPublicPEM()
-	v := mustVerifier(t, mustKeySet(t, key), testRegion, testNow)
+	v := mustVerifier(t, mustKeySet(t, key), testNow)
 	signed := func(mutate func(jwt.MapClaims)) string {
 		c := accessClaims()
 		mutate(c)
@@ -206,7 +206,7 @@ func TestVerifyAccessRejects(t *testing.T) {
 func TestVerifyAdminRejects(t *testing.T) {
 	key := mustKey(t, "api-1")
 	m := NewMinter(key, fixedClock(testNow))
-	v := mustVerifier(t, mustKeySet(t, key), testRegion, testNow)
+	v := mustVerifier(t, mustKeySet(t, key), testNow)
 	access, _, err := m.MintAccess(testRegion, testUser)
 	if err != nil {
 		t.Fatalf("mint access: %v", err)
@@ -255,14 +255,14 @@ func TestRotation(t *testing.T) {
 		t.Fatalf("mint new: %v", err)
 	}
 
-	both := mustVerifier(t, mustKeySet(t, oldKey, newKey), testRegion, testNow)
+	both := mustVerifier(t, mustKeySet(t, oldKey, newKey), testNow)
 	for name, token := range map[string]string{"old": oldToken, "new": newToken} {
 		if _, err := both.VerifyAccess(token); err != nil {
 			t.Errorf("%s kid rejected while both are listed: %v", name, err)
 		}
 	}
 
-	newOnly := mustVerifier(t, mustKeySet(t, newKey), testRegion, testNow)
+	newOnly := mustVerifier(t, mustKeySet(t, newKey), testNow)
 	if _, err := newOnly.VerifyAccess(newToken); err != nil {
 		t.Errorf("new kid rejected: %v", err)
 	}
@@ -409,7 +409,7 @@ func TestReceiptIsNotAnAccessToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sign: %v", err)
 	}
-	v := mustVerifier(t, mustKeySet(t, key), testRegion, testNow)
+	v := mustVerifier(t, mustKeySet(t, key), testNow)
 	if _, err := v.VerifyAccess(receipt); !errors.Is(err, ErrInvalidToken) {
 		t.Errorf("receipt accepted as access token: %v", err)
 	}
