@@ -63,6 +63,16 @@ Removed on hosted (bytes go to storage instead): `POST /api/blobs`, `GET|DELETE
 Changed: object create and update take `"receipt": "<jwt>"` in place of a staged `blob_key`. The
 receipt names the key and the size. `size_bytes` in responses comes from the receipt.
 
+Added: **batch claim**, `POST /api/collections/{id}/objects/batch`, takes 1–200 entries, each
+`{mutation_id, object_id?, version?, receipt}`: a create without `object_id`, an update with it.
+Every entry runs exactly as the single create or update with that `Mutation-Id` and body would,
+in its own transaction, with its own replay (ADR 0002) and its own SSE `change`. So a retried batch
+replays the entries that have a result and runs the rest. The answer is `200
+{"results": [{"status", "body"}]}` in request order, where each result is the status and body the
+single call would have answered (409 conflicts, receipt codes and all). `mutation_id` is required
+here. Unknown fields, an empty or oversized batch (over 200 entries or 256 KiB), and another
+user's collection fail the whole request. It is gated like single writes (`requireActiveAccount`).
+
 Changed: vault key material (`GET|PUT /api/collections/{id}/key`) also carries an optional
 **recovery envelope**, the vault key wrapped under a recovery key: `recovery_key_salt`,
 `recovery_key_kdf` and `recovery_encrypted_vault_key`. They come all three or none (a partial set
@@ -167,7 +177,7 @@ and the region's receipt signing key.
 |---|---|---|
 | `POST /blobs` | access JWT | Body: ciphertext, up to 100 MiB, `Content-Length` required. The server mints the key `<sub>/<uuidv7>` and writes it with `If-None-Match: *`. Returns `201 {key, size, receipt}`. |
 | `GET /blobs/{userId}/{blobId}` | access JWT | `userId` must equal `sub`. Streams the bytes and supports Range. |
-| `POST /blobs/batch` | access JWT | Today's frame format and limits |
+| `POST /blobs/batch` | access JWT | `Content-Type: application/octet-stream`: **batch upload**, 1–200 frames `[u16 idLen][id][u32 blobLen][blob]` in at most 32 MiB. Each frame is stored as `POST /blobs` stores a body, and the answer is `200 {"results": [{"id", "status", "body"}]}`, in order, holding what that single upload would answer (`201 {key, size, receipt}`, or the error body with its `code`). Frames fail independently; malformed framing fails the request. Any other `Content-Type`: **batch fetch**, today's frame format and limits |
 | `DELETE /internal/blobs` | admin JWT | Deletes a list of keys. Already-gone keys are fine. |
 | `GET /internal/blobs?prefix=&older_than=` | admin JWT | Paged key listing, for reconciliation |
 | `DELETE /internal/users/{userId}` | admin JWT | Deletes a user's whole prefix |
@@ -225,13 +235,14 @@ storage stateless.
 
 ## Out of scope (v1)
 
-Quotas, billing, region migration, batch uploads, and the Notes client changes. Hosted needs these
-client changes, tracked separately:
+Quotas, billing, region migration, and the Notes client changes. Batch upload and claim were out
+of scope at first and came later, as `docs/Hosted launch plan.md` A6. Hosted needs these client
+changes, tracked separately:
 
 - OIDC login through the API
 - storage token refresh
 - direct upload and download
-- passing the receipt on create/update
+- passing the receipt on create/update, and batch upload and claim for a first sync
 - unlocking the E2EE vault key under SSO: passphrase, recovery key and QR pairing (decided; the
   server half, the recovery envelope and the pairing relay, is built: `docs/Hosted launch plan.md`
   B1 and B2)

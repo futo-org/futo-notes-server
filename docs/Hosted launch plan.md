@@ -11,7 +11,7 @@ Status:
 |---|---|---|
 | S1 | A1–A5, A7 | Done, in MR !34 |
 | S2 | B1, B2, D | Done, in the MR stacked on !34 (`feat/hosted-vault-unlock-test-stack`) |
-| S3 | A6 | Not started |
+| S3 | A6 | Done, stacked on the S2 MR. Storage batch upload shares `POST /blobs/batch` with batch fetch, chosen by `Content-Type` |
 | S4 | E | Not started |
 | S5 | C | Not started |
 
