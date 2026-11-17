@@ -25,6 +25,14 @@ test:go:
   services:
     - name: postgres:16@sha256:dd2bf3ce2dc83a81674cf7f217fcfd8a5009a4b325dda5b843bfee82a06cff6f
       alias: postgres
+    # Same image as compose.hosted.yml.
+    - name: cgr.dev/chainguard/minio@sha256:1ec745a06a986762f89e68e855fc189f403941eff8c0a5f94767e92c8e39d3f5
+      alias: minio
+      command: ["server", "/tmp/data"]
+      variables:
+        MINIO_ROOT_USER: minio
+        MINIO_ROOT_PASSWORD: miniominio
+        _MINIO_DRIVE_ACTIVE_MONITORING: "off"
   variables:
     POSTGRES_USER: futo_notes
     POSTGRES_PASSWORD: ci
@@ -36,11 +44,27 @@ test:go:
     SERVER_TEST_DATABASE_URL: postgres://futo_notes:ci@postgres:5432/server_test
     MIGRATION_TEST_DATABASE_URL: postgres://futo_notes:ci@postgres:5432/migration_test
     HOSTED_TEST_DATABASE_URL: postgres://futo_notes:ci@postgres:5432/hosted_test
+    HOSTED_E2E_DATABASE_URL: postgres://futo_notes:ci@postgres:5432/hosted_e2e
+    S3_TEST_ENDPOINT: http://minio:9000
+    S3_TEST_ACCESS_KEY_ID: minio
+    S3_TEST_SECRET_ACCESS_KEY: miniominio
+    S3_TEST_REGION: us-east-1
   before_script:
     - apt-get update && apt-get install -y --no-install-recommends postgresql-client
     - |
-      for db in objects_test events_test jobs_test blobs_test server_test migration_test hosted_test; do
+      for db in objects_test events_test jobs_test blobs_test server_test migration_test hosted_test hosted_e2e; do
         PGPASSWORD=ci createdb -h postgres -U futo_notes "$db"
+      done
+    # One bucket per storage region, created with a SigV4-signed PUT, so the
+    # job needs no MinIO client.
+    - |
+      for _ in $(seq 1 60); do
+        curl -sf "$S3_TEST_ENDPOINT/minio/health/ready" && break
+        sleep 1
+      done
+      for bucket in notes-us-east notes-eu-central notes-ap-southeast; do
+        curl -sSf -X PUT --aws-sigv4 "aws:amz:$S3_TEST_REGION:s3" \
+          --user "$S3_TEST_ACCESS_KEY_ID:$S3_TEST_SECRET_ACCESS_KEY" "$S3_TEST_ENDPOINT/$bucket"
       done
   script:
     - go test -race ./...
