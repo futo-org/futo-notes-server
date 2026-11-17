@@ -89,17 +89,14 @@ func buildOptions(opts []Option) options {
 
 // AccessToken is a verified access token.
 type AccessToken struct {
-	UserID    string
-	ExpiresAt time.Time
+	UserID string
 }
 
 // Receipt is a verified upload receipt.
 type Receipt struct {
-	Region    string
-	UserID    string
-	Key       string
-	Size      int64
-	ExpiresAt time.Time
+	UserID string
+	Key    string
+	Size   int64
 }
 
 type scopedClaims struct {
@@ -192,7 +189,7 @@ func (v *Verifier) VerifyAccess(token string) (AccessToken, error) {
 	if !ids.IsUserID(c.Subject) {
 		return AccessToken{}, invalid(errors.New("sub is not a UUID"))
 	}
-	return AccessToken{UserID: c.Subject, ExpiresAt: c.ExpiresAt.UTC()}, nil
+	return AccessToken{UserID: c.Subject}, nil
 }
 
 // VerifyAdmin checks an admin token.
@@ -303,7 +300,7 @@ func (v *ReceiptVerifier) Verify(token, region string) (Receipt, error) {
 	if c.Size == nil || *c.Size < 0 {
 		return Receipt{}, invalid(errors.New("missing or negative size"))
 	}
-	return Receipt{Region: region, UserID: c.Subject, Key: c.Key, Size: *c.Size, ExpiresAt: c.ExpiresAt.UTC()}, nil
+	return Receipt{UserID: c.Subject, Key: c.Key, Size: *c.Size}, nil
 }
 
 func sign(key SigningKey, claims jwt.Claims) (string, error) {

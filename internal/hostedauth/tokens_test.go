@@ -61,6 +61,17 @@ func mustVerifier(t *testing.T, keys KeySet, region string, now time.Time) *Veri
 	return v
 }
 
+// unverifiedClaims reads the registered claims of a token the test already
+// verified.
+func unverifiedClaims(t *testing.T, token string) jwt.RegisteredClaims {
+	t.Helper()
+	var claims jwt.RegisteredClaims
+	if _, _, err := jwt.NewParser().ParseUnverified(token, &claims); err != nil {
+		t.Fatalf("parse claims: %v", err)
+	}
+	return claims
+}
+
 func forge(t *testing.T, method jwt.SigningMethod, key any, kid string, claims jwt.MapClaims) string {
 	t.Helper()
 	tok := jwt.NewWithClaims(method, claims)
@@ -98,9 +109,11 @@ func TestMintAccessVerifies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}
-	want := AccessToken{UserID: testUser, ExpiresAt: testNow.Add(AccessTokenTTL)}
-	if got.UserID != want.UserID || !got.ExpiresAt.Equal(want.ExpiresAt) {
-		t.Errorf("got %+v, want %+v", got, want)
+	if got != (AccessToken{UserID: testUser}) {
+		t.Errorf("got %+v, want user %s", got, testUser)
+	}
+	if claims := unverifiedClaims(t, token); !claims.ExpiresAt.Equal(testNow.Add(AccessTokenTTL)) {
+		t.Errorf("exp %v, want %v", claims.ExpiresAt, testNow.Add(AccessTokenTTL))
 	}
 }
 
@@ -277,9 +290,12 @@ func TestReceiptRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}
-	want := Receipt{Region: testRegion, UserID: testUser, Key: blobKey, Size: 1234, ExpiresAt: testNow.Add(ReceiptTTL)}
+	want := Receipt{UserID: testUser, Key: blobKey, Size: 1234}
 	if got != want {
 		t.Errorf("got %+v, want %+v", got, want)
+	}
+	if claims := unverifiedClaims(t, token); claims.Issuer != testRegion || !claims.ExpiresAt.Equal(testNow.Add(ReceiptTTL)) {
+		t.Errorf("iss %q exp %v, want %q %v", claims.Issuer, claims.ExpiresAt, testRegion, testNow.Add(ReceiptTTL))
 	}
 	zero, err := signer.Sign(testUser, blobKey, 0)
 	if err != nil {

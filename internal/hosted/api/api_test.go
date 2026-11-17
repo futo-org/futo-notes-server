@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
+
 	"futo-notes-server/internal/events"
 	"futo-notes-server/internal/hosted/hostedtest"
 	"futo-notes-server/internal/hostedauth"
@@ -248,9 +250,13 @@ func TestRegionChoiceAndStorageTokens(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if access.UserID != tokens.User.ID || !access.ExpiresAt.Equal(issued.ExpiresAt) ||
-		time.Until(access.ExpiresAt) < 23*time.Hour {
-		t.Fatalf("access token = %#v, response expiry %v", access, issued.ExpiresAt)
+	var accessClaims jwt.RegisteredClaims
+	if _, _, err := jwt.NewParser().ParseUnverified(issued.AccessToken, &accessClaims); err != nil {
+		t.Fatal(err)
+	}
+	if access.UserID != tokens.User.ID || !accessClaims.ExpiresAt.Equal(issued.ExpiresAt) ||
+		time.Until(accessClaims.ExpiresAt.Time) < 23*time.Hour {
+		t.Fatalf("access token = %#v, exp %v, response expiry %v", access, accessClaims.ExpiresAt, issued.ExpiresAt)
 	}
 	if _, err := verifierFor("eu-central").VerifyAccess(issued.AccessToken); err == nil {
 		t.Fatal("access token opens another region")
