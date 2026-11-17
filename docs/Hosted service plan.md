@@ -7,6 +7,9 @@ it is, and its client contract is unchanged.
 Engineering conventions follow `~/src/backups`: chi, zerolog, env config, OTLP metrics, alpine
 images, a library chart plus app charts, and mise. Where this plan is silent, do what backups does.
 
+Operators: see [Hosted deployment](Hosted%20deployment.md). Local development:
+[DEVELOPMENT.md](DEVELOPMENT.md#hosted-development).
+
 ## Decisions
 
 | Topic | Decision |
@@ -34,7 +37,7 @@ images, a library chart plus app charts, and mise. Where this plan is silent, do
                          ┌──────────── API region ────────────┐
  app / browser ──HTTPS──▶│ api ×3 (chi, htmx dashboard, SSE)  │──▶ CNPG Postgres
        │                 │  OIDC ⇄ Zitadel                     │
-       │                 │  jobs (advisory-lock leader)        │──admin JWT──┐
+       │                 │  jobs (advisory lock, once/interval)│──admin JWT──┐
        │                 └─────────────────────────────────────┘             │
        │  access JWT (aud = region)                                          ▼
        └────────────────────────────▶ storage (us-east) ──▶ S3 bucket us-east/<user>/<blob>
@@ -60,7 +63,7 @@ Removed on hosted (bytes go to storage instead): `POST /api/blobs`, `GET|DELETE
 Changed: object create and update take `"receipt": "<jwt>"` in place of a staged `blob_key`. The
 receipt names the key and the size. `size_bytes` in responses comes from the receipt.
 
-Capability (`GET /`): `auth_mode: "oidc"`, `signup: "open"`, `billing: false`.
+Capability (`GET /`, still the JSON document): `auth_mode: "oidc"`, `signup: "open"`, `billing: false`.
 
 New endpoints:
 
@@ -83,8 +86,8 @@ pending deletion"}`. Only account, session, restore and logout keep working.
 
 ### Dashboard (htmx)
 
-Server-rendered `html/template` pages with a pinned, embedded htmx. Every action calls the same
-service code as the API endpoint it matches, so the two can't drift:
+Server-rendered `html/template` pages under `/dashboard`, with a pinned, embedded htmx. Every
+action calls the same service code as the API endpoint it matches, so the two can't drift:
 
 - sign in and sign out
 - choose a region (on first visit)
@@ -98,23 +101,32 @@ The dashboard uses the session cookie and CSRF tokens on state-changing requests
 
 - Postgres only. The existing Postgres migrations run, then a **hosted migration track** that
   self-hosted databases never see:
-  - `users.region_id` and `users.deletion_requested_at`
-  - `storage_refresh_tokens` (hash, `session_id` with cascade delete, created and last-used times)
-  - one-time OIDC codes
-- Migrations run in an `api migrate` subcommand, as a Helm post-install/upgrade hook Job (the
-  backups pattern). The API refuses to start if migrations are pending.
+  - `users.region_id`, `users.deletion_requested_at` and `users.purge_at`
+  - the `users.email` unique constraint is dropped: hosted users are keyed by `sub`, and the
+    identity provider owns email
+  - session device fields (created, last used, user agent)
+  - `storage_refresh_tokens` (hash, `session_id` with cascade delete, created, last-used and
+    rotated times)
+  - OIDC logins in flight and one-time app codes
+  - `hosted_job_runs` (below)
+- Migrations run in an `api migrate` subcommand, as a Helm **pre**-install/pre-upgrade hook Job.
+  Backups uses post-*, but here that would deadlock: the API refuses to start while migrations are
+  pending, and post-* hooks wait for the new pods to be Ready. Old pods serve during the upgrade,
+  so migrations must stay backward compatible for one release.
 - Blob ledger on hosted:
   - When an object claims a blob, the API verifies the receipt: region signature, `sub` is the
     caller, the region is the user's, the receipt hasn't expired, and the key isn't already in the
     ledger.
   - The API then inserts the ledger row directly as **claimed**. There is no staged state, because
     the API never sees uploads.
-  - retained, purgeable and GC work as they do today.
+  - retained and purgeable work as they do today. GC keeps a purgeable row until it was claimed
+    more than a receipt lifetime (24h) ago: the row is what makes a receipt single-use.
 
 ### Background jobs
 
-Every replica runs the scheduler. Each run first takes `pg_try_advisory_lock(job)`, so only one
-replica actually runs a given job.
+Every replica runs the scheduler. Each run first takes a transaction-scoped advisory lock for the
+job, then skips if the job started on any replica within about its interval (`hosted_job_runs`),
+so a job runs at most once per interval across the deployment.
 
 | Job | What it does |
 |---|---|
@@ -122,7 +134,7 @@ replica actually runs a given job.
 | mutation result expiry | as today |
 | blob GC | Deletes expired and purgeable ledger rows, then deletes their keys through the region's internal storage endpoint |
 | orphan reconciliation | Lists each region's keys older than 48h (receipts expire after 24h, which leaves a margin) and deletes keys the ledger doesn't know |
-| account purge | After the 30-day grace: deletes the user's rows, then purges their storage prefix (retried until it succeeds) |
+| account purge | After the 30-day grace: purges the user's storage prefix, then deletes their rows. Both are idempotent, and the account stays due until both succeed. |
 
 SSE works across replicas through the existing Postgres LISTEN/NOTIFY.
 
@@ -221,5 +233,6 @@ Each step lands on its own with tests, lint and the self-hosted contract gate gr
    mutations, hosted migrations
 5. Jobs: GC, reconciliation and account purge through storage, with advisory-lock leadership
 6. Dashboard and the parity endpoints
-7. OpenAPI specs and conformance tests, then an end-to-end compose scenario: log in, pick a
+7. OpenAPI specs and conformance tests, then an end-to-end scenario (`e2e/hosted`, real
+   `api`, `storage` ×3 and `mock-oidc` processes against Postgres and MinIO): log in, pick a
    region, get a token, upload, claim, sync to a second device, delete, GC

@@ -77,7 +77,8 @@ FUTO_SOAK_ENGINES='postgres sqlite' \
 
 ## Hosted development
 
-The hosted service (see [Hosted service plan](Hosted%20service%20plan.md)) uses
+The hosted service (see [Hosted service plan](Hosted%20service%20plan.md);
+operators: [Hosted deployment](Hosted%20deployment.md)) uses
 [mise](https://mise.jdx.dev) for tools and tasks; `mise tasks` lists them. None
 of this touches the self-hosted flows above.
 
@@ -191,6 +192,40 @@ The end-to-end client flow against a dev stack:
 The API's integration tests use `HOSTED_TEST_DATABASE_URL` (one database shared
 by every hosted package; `mise run test:integration` sets it) and run the OIDC
 flows against an in-process `mockoidc.StartTestServer`.
+
+With `DEV_UI=true` the API also serves job triggers, which run a storage job at
+once on that replica, outside its schedule and lock (the dev page has buttons
+for them):
+
+| Trigger | Runs |
+|---|---|
+| `POST /dev/jobs/blob-gc` | blob GC |
+| `POST /dev/jobs/account-purge` | account purge |
+| `POST /dev/jobs/reconciliation[?region=&user=&now=]` | orphan reconciliation, optionally in one region, under one user's prefix, and as of a later RFC 3339 `now` (S3 cannot backdate an upload) |
+
+### End-to-end scenario
+
+`e2e/hosted` builds `cmd/mock-oidc`, `cmd/storage` and `cmd/api`, runs them as
+subprocesses (three regions on loopback ports, the dev keys, a generated
+regions file, `api migrate` first), and drives the product over HTTP as a
+native app would. It covers app sign-in with PKCE, regions, storage tokens,
+upload and claim, a second device's SSE change, pull and downloads (single and
+batch), update, a 409 conflict, Mutation-Id replay, cross-region token
+rejection, device revocation, refresh-token reuse, account deletion, restore
+and purge, GC after the receipt window, and orphan reconciliation. Timestamps
+are shifted with SQL, and jobs run through the dev triggers. It runs when
+`HOSTED_E2E_DATABASE_URL` (a scratch database) and `S3_TEST_*` are set, as
+`mise run test:integration` and CI do:
+
+```bash
+HOSTED_E2E_DATABASE_URL=postgres://postgres:postgres@localhost:15432/hosted_e2e \
+S3_TEST_ENDPOINT=http://localhost:9000 S3_TEST_ACCESS_KEY_ID=minio \
+S3_TEST_SECRET_ACCESS_KEY=miniominio S3_TEST_REGION=us-east-1 \
+go test -count=1 -v ./e2e/hosted
+```
+
+On failure it prints the tail of every service's log. It removes its user's
+rows and S3 prefixes, and stops every process, when it ends.
 
 ### Dashboard
 
