@@ -85,8 +85,8 @@ func TestSignInRecordsTheProvidersAuthTime(t *testing.T) {
 	}
 	dashboard := h.client()
 	start := dashboard.do(http.MethodGet, "/api/auth/oidc/start?reauthenticate=true", nil)
-	expectHostedError(t, dashboard.do(http.MethodGet, dashboard.authorizeWith(start, sub, old), nil),
-		http.StatusForbidden, "reauthentication_required")
+	expectCallbackError(t, dashboard.do(http.MethodGet, dashboard.authorizeWith(start, sub, old), nil),
+		http.StatusForbidden, "did not confirm a fresh sign-in")
 
 	expectHostedError(t, h.client().do(http.MethodGet, "/api/auth/oidc/start?reauthenticate=yes", nil),
 		http.StatusBadRequest, "invalid_request")

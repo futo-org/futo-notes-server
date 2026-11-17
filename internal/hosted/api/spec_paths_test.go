@@ -239,7 +239,7 @@ func TestSpecSignInFailures(t *testing.T) {
 	// dashboard sign-in, invalid_request back to an app.
 	browser := h.client()
 	s := state(browser.do(http.MethodGet, "/api/auth/oidc/start", nil))
-	expectHostedError(t, browser.do(http.MethodGet, callback(url.Values{"state": {s}}), nil), http.StatusBadRequest, "sign_in_not_completed")
+	expectCallbackError(t, browser.do(http.MethodGet, callback(url.Values{"state": {s}}), nil), http.StatusBadRequest, "Sign-in was not completed")
 	browser = h.client()
 	s = state(browser.do(http.MethodGet, "/api/auth/oidc/start?"+url.Values{
 		"redirect_uri": {"http://127.0.0.1:43123/callback"}, "code_challenge": {challenge}, "state": {"app-state"},
@@ -252,15 +252,15 @@ func TestSpecSignInFailures(t *testing.T) {
 	// A code the provider rejects cannot complete the sign-in.
 	browser = h.client()
 	s = state(browser.do(http.MethodGet, "/api/auth/oidc/start", nil))
-	expectHostedError(t, browser.do(http.MethodGet, callback(url.Values{"state": {s}, "code": {"unknown-code"}}), nil),
-		http.StatusBadGateway, "provider_error")
+	expectCallbackError(t, browser.do(http.MethodGet, callback(url.Values{"state": {s}, "code": {"unknown-code"}}), nil),
+		http.StatusBadGateway, "could not be completed with the identity provider")
 
 	// The provider's error ends a dashboard sign-in here, and goes back to
 	// an app.
 	browser = h.client()
 	s = state(browser.do(http.MethodGet, "/api/auth/oidc/start", nil))
-	expectHostedError(t, browser.do(http.MethodGet, callback(url.Values{"state": {s}, "error": {"access_denied"}}), nil),
-		http.StatusBadRequest, "sign_in_not_completed")
+	expectCallbackError(t, browser.do(http.MethodGet, callback(url.Values{"state": {s}, "error": {"access_denied"}}), nil),
+		http.StatusBadRequest, "Sign-in was not completed")
 	browser = h.client()
 	s = state(browser.do(http.MethodGet, "/api/auth/oidc/start?"+url.Values{
 		"redirect_uri": {"http://127.0.0.1:43123/callback"}, "code_challenge": {challenge}, "state": {"app-state"},

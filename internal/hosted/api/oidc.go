@@ -167,13 +167,13 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{Name: stateCookie, Path: callbackPath, MaxAge: -1, HttpOnly: true, Secure: s.cfg.CookieSecure})
 	if err != nil || state == "" || subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(state)) != 1 {
 		s.metrics.login(r.Context(), false, loginInvalidState)
-		httputil.WriteError(w, r, http.StatusBadRequest, codeInvalidLoginState, "Invalid login state")
+		callbackError(w, r, http.StatusBadRequest, signInExpiredMessage)
 		return
 	}
 	login, err := s.accounts.TakeLogin(r.Context(), state)
 	if errors.Is(err, account.ErrUnknownLogin) {
 		s.metrics.login(r.Context(), false, loginInvalidState)
-		httputil.WriteError(w, r, http.StatusBadRequest, codeInvalidLoginState, "Invalid login state")
+		callbackError(w, r, http.StatusBadRequest, signInExpiredMessage)
 		return
 	}
 	if err != nil {
@@ -187,7 +187,7 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 			redirectApp(w, r, login, url.Values{"error": {providerError}})
 			return
 		}
-		httputil.WriteError(w, r, http.StatusBadRequest, codeSignInNotCompleted, "Sign-in was not completed: "+providerError)
+		callbackError(w, r, http.StatusBadRequest, signInNotCompletedMessage)
 		return
 	}
 	code := q.Get("code")
@@ -197,19 +197,19 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 			redirectApp(w, r, login, url.Values{"error": {"invalid_request"}})
 			return
 		}
-		httputil.WriteError(w, r, http.StatusBadRequest, codeSignInNotCompleted, "Sign-in was not completed: missing code")
+		callbackError(w, r, http.StatusBadRequest, signInNotCompletedMessage)
 		return
 	}
 	identity, err := s.identify(r.Context(), code, login)
 	if errors.Is(err, errNonceMismatch) {
 		s.metrics.login(r.Context(), login.ForApp(), loginInvalidState)
-		httputil.WriteError(w, r, http.StatusBadRequest, codeInvalidLoginState, "Invalid login state")
+		callbackError(w, r, http.StatusBadRequest, signInExpiredMessage)
 		return
 	}
 	if err != nil {
 		s.metrics.login(r.Context(), login.ForApp(), loginProviderError)
 		hlog.FromRequest(r).Error().Err(err).Msg("completing sign-in with the identity provider")
-		httputil.WriteError(w, r, http.StatusBadGateway, codeProviderError, "Could not complete sign-in with the identity provider")
+		callbackError(w, r, http.StatusBadGateway, "Sign-in could not be completed with the identity provider. Try again in a moment.")
 		return
 	}
 	authenticatedAt := identity.AuthTime
@@ -224,8 +224,8 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 			redirectApp(w, r, login, url.Values{"error": {codeReauthenticationRequired}})
 			return
 		}
-		httputil.WriteError(w, r, http.StatusForbidden, codeReauthenticationRequired,
-			"The identity provider did not confirm a fresh sign-in")
+		callbackError(w, r, http.StatusForbidden,
+			"The identity provider did not confirm a fresh sign-in, so your account was not deleted. Sign in again to delete it.")
 		return
 	}
 	user, err := s.signInUser(r.Context(), identity)
@@ -235,10 +235,7 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 			redirectApp(w, r, login, url.Values{"error": {codeSignupNotAllowed}})
 			return
 		}
-		// A person is in a browser here, so they get a page rather than JSON.
-		dashboardHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			renderDashboardError(w, r, http.StatusForbidden, "Sign-ups are limited to approved email domains.")
-		})).ServeHTTP(w, r)
+		callbackError(w, r, http.StatusForbidden, "Sign-ups are limited to approved email domains.")
 		return
 	}
 	if err != nil {
@@ -302,6 +299,19 @@ func (s *Server) signInUser(ctx context.Context, identity account.Identity) (aut
 		}
 	}
 	return s.accounts.UpsertUser(ctx, identity)
+}
+
+const (
+	signInExpiredMessage      = "This sign-in has expired or was already used. Sign in again."
+	signInNotCompletedMessage = "Sign-in was not completed. Sign in again to continue."
+)
+
+// callbackError ends a sign-in that cannot complete. A person reads it in
+// the browser the provider sent back, so it is a dashboard error page.
+func callbackError(w http.ResponseWriter, r *http.Request, status int, message string) {
+	dashboardHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		renderDashboardError(w, r, status, message)
+	})).ServeHTTP(w, r)
 }
 
 // identify swaps the provider's authorization code and returns who the

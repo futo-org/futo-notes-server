@@ -106,7 +106,7 @@ func TestCallbackRejectsBadState(t *testing.T) {
 	callback := browser.authorize(browser.do(http.MethodGet, "/api/auth/oidc/start", nil), h.newSub())
 
 	// Another browser holds no state cookie for this login.
-	expectHostedError(t, h.client().do(http.MethodGet, callback, nil), http.StatusBadRequest, "invalid_login_state")
+	expectCallbackError(t, h.client().do(http.MethodGet, callback, nil), http.StatusBadRequest, "expired or was already used")
 
 	tampered, err := url.Parse(callback)
 	if err != nil {
@@ -115,11 +115,11 @@ func TestCallbackRejectsBadState(t *testing.T) {
 	q := tampered.Query()
 	q.Set("state", "not-the-state")
 	tampered.RawQuery = q.Encode()
-	expectHostedError(t, browser.do(http.MethodGet, tampered.String(), nil), http.StatusBadRequest, "invalid_login_state")
+	expectCallbackError(t, browser.do(http.MethodGet, tampered.String(), nil), http.StatusBadRequest, "expired or was already used")
 
 	// The rejections above cleared this browser's state cookie, so the login
 	// can no longer complete here either.
-	expectHostedError(t, browser.do(http.MethodGet, callback, nil), http.StatusBadRequest, "invalid_login_state")
+	expectCallbackError(t, browser.do(http.MethodGet, callback, nil), http.StatusBadRequest, "expired or was already used")
 
 	// A successful callback cannot be replayed.
 	fresh := h.client()
@@ -127,7 +127,7 @@ func TestCallbackRejectsBadState(t *testing.T) {
 	if res := fresh.do(http.MethodGet, callback, nil); res.status != http.StatusSeeOther {
 		t.Fatalf("callback = %d %s", res.status, res.body)
 	}
-	expectHostedError(t, fresh.do(http.MethodGet, callback, nil), http.StatusBadRequest, "invalid_login_state")
+	expectCallbackError(t, fresh.do(http.MethodGet, callback, nil), http.StatusBadRequest, "expired or was already used")
 }
 
 func TestAppSignIn(t *testing.T) {

@@ -220,6 +220,17 @@ func expectRenderedError(t *testing.T, res response, status int) {
 	}
 }
 
+// expectCallbackError checks a sign-in callback that cannot complete: a
+// dashboard error page saying message, under the dashboard's headers.
+func expectCallbackError(t *testing.T, res response, status int, message string) {
+	t.Helper()
+	expectRenderedError(t, res, status)
+	if !strings.Contains(res.body, message) || !strings.HasPrefix(res.header.Get("Content-Type"), "text/html") ||
+		res.header.Get("Content-Security-Policy") != dashboardCSP || res.header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("callback error = %d %v %s, want a page saying %q", res.status, res.header, res.body, message)
+	}
+}
+
 // expectAlertFragment checks an htmx error: a fragment retargeted to the
 // alert region.
 func expectAlertFragment(t *testing.T, res response, status int, message string) {
