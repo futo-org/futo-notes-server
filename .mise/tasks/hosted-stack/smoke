@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+#MISE description="Build a release, start the hosted test stack from it, and run the client smoke test"
+#MISE dir="{{config_root}}"
+# Needs Docker. Uses the stack's default ports (3105, 3115-3117, 8192, 15532,
+# 19000), leaves nothing running, and builds into a temporary directory.
+set -euo pipefail
+
+out=$(mktemp -d)
+trap 'rm -rf "$out"' EXIT
+FUTO_RELEASE_DIR=$out scripts/build-release.sh smoke >/dev/null
+scripts/hosted-stack-smoke.sh "$out" smoke

@@ -198,6 +198,28 @@ build:binaries:
       - dist/
     expire_in: never
 
+# Starts the hosted test stack from this pipeline's release artifacts and
+# drives a client through it, as the apps' CI does. The launcher reaches the
+# Docker-in-Docker containers through DOCKER_HOST.
+test:hosted-stack:
+  extends: .skip-soak-schedule
+  stage: build
+  image: golang:1.27.4-alpine3.23@sha256:f70850ef6ce341e8b6427f677049145d63c0b7ce002d4d7e3d464828b1b96dcd
+  services:
+    - docker:27-dind
+  needs:
+    - job: build:binaries
+      artifacts: true
+  variables:
+    DOCKER_HOST: tcp://docker:2376
+    DOCKER_TLS_CERTDIR: /certs
+    DOCKER_TLS_VERIFY: "1"
+    DOCKER_CERT_PATH: /certs/client
+  before_script:
+    - apk add --no-cache bash curl docker-cli docker-cli-compose
+  script:
+    - ./scripts/hosted-stack-smoke.sh dist "${CI_COMMIT_TAG:-$CI_COMMIT_SHORT_SHA}"
+
 soak:staging:
   stage: test
   image: alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
@@ -365,8 +387,13 @@ publish:binaries:
     - job: build:binaries
       artifacts: true
     - job: test:adoption
+    - job: test:hosted-stack
   script:
     - PACKAGE_URL="$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/futo-notes-server/$CI_COMMIT_TAG"
-    - for file in dist/*; do curl --fail --header "JOB-TOKEN:$CI_JOB_TOKEN" --upload-file "$file" "$PACKAGE_URL/$(basename "$file")"; done
+    - for file in dist/futo-notes-server_*; do curl --fail --header "JOB-TOKEN:$CI_JOB_TOKEN" --upload-file "$file" "$PACKAGE_URL/$(basename "$file")"; done
+    # The hosted binaries and the test-stack bundle are a package of their
+    # own, so the self-hosted one keeps exactly its files.
+    - HOSTED_PACKAGE_URL="$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/futo-notes-hosted/$CI_COMMIT_TAG"
+    - for file in dist/hosted/*; do curl --fail --header "JOB-TOKEN:$CI_JOB_TOKEN" --upload-file "$file" "$HOSTED_PACKAGE_URL/$(basename "$file")"; done
   rules:
     - if: $CI_COMMIT_TAG
