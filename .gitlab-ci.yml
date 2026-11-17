@@ -204,27 +204,22 @@ build:binaries:
 test:hosted-stack:
   extends: .skip-soak-schedule
   stage: build
-  image: golang:1.27.4-alpine3.23@sha256:f70850ef6ce341e8b6427f677049145d63c0b7ce002d4d7e3d464828b1b96dcd
+  # The same image, service and TLS setting as the image jobs, whose
+  # entrypoint connects the client to the dind service; Go comes from apk,
+  # and GOTOOLCHAIN=auto fetches the version go.mod asks for.
+  image: docker:29@sha256:4bbc7223f81db790097c6dea42fb93e05b8fead4f0431fbe6ccaba6e8473201c
   services:
     - docker:29-dind@sha256:4bbc7223f81db790097c6dea42fb93e05b8fead4f0431fbe6ccaba6e8473201c
   needs:
     - job: build:binaries
       artifacts: true
   variables:
-    DOCKER_HOST: tcp://docker:2376
     DOCKER_TLS_CERTDIR: /certs
-    DOCKER_TLS_VERIFY: "1"
-    DOCKER_CERT_PATH: /certs/client
+    GOTOOLCHAIN: auto
   before_script:
-    - apk add --no-cache bash curl docker-cli docker-cli-compose
-    # Unlike the docker image's entrypoint, this image does not wait for the
-    # dind service to write its client certificates and start listening.
-    - |
-      for _ in $(seq 1 120); do
-        [ -f "$DOCKER_CERT_PATH/ca.pem" ] && docker info >/dev/null 2>&1 && break
-        sleep 1
-      done
-      docker info >/dev/null
+    - apk add --no-cache bash curl go
+    - echo "DOCKER_HOST=${DOCKER_HOST:-unset}"
+    - docker info --format '{{.ServerVersion}}'
   script:
     - ./scripts/hosted-stack-smoke.sh dist "${CI_COMMIT_TAG:-$CI_COMMIT_SHORT_SHA}"
 
