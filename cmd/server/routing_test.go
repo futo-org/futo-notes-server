@@ -401,6 +401,10 @@ func TestRoutingPinned(t *testing.T) {
 			expect(http.MethodConnect, "//health", "", muxNotFound)
 			expect(http.MethodConnect, "//api/auth", validToken, muxNotFound)
 			expect(http.MethodConnect, "/./health", "", muxNotFound)
+			expect(http.MethodConnect, "/%61pi", "", redirectTo(http.MethodConnect, "/%61pi/"))
+			// An authority-form target has an empty path, which matches only
+			// with the trailing slash added: the GET-only root.
+			expect(http.MethodConnect, "example.com:443", "", methodNotAllowed("GET, HEAD"))
 			for _, creds := range credentialCases {
 				expect(http.MethodConnect, "/api/../health", creds.bearer, creds.authenticated(apiNotFound))
 				expect(http.MethodConnect, "/api//auth", creds.bearer, creds.authenticated(apiNotFound))
