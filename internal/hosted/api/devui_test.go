@@ -17,6 +17,14 @@ func TestDevRoutesAbsentWithoutDevUI(t *testing.T) {
 		{http.MethodPost, "/dev/jobs/reconciliation"},
 		{http.MethodPost, "/dev/jobs/pairing-sweep"},
 		{http.MethodPost, "/dev/email/lapsed"},
+		{http.MethodGet, "/dev/billing/checkout"},
+		{http.MethodPost, "/dev/billing/checkout"},
+		{http.MethodGet, "/dev/billing/portal"},
+		{http.MethodPost, "/dev/billing/portal"},
+		{http.MethodPost, "/dev/billing/events/grant"},
+		{http.MethodPost, "/dev/billing/lapsed-at"},
+		{http.MethodPost, "/dev/jobs/billing-reconciliation"},
+		{http.MethodPost, "/dev/jobs/billing-lapses"},
 	} {
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, httptest.NewRequest(request.method, request.path, nil))

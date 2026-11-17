@@ -137,6 +137,32 @@ third note</textarea></div>
     </div>
   </section>
   <section class="card">
+    <h2>Billing</h2>
+    <p class="muted">With <code>BILLING_WEB_PROVIDER=mock</code> the web checkout and portal are pages of this API; completing one
+      sends a signed webhook through <code>/api/billing/webhooks/web</code>. Without a subscription, writes answer 402 and storage
+      tokens are read-only (exchange again after subscribing). Synthetic events act on the signed-in user's subscriptions directly:
+      grant adds a 30-day web one; lapse reports them expired; expire lets their paid period end with no news; refund revokes them.
+      Then run the lapse job to record the lapse, and move it back 83 days (warning) or 90 (purge); emails land in
+      <a href="http://localhost:8025">Mailpit</a>.</p>
+    <div class="row">
+      <button data-get="/api/billing">Billing state</button>
+      <button id="checkout-open">Open checkout</button>
+      <button id="checkout-complete">Complete a mock checkout now</button>
+      <button id="portal-open">Open portal</button>
+    </div>
+    <div class="row">
+      <button data-billing-event="grant">Grant</button>
+      <button data-billing-event="lapse">Lapse</button>
+      <button data-billing-event="expire">Expire</button>
+      <button data-billing-event="refund">Refund</button>
+    </div>
+    <div class="row">
+      <input id="lapse-days" value="83" style="min-width:60px;flex:0"><button id="lapse-back">Move lapse back (days)</button>
+      <button data-job="/dev/jobs/billing-lapses">Run lapse job</button>
+      <button data-job="/dev/jobs/billing-reconciliation">Run entitlement reconciliation</button>
+    </div>
+  </section>
+  <section class="card">
     <h2>Email</h2>
     <p class="muted">Renders a lapse email for the signed-in user, with the purge date it would carry if sent now, and sends it
       through the configured Resend (the mock in dev, which delivers to <a href="http://localhost:8025">Mailpit</a>).
@@ -154,6 +180,8 @@ third note</textarea></div>
     <div class="row">
       <button data-job="/dev/jobs/blob-gc">Blob GC</button>
       <button data-job="/dev/jobs/account-purge">Account purge</button>
+      <button data-job="/dev/jobs/billing-reconciliation">Entitlement reconciliation</button>
+      <button data-job="/dev/jobs/billing-lapses">Subscription lapses</button>
     </div>
     <div class="row">
       <input id="reconcile-user" placeholder="user id (optional)"><input id="reconcile-now" placeholder="now (optional)">
@@ -222,6 +250,24 @@ async function loadRegions() {
 }
 document.querySelectorAll("[data-get]").forEach((b) => b.onclick = () => call("GET", b.dataset.get));
 document.querySelectorAll("[data-job]").forEach((b) => b.onclick = () => call("POST", b.dataset.job));
+document.querySelectorAll("[data-billing-event]").forEach((b) => b.onclick = () => call("POST", "/dev/billing/events/" + b.dataset.billingEvent));
+$("lapse-back").onclick = () => call("POST", "/dev/billing/lapsed-at?days=" + encodeURIComponent($("lapse-days").value.trim()));
+$("checkout-open").onclick = async () => {
+  const res = await call("POST", "/api/billing/checkout");
+  if (res.status === 200) window.open(res.body.url, "_blank");
+};
+$("checkout-complete").onclick = async () => {
+  const res = await call("POST", "/api/billing/checkout");
+  if (res.status !== 200) return;
+  const target = new URL(res.body.url);
+  const done = await fetch(target.pathname, { method: "POST", body: target.searchParams });
+  if (!done.ok) return show(done.status, await done.text());
+  call("GET", "/api/billing");
+};
+$("portal-open").onclick = async () => {
+  const res = await call("GET", "/api/billing/portal");
+  if (res.status === 200) window.open(res.body.url, "_blank");
+};
 document.querySelectorAll("[data-email]").forEach((b) => b.onclick = () => call("POST", "/dev/email/" + b.dataset.email));
 $("reconcile").onclick = () => {
   const q = new URLSearchParams();
