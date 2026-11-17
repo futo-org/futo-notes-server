@@ -12,12 +12,16 @@ Status: **planned, not started.** Nothing below is built.
 | Topic | Decision |
 |---|---|
 | Vault unlock under SSO | A **vault passphrase**, separate from the Zitadel login, **plus a recovery key and QR device pairing**. The apps already implement all three. The server adds what the recovery key and pairing need (B1, B2). |
-| Redirect scheme | Apps sign in through the custom scheme `tech.futo.notes`. Desktop uses a loopback redirect (always allowed). |
+| Redirect scheme | Release apps sign in through `tech.futo.notes`, dev builds through `tech.futo.notes.dev`. Desktop uses a loopback redirect (always allowed). |
 | Hostnames | Prod `https://notes.futo.cloud`, staging `https://notes-staging.apps.futo.network`. |
 | Payment providers | **Pluggable.** The web provider (FUTOpay, Polar or Stripe) is not chosen yet. App Store and Play are providers behind the same interface. |
 | Store rails | Web, App Store and Play subscriptions **all ship at launch**. |
-| Price | One flat plan: **$5/month** on the web, **+15% in the stores** (about $5.75, pending confirmation). |
-| Lapse | The account turns **read-only** (writes get 402) and is **purged after N days**. N is still open. |
+| Price | One flat plan: **$5/month** on the web, **$5.75/month** in the App Store and Play. |
+| Lapse | The account turns **read-only** (writes get 402) and is **purged 90 days** after it lapses. |
+| Lapse and purge emails | Sent by a new mail sender with a **Resend** driver (E). |
+| Family Sharing | **Off** for the App Store subscription. |
+| Account deletion | Requires a **recent sign-in** (A7). |
+| One store account, two FUTO accounts | The subscription stays with the account it was bought under (C1). |
 | Client CI | The server **releases the hosted binaries plus a compose bundle** the apps' test harness can start. |
 
 ## A. Contract fixes before MR !34 merges
@@ -76,11 +80,10 @@ the token request, which is the Rust HTTP client's (`reqwest/…`).
 
 ### A5. Redirect schemes
 
-- Set `appRedirectSchemes: [tech.futo.notes]` in the chart's prod and staging
-  values, and `APP_REDIRECT_SCHEMES=tech.futo.notes` in `compose.hosted.yml` and
-  the mise dev tasks.
-- Open: does a dev build use its own scheme (for example `tech.futo.notes.dev`)
-  so dev and release apps installed side by side don't collide?
+- Release apps use `tech.futo.notes`. Dev builds use `tech.futo.notes.dev`, so
+  dev and release apps installed side by side never claim each other's redirects.
+- Prod values allow `tech.futo.notes`. Staging values and the dev stack
+  (`compose.hosted.yml`, the mise dev tasks) allow both.
 - Claimed `https` app links stay refused for now.
 
 ### A6. Batch upload and batch claim
@@ -104,8 +107,14 @@ batched entry and the equivalent single call give the same outcome.
 
 - The hosted key `PUT` rejects unknown fields (strict decode), so an older
   client cannot store half of an envelope it believes was saved.
-- `DELETE /api/account` with an old session: require a session that signed in
-  within the last N minutes, or accept any session. Open.
+- **Account deletion requires a recent sign-in.**
+  - Sessions record when their OIDC sign-in happened (`auth_time`).
+  - `DELETE /api/account` and the dashboard's delete need a sign-in within the last
+    10 minutes. Otherwise they answer `403` with code `reauthentication_required`.
+  - The app and the dashboard then sign in again with `max_age=0`, which forces
+    the provider to ask for credentials, and retry.
+  - `POST /api/auth/oidc/start` gains an optional `reauthenticate=true` to pass
+    that through.
 
 ## B. Vault unlock support
 
@@ -165,6 +174,26 @@ GET  /api/pairings/{id}                                             → 202 | 20
 - **Store binding.** `users.store_account_token`, a UUID, is passed to StoreKit as
   `appAccountToken` and to Play as `obfuscatedAccountId`. That binds a store
   purchase to the account without exposing the OIDC `sub`.
+- **One store account, two FUTO accounts.** A store subscription belongs to the
+  FUTO account it was bought under, matched by its token and its
+  `original_transaction_id` or purchase token.
+  - **What happens when a second FUTO account shows up.** Someone signs in to a
+    second FUTO account on the same Apple ID or Google account:
+    - The store treats the subscription as already owned and will not sell a
+      second one to that store account.
+    - Submitting it, or "Restore Purchases", answers `409`
+      `store_subscription_owned_elsewhere`. The server never moves it.
+    - The app says: "This Apple ID's (Google account's) subscription belongs to
+      another FUTO account. Sign in with that account, or subscribe on the web."
+      It does not name the other account.
+  - **Why not move it automatically.** Moving on restore would let anyone holding
+    a shared store login take a subscription away from its owner, and Apple
+    cannot change an `appAccountToken` after purchase anyway.
+  - **When it can move.**
+    - Support can move one with an admin action. The server just re-points the
+      entitlement row.
+    - Once the owning account is purged, the binding is released, so the next
+      account to submit that subscription gets it.
 - **Dedup.** `billing_deliveries (source, delivery_id)` deduplicates webhooks.
 
 ### C2. Pluggable providers
@@ -223,12 +252,16 @@ The capability document's `billing` becomes `true`.
 ### C5. Lapse and retention
 
 - A lapsed account stays read-only.
-- After N days with no entitlement, the existing purge removes it. The purge
-  first cancels any web or Play subscription it still finds.
+- 90 days after it lapses, the existing purge removes it. The purge first cancels
+  any web or Play subscription it still finds.
+- Resubscribing at any point before the purge ends the countdown.
+- Emails (E):
+  - when the account lapses;
+  - 7 days before the purge;
+  - when the purge is done.
 - `DELETE /api/account` cancels web and Play subscriptions at the end of the
   period. Apple subscriptions cannot be cancelled from the server, so the app
   tells the user how to cancel one.
-- Open: who emails users before a purge? The API has no mail sender.
 
 ### C6. Jobs
 
@@ -237,7 +270,7 @@ All jobs run under `hostedjobs.locked`:
 - **Entitlement reconciliation**, every 6 h: rows expiring within 24 h, or with
   no provider news for 7 days, are refreshed from the provider.
 - **Delivery-log pruning** after 30 days.
-- **Lapse purge** after N days.
+- **Lapse purge** 90 days after lapse, sending the emails in E on the way.
 
 ### C7. Config
 
@@ -261,14 +294,38 @@ outbound and inbound network paths these need.
 - **Sign-in in tests.** Test sign-ins use the mock issuer's `/test/authorize?sub=`
   shortcut, which replaces the old stand-in mode.
 
+## E. Email
+
+The API gains a mail sender, modelled on Backups (`~/src/backups/docs/email.md`):
+
+- **Interface.** A `Mailer` interface with a **Resend** driver (`POST /emails` over
+  `net/http`). It stamps the `From` address and a category tag.
+- **Templates.** Go `html/template` and `text/template` files, embedded. Each email
+  is `{subject, html, text}`.
+- **Config.**
+  - `RESEND_API_KEY` (secret).
+  - `RESEND_API_URL`, `https://api.resend.com` by default.
+  - `EMAIL_FROM_ADDRESS`, for example `FUTO Notes <noreply@notes.futo.cloud>` (the
+    domain is to confirm).
+- **Without a key** the sender logs and skips every send, so environments that don't
+  care about email keep working.
+- **Dev.** A mock Resend server delivers into Mailpit, both in `compose.hosted.yml`,
+  so nothing leaves the machine. Tests assert through Mailpit's API.
+- **No duplicate sends.** Each email has a stamp on the user
+  (`lapse_notified_at`, `purge_warned_at`, `purge_notified_at`), set only after the
+  send succeeds, so a retried job never sends twice.
+- **Recipient.** The address comes from the ID token's `email` claim, refreshed at
+  every sign-in.
+
 ## Order
 
 1. **A1–A5, A7.** These fixes and B unblock the apps' sign-in and transport work.
 2. **B1, B2.** Recovery envelope and pairing.
 3. **D.** Lets the apps' CI run against the real hosted stack.
 4. **A6.** Batch upload and batch claim.
-5. **C.** Billing with all three providers. This gates the launch, since every
-   rail ships at once.
+5. **C, E.** Billing with all three providers, and the mail sender its lapse emails
+   need. This gates the launch, since every rail ships at once. The web adapter
+   waits until the web provider is chosen.
 
 Each step carries the OpenAPI changes, conformance tests and `/dev` demos, and
 passes the existing gates. The self-hosted contract stays byte-identical
@@ -276,12 +333,6 @@ throughout.
 
 ## Open questions
 
-1. Retention after lapse: how many days (N) before the purge?
-2. Store price: confirm that "+15%" means about $5.75 per month.
-3. Does a dev build use its own redirect scheme?
-4. Should `DELETE /api/account` require a recent sign-in?
-5. Who sends lapse and purge emails?
-6. Family Sharing on the App Store subscription; refunds revoking access at once.
-7. One Apple ID or Google account bound to two FUTO accounts: refuse with 409, or
-   allow re-pointing?
-8. The web provider: FUTOpay, Polar or Stripe. The design does not depend on it.
+1. The web provider: FUTOpay, Polar or Stripe. To be decided later; the design does
+   not depend on it.
+2. The `From` domain for email.
