@@ -97,6 +97,8 @@ const (
 	// loginNotReauthenticated is a reauthentication the provider answered
 	// with a stale auth_time.
 	loginNotReauthenticated = "not_reauthenticated"
+	// loginSignupNotAllowed is a new account ALLOWED_EMAIL_DOMAINS refused.
+	loginSignupNotAllowed = "signup_not_allowed"
 )
 
 func (m *Metrics) login(ctx context.Context, app bool, outcome string) {

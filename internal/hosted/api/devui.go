@@ -31,6 +31,18 @@ func handleDevUI(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write(devUIHTML)
 }
 
+// devSignup is whether ALLOWED_EMAIL_DOMAINS restricts who can sign up. It
+// leaves the domains out, as the refusal does.
+type devSignup struct {
+	Restricted bool `json:"restricted"`
+}
+
+// handleDevSignup serves GET /dev/signup, for /dev to show whether a new
+// account can be refused.
+func (s *Server) handleDevSignup(w http.ResponseWriter, r *http.Request) {
+	httputil.WriteJSON(w, r, http.StatusOK, devSignup{Restricted: len(s.cfg.AllowedEmailDomains) > 0})
+}
+
 // devJobRoutes mounts POST /dev/jobs/*, which run a storage job or the
 // pairing sweep (and, in devBillingRoutes, a billing job) at once on this
 // replica, outside the schedule, its advisory

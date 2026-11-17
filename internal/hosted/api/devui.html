@@ -34,6 +34,7 @@
       open this page at <code>http://127.0.0.1:&lt;port&gt;/dev</code> for it, since only loopback IPs are allowed redirect targets.
       Deleting the account needs a sign-in within 10 minutes; "sign in again" sends <code>max_age=0</code> to the provider
       (the dashboard one refreshes this browser's session and returns to <a href="/dashboard/delete">delete</a>).</p>
+    <p>Sign-up: <span id="signup">checking…</span></p>
     <div class="row">
       <a href="/api/auth/oidc/start">Dashboard sign-in</a>
       <a href="/dashboard">Open dashboard</a>
@@ -249,6 +250,13 @@ async function refreshWho() {
     ? "current " + short(store.getItem("refresh")) + ", previous " + short(store.getItem("refresh-prev"))
     : "no refresh token (app sign-in only)";
 }
+async function loadSignup() {
+  const res = await fetch("/dev/signup");
+  $("signup").textContent = !res.ok ? "unknown (" + res.status + ")"
+    : (await res.json()).restricted
+      ? "restricted by ALLOWED_EMAIL_DOMAINS: a new account needs a verified email at a listed domain (tick \"Email not verified\" on the mock sign-in form to try a refusal); existing users always sign in"
+      : "open to everyone (ALLOWED_EMAIL_DOMAINS is empty)";
+}
 async function loadRegions() {
   const res = await fetch("/api/regions");
   for (const r of await res.json()) $("region").add(new Option(r.name + " (" + r.id + ")", r.id));
@@ -398,6 +406,7 @@ $("batch-claim").onclick = () => {
 $("batch-retry").onclick = () => lastClaim ? claimBatch() : show(400, "claim a batch first");
 $("list").onclick = () => call("GET", "/api/collections/" + $("collection").value + "/objects");
 loadRegions();
+loadSignup();
 finishAppLogin().then(refreshWho);
 </script>
 </body>

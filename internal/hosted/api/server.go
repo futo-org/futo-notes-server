@@ -174,6 +174,7 @@ func (s *Server) router() chi.Router {
 	s.dashboardRoutes(r)
 	if s.cfg.DevUI {
 		r.Get("/dev", handleDevUI)
+		r.Get("/dev/signup", s.handleDevSignup)
 		s.devJobRoutes(r)
 		r.With(s.authenticate(hostedErrors)).Post("/dev/email/{template}", s.handleDevEmail)
 		s.devBillingRoutes(r)

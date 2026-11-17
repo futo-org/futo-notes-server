@@ -86,7 +86,7 @@ info:
     cookie and CSRF tokens; every state-changing page calls the same service
     code as the JSON operation it matches) and, when `DEV_UI` is set, a
     manual test page at `/dev` with its `/dev/jobs/*`, `/dev/email/*` and
-    `/dev/billing/*` triggers, and the mock web payment provider's checkout
+    `/dev/billing/*` triggers and its `/dev/signup` status, and the mock web payment provider's checkout
     and portal pages under `/dev/billing`. With Stripe as the web provider,
     the dashboard mounts its embedded checkout in place, and
     `/billing/checkout/{token}` is the page an app's checkout link opens.
@@ -111,6 +111,7 @@ x-internal-routes:
   - GET /billing/checkout/{token}
   - POST /billing/checkout/{token}/session
   - GET /dev
+  - GET /dev/signup
   - POST /dashboard/delete
   - POST /dashboard/devices/{id}/revoke
   - POST /dashboard/region
@@ -324,6 +325,13 @@ paths:
         API swaps the provider's code, verifies the ID token and its nonce,
         and upserts the user by `sub`.
 
+        With `ALLOWED_EMAIL_DOMAINS` set, only a `sub` that already has an
+        account, or an ID token with `email_verified: true` and an email
+        whose domain (after the last `@`, any case) is exactly one of those
+        listed, may sign in; anything else would create a new account and is
+        refused with `signup_not_allowed`, creating no account and issuing no
+        session. Existing accounts always sign in.
+
         A login is single-use: replaying a callback answers `400`.
       parameters:
         - name: state
@@ -347,10 +355,11 @@ paths:
           description: |
             App sign-in: to the app's `redirect_uri` with `code` (one-time,
             for `POST /api/auth/oidc/token`), the provider's `error`,
-            `error=invalid_request` when the provider sent neither, or
+            `error=invalid_request` when the provider sent neither,
             `error=reauthentication_required` when a `reauthenticate=true`
-            sign-in came back with a stale `auth_time`, plus the app's
-            `state`.
+            sign-in came back with a stale `auth_time`, or
+            `error=signup_not_allowed` when `ALLOWED_EMAIL_DOMAINS` refuses
+            a new account, plus the app's `state`.
           headers:
             Location:
               $ref: "#/components/headers/Location"
@@ -388,9 +397,12 @@ paths:
                 $ref: "#/components/schemas/HostedError"
         "403":
           description: |
-            `reauthentication_required`: a dashboard `reauthenticate=true`
-            sign-in came back with an `auth_time` older than 10 minutes, so
-            the provider did not confirm a fresh sign-in
+            Dashboard sign-in only. `reauthentication_required` (JSON): a
+            `reauthenticate=true` sign-in came back with an `auth_time` older
+            than 10 minutes, so the provider did not confirm a fresh sign-in.
+            Or `signup_not_allowed` (an HTML page in the dashboard's style
+            saying "Sign-ups are limited to approved email domains.", without
+            the domains): `ALLOWED_EMAIL_DOMAINS` refuses a new account.
           headers:
             X-Request-Id:
               $ref: "#/components/headers/RequestId"
@@ -400,6 +412,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HostedError"
+            text/html: {}
         "500":
           $ref: "#/components/responses/HostedServerError"
         "502":
@@ -2408,6 +2421,7 @@ components:
         | `region_already_chosen` | 409 | The region is fixed |
         | `purge_started` | 409 | The account can no longer be restored |
         | `reauthentication_required` | 403 | Sign in again with `reauthenticate=true` first |
+        | `signup_not_allowed` | 403 | `ALLOWED_EMAIL_DOMAINS` does not admit a new account with this email (the sign-in callback's HTML page or app redirect error; never a JSON body) |
         | `not_found` | 404 | No such route, session or pairing |
         | `pairing_already_keyed` | 409 | A key was already posted to this pairing |
         | `already_subscribed` | 409 | A subscription already entitles the account |
@@ -2436,6 +2450,7 @@ components:
         - region_already_chosen
         - purge_started
         - reauthentication_required
+        - signup_not_allowed
         - not_found
         - pairing_already_keyed
         - already_subscribed
