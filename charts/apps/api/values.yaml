@@ -77,6 +77,11 @@ oidcClientId: notes-dev
 # http: the release apps' tech.futo.notes. Staging adds the dev builds'
 # tech.futo.notes.dev (docs/Hosted deployment.md); prod must not.
 appRedirectSchemes: [tech.futo.notes]
+# Email domains new accounts may sign up with, matched exactly (list each
+# subdomain itself), e.g. [futo.org, futo.tech]; a new account also needs a
+# verified email. Empty lets anyone sign up. Existing users always sign in
+# (docs/Hosted deployment.md).
+allowedEmailDomains: []
 
 # Where and as whom the API sends email (the lapse and purge notices). Without
 # RESEND_API_KEY in the Secret every send is logged and skipped, as in dev.
