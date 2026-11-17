@@ -104,7 +104,9 @@ func (s *Server) router() chi.Router {
 		hlog.UserAgentHandler("user_agent"),
 		hlog.AccessHandler(httputil.LogAccess),
 		s.metrics.http.Middleware,
-		syncapi.RecoverPanic,
+		syncapi.RecoverPanicWith(func(w http.ResponseWriter, r *http.Request) {
+			httputil.WriteError(w, r, http.StatusInternalServerError, "Internal server error")
+		}),
 		chimw.GetHead,
 	)
 	r.NotFound(func(w http.ResponseWriter, r *http.Request) {
@@ -123,7 +125,8 @@ func (s *Server) router() chi.Router {
 		api.Post("/storage/token", s.handleStorageToken)
 
 		api.Group(func(sync chi.Router) {
-			sync.Use(s.authenticate(syncErrors))
+			// Panics on sync routes answer with the sync contract's 500 body.
+			sync.Use(syncapi.RecoverPanic, s.authenticate(syncErrors))
 			sync.Post("/auth/logout", syncapi.HandleLogout(s.database))
 			sync.Group(func(gated chi.Router) {
 				gated.Use(requireActiveAccount)

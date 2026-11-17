@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -127,5 +128,19 @@ func TestRequestMetricsUseRoutePatterns(t *testing.T) {
 		if counts[key] != n {
 			t.Fatalf("request counts = %v, want %v", counts, want)
 		}
+	}
+}
+
+func TestPanicAnswersWithHostedError(t *testing.T) {
+	server := newOfflineServer(t, sdkmetric.NewManualReader())
+	rec := httptest.NewRecorder()
+	server.HandlerWithPanic().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/test-panic", nil))
+	var body errorBody
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("panic body %q: %v", rec.Body, err)
+	}
+	if rec.Code != http.StatusInternalServerError || body.StatusCode != http.StatusInternalServerError ||
+		body.Message != "Internal server error" || body.RequestID == "" || rec.Header().Get("Connection") != "close" {
+		t.Fatalf("panic = %d %v %s, want a hosted 500 that closes the connection", rec.Code, rec.Header(), rec.Body)
 	}
 }

@@ -46,27 +46,36 @@ func ServerError(w http.ResponseWriter, r *http.Request, action string, err erro
 }
 
 // RecoverPanic turns a handler panic into a logged generic 500 that closes the
-// connection. http.ErrAbortHandler is re-panicked so the server aborts the
-// response as intended.
+// connection, with the sync contract's error body. http.ErrAbortHandler is
+// re-panicked so the server aborts the response as intended.
 func RecoverPanic(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer func() {
-			panicValue := recover()
-			if panicValue == nil {
-				return
-			}
-			if err, ok := panicValue.(error); ok && errors.Is(err, http.ErrAbortHandler) {
-				panic(panicValue)
-			}
-			hlog.FromRequest(r).Error().
-				Str(zerolog.ErrorFieldName, fmt.Sprint(panicValue)).
-				Str("method", r.Method).
-				Str("path", r.URL.Path).
-				Str("stack", string(debug.Stack())).
-				Msg("panic")
-			w.Header().Set("Connection", "close")
-			WriteError(w, http.StatusInternalServerError, "internal server error")
-		}()
-		next.ServeHTTP(w, r)
-	})
+	return RecoverPanicWith(func(w http.ResponseWriter, _ *http.Request) {
+		WriteError(w, http.StatusInternalServerError, "internal server error")
+	})(next)
+}
+
+// RecoverPanicWith is RecoverPanic with the 500 response written by answer.
+func RecoverPanicWith(answer func(http.ResponseWriter, *http.Request)) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			defer func() {
+				panicValue := recover()
+				if panicValue == nil {
+					return
+				}
+				if err, ok := panicValue.(error); ok && errors.Is(err, http.ErrAbortHandler) {
+					panic(panicValue)
+				}
+				hlog.FromRequest(r).Error().
+					Str(zerolog.ErrorFieldName, fmt.Sprint(panicValue)).
+					Str("method", r.Method).
+					Str("path", r.URL.Path).
+					Str("stack", string(debug.Stack())).
+					Msg("panic")
+				w.Header().Set("Connection", "close")
+				answer(w, r)
+			}()
+			next.ServeHTTP(w, r)
+		})
+	}
 }

@@ -25,3 +25,10 @@ func (s *Server) Routes() []string {
 	})
 	return routes
 }
+
+// HandlerWithPanic is Handler with a GET /test-panic route that panics.
+func (s *Server) HandlerWithPanic() http.Handler {
+	r := s.router()
+	r.Get("/test-panic", func(http.ResponseWriter, *http.Request) { panic("test panic") })
+	return s.Wrap(r)
+}
