@@ -21,7 +21,6 @@ import (
 	"futo-notes-server/internal/auth"
 	"futo-notes-server/internal/hosted/account"
 	"futo-notes-server/internal/hosted/config"
-	"futo-notes-server/internal/syncapi"
 )
 
 const (
@@ -30,8 +29,6 @@ const (
 	// stateCookie binds a login to the browser that started it, so a
 	// callback URL lured into another browser cannot complete it there.
 	stateCookie = "oidc_state"
-	// dashboardPath is where a dashboard sign-in lands.
-	dashboardPath = "/"
 )
 
 // oidcClient talks to the identity provider. Discovery happens on first use
@@ -211,15 +208,7 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	s.metrics.login(r.Context(), false, loginSuccess)
 	s.metrics.issued(r.Context(), tokenSession)
-	http.SetCookie(w, &http.Cookie{
-		Name:     syncapi.SessionCookie,
-		Value:    token,
-		Path:     "/",
-		MaxAge:   int(account.SessionTTL.Seconds()),
-		HttpOnly: true,
-		Secure:   s.cfg.CookieSecure,
-		SameSite: http.SameSiteLaxMode,
-	})
+	s.setSessionCookie(w, token)
 	http.Redirect(w, r, dashboardPath, http.StatusSeeOther)
 }
 

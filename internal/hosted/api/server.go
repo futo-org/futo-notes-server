@@ -92,6 +92,10 @@ func (s *Server) BeginDrain() { s.draining.Store(true) }
 
 // Handler returns the server's HTTP handler.
 func (s *Server) Handler() http.Handler {
+	return s.withReadiness(s.router())
+}
+
+func (s *Server) router() chi.Router {
 	r := chi.NewRouter()
 	r.Use(
 		hlog.NewHandler(log.Logger),
@@ -135,11 +139,12 @@ func (s *Server) Handler() http.Handler {
 			hosted.Delete("/sessions/{id}", s.handleRevokeSession)
 		})
 	})
+	s.dashboardRoutes(r)
 	if s.cfg.DevUI {
 		r.Get("/dev", handleDevUI)
 		log.Info().Str("path", "/dev").Msg("dev UI enabled")
 	}
-	return s.withReadiness(r)
+	return r
 }
 
 // syncRoutes mounts the sync contract. The routes that carry blob bytes are
@@ -198,7 +203,8 @@ func principalFrom(r *http.Request) account.Principal {
 }
 
 // authenticate requires a live session, from the session cookie or a bearer
-// token, and attaches its caller for both syncapi and this package.
+// token, and attaches its caller for both syncapi and this package. A
+// session presented as the cookie gets the cookie extended when it slides.
 func (s *Server) authenticate(shape errorShape) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -226,6 +232,9 @@ func (s *Server) authenticate(shape errorShape) func(http.Handler) http.Handler 
 			case err != nil:
 				serverError(w, r, "validating session", err)
 				return
+			}
+			if cookie, err := r.Cookie(syncapi.SessionCookie); principal.Slid && err == nil && cookie.Value == token {
+				s.setSessionCookie(w, token)
 			}
 			hlog.FromRequest(r).UpdateContext(func(c zerolog.Context) zerolog.Context {
 				return c.Str("user", principal.Session.User.ID)

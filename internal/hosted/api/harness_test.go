@@ -41,6 +41,7 @@ type harness struct {
 	t        *testing.T
 	database *db.DB
 	api      *httptest.Server
+	server   *api.Server
 	issuer   *httptest.Server
 	apiKeys  hostedauth.KeySet
 	signers  map[string]*hostedauth.ReceiptSigner
@@ -49,6 +50,13 @@ type harness struct {
 }
 
 func newHarness(t *testing.T) *harness {
+	t.Helper()
+	return newHarnessWith(t, func(*config.Config) {})
+}
+
+// newHarnessWith is newHarness with configure applied to the API's
+// configuration.
+func newHarnessWith(t *testing.T, configure func(*config.Config)) *harness {
 	t.Helper()
 	database := hostedtest.Postgres(t)
 	h := &harness{t: t, database: database, signers: map[string]*hostedauth.ReceiptSigner{},
@@ -99,14 +107,16 @@ func newHarness(t *testing.T) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cfg := config.Config{
+		PublicURL:          publicURL,
+		OIDC:               config.OIDC{Issuer: h.issuer.URL, ClientID: clientID, ClientSecret: clientSecret},
+		AppRedirectSchemes: []string{appScheme},
+		Regions:            regions,
+		SigningKey:         apiKey,
+	}
+	configure(&cfg)
 	server, err := api.New(api.Options{
-		Config: config.Config{
-			PublicURL:          publicURL,
-			OIDC:               config.OIDC{Issuer: h.issuer.URL, ClientID: clientID, ClientSecret: clientSecret},
-			AppRedirectSchemes: []string{appScheme},
-			Regions:            regions,
-			SigningKey:         apiKey,
-		},
+		Config:   cfg,
 		Database: database,
 		Hub:      h.hub,
 		Metrics:  metrics,
@@ -115,6 +125,7 @@ func newHarness(t *testing.T) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
+	h.server = server
 	h.api.Config.Handler = server.Handler()
 	h.api.Start()
 	t.Cleanup(h.api.Close)
@@ -180,6 +191,12 @@ func (c *client) do(method, target string, body any, headers ...string) response
 	for i := 0; i+1 < len(headers); i += 2 {
 		req.Header.Set(headers[i], headers[i+1])
 	}
+	return c.send(req)
+}
+
+// send sends req and reads the whole response.
+func (c *client) send(req *http.Request) response {
+	c.h.t.Helper()
 	res, err := c.http.Do(req)
 	if err != nil {
 		c.h.t.Fatal(err)
@@ -242,7 +259,7 @@ func (h *harness) dashboardLogin(sub string) *client {
 	c := h.client()
 	callback := c.authorize(c.do(http.MethodGet, "/api/auth/oidc/start", nil), sub)
 	res := c.do(http.MethodGet, callback, nil)
-	if res.status != http.StatusSeeOther || res.header.Get("Location") != "/" {
+	if res.status != http.StatusSeeOther || res.header.Get("Location") != "/dashboard" {
 		h.t.Fatalf("dashboard callback = %d %v %s", res.status, res.header, res.body)
 	}
 	return c

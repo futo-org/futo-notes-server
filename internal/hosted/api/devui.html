@@ -28,11 +28,13 @@
 <main>
   <section class="card">
     <h2>Sign in</h2>
-    <p class="muted">Dashboard sign-in sets the session cookie on this origin and lands on <code>/</code>; come back here afterwards.
+    <p class="muted">Dashboard sign-in sets the session cookie on this origin and lands on the <a href="/dashboard">htmx dashboard</a>
+      (overview, region choice, devices, account deletion); the buttons below then act through the same cookie.
       App sign-in uses the loopback redirect flow and keeps the bearer token and storage refresh token in this tab:
       open this page at <code>http://127.0.0.1:&lt;port&gt;/dev</code> for it, since only loopback IPs are allowed redirect targets.</p>
     <div class="row">
       <a href="/api/auth/oidc/start">Dashboard sign-in</a>
+      <a href="/dashboard">Open dashboard</a>
       <button id="app-login">App sign-in</button>
       <button id="logout">Log out</button>
       <button id="forget">Forget tab tokens</button>

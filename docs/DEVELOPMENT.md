@@ -154,7 +154,7 @@ mise run api:dev        # applies migrations, then serves :3005
 ```
 
 `api:dev` uses the dev keys, `dev/hosted-regions.json` (the three storage dev
-ports) and `DEV_UI=true`: <http://localhost:3005/dev> drives dashboard and app
+ports) and `DEV_UI=true`: <http://localhost:3005/dev> links the dashboard and drives app
 sign-in, regions, devices, deletion, storage tokens and receipt-backed object
 writes. App sign-in there needs the page opened as `http://127.0.0.1:3005/dev`,
 because only loopback IP literals are allowed app redirect targets.
@@ -182,6 +182,46 @@ The end-to-end client flow against a dev stack:
 The API's integration tests use `HOSTED_TEST_DATABASE_URL` (one database shared
 by every hosted package; `mise run test:integration` sets it) and run the OIDC
 flows against an in-process `mockoidc.StartTestServer`.
+
+### Dashboard
+
+The account dashboard is served by the API at `/dashboard` (`GET /` stays the
+JSON capability document). With `mise run docker:start` and `mise run api:dev`
+running, open <http://localhost:3005/dashboard>, press **Sign in**, and sign in
+on the mock issuer's form with any subject; the callback sets the session
+cookie and lands back on `/dashboard`. The dev page links there too.
+
+- First visit with no region: choose one (offered once; it cannot change).
+- Overview: name, email, region, usage, and a banner with the purge date and
+  **Cancel deletion** while a deletion is pending.
+- Devices: every session with user agent and UTC times; **Sign out** on any
+  device but this one (this browser signs out from the header instead).
+- Delete account: explains the 30-day grace and needs `DELETE` typed to
+  confirm; every other device is signed out at once.
+
+Pages are `html/template` under `internal/hosted/api/dashboard/templates`;
+htmx 2.0.4 and the stylesheet are embedded from `dashboard/static` (no CDN).
+htmx requests (`HX-Request: true`) get the `#page` fragment, other requests the
+whole document, and every form also works as a plain post without JavaScript.
+Each action calls the same `account.Store` (or `auth.DeleteSession` for sign
+out) as its JSON route:
+
+| Dashboard | JSON API |
+|---|---|
+| `POST /dashboard/region` | `PUT /api/account/region` |
+| `POST /dashboard/devices/{id}/revoke` | `DELETE /api/sessions/{id}` |
+| `POST /dashboard/delete` | `DELETE /api/account` |
+| `POST /dashboard/restore` | `POST /api/account/restore` |
+| `POST /dashboard/sign-out` | `POST /api/auth/logout` |
+
+State-changing requests need the session's CSRF token, an HMAC of the session
+token, rendered into a `csrf-token` meta tag, `hx-headers` (`X-CSRF-Token`) and
+a hidden `csrf_token` field; without it they get 403. Responses carry a strict
+CSP (`'self'` only, no inline script or style; htmx is configured through its
+`htmx-config` meta tag), `nosniff`, `Referrer-Policy: no-referrer` and
+`Cache-Control: no-store`. The session cookie is `HttpOnly`, `SameSite=Lax`,
+`Secure` per `COOKIE_SECURE`, and is re-issued with a fresh 90-day `Max-Age`
+whenever a cookie-authenticated request slides the session.
 
 ## Image tags
 
