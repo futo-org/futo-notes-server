@@ -7,9 +7,11 @@ NetworkPolicy and ExternalSecrets live in the infra repo, not here.
 
 ## What to deploy
 
-Charts are published to `oci://registry.gitlab.futo.org/futo-notes/futo-notes-server/charts`
-as `0.0.<pipeline>` on every main merge, with `appVersion` set to the image tag
-they ship with. Images are `.../api` and `.../storage` in the same registry.
+Charts are published to `oci://oci.futo.org/futo-notes/charts` as
+`0.0.<pipeline>` on every main merge, with `appVersion` set to the image tag
+they ship with. Images are `oci.futo.org/futo-notes/notes-api` and
+`oci.futo.org/futo-notes/notes-storage`. CI pushes both with the masked GitLab
+variables `OCI_REGISTRY_USER` and `OCI_REGISTRY_PASSWORD`.
 
 | Release | Chart | Count | Notes |
 |---|---|---|---|
@@ -57,7 +59,7 @@ plain-http cookies). Every prod release sets the following.
 
 | Value | Prod |
 |---|---|
-| `publicUrl` | the external origin, e.g. `https://notes.futo.org`; no path |
+| `publicUrl` | the external origin, no path: `https://notes.futo.cloud` in prod, `https://notes-staging.apps.futo.network` in staging |
 | `oidcIssuer` | the Zitadel instance URL, exactly as its discovery document's `issuer` |
 | `oidcClientId` | the Zitadel application's client id |
 | `appRedirectSchemes` | the custom URL schemes the apps sign in through. Loopback `http://127.0.0.1:<port>` and `http://[::1]:<port>` are always allowed; `http` and `https` are refused. |
@@ -134,6 +136,12 @@ directly.
   dashboard cookie, or sends the app to *its* `redirect_uri` with a one-time
   code. The app's redirect target is checked by the API against
   `appRedirectSchemes` and loopback rules, and is not registered in Zitadel.
+
+  | Environment | Redirect URI |
+  |---|---|
+  | Prod | `https://notes.futo.cloud/api/auth/oidc/callback` |
+  | Staging | `https://notes-staging.apps.futo.network/api/auth/oidc/callback` |
+  | Local | `http://localhost:3005/api/auth/oidc/callback`, only when pointing local dev at a real Zitadel application instead of mock-oidc. That application needs Dev mode on, because the URI is plain `http`. |
 - No post-logout redirect URI: signing out ends only the Notes session.
 - Scopes requested: `openid profile email`.
 - Token settings: enable **User Info inside ID Token**. The API reads `email`,
