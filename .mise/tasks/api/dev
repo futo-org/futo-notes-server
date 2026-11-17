@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#MISE description="Run the hosted API on the host (:3005) against compose Postgres and mock-oidc, with the dev keys"
+#MISE description="Run the hosted API on the host (:3005) against compose Postgres, mock-oidc and mock-resend, with the dev keys"
 #MISE dir="{{config_root}}"
 # Needs `mise run docker:start` first. Runs on the host rather than in compose
 # because the mock issuer is http://localhost:8092, a name the API must
@@ -23,6 +23,10 @@ export APP_REDIRECT_SCHEMES="${APP_REDIRECT_SCHEMES:-tech.futo.notes,tech.futo.n
 export REGIONS_FILE="${REGIONS_FILE:-dev/hosted-regions.json}"
 export API_SIGNING_KEY="${API_SIGNING_KEY:-$(cat dev/hosted-keys/api.key.pem)}"
 export STORAGE_REFRESH_ROTATION_KEY="${STORAGE_REFRESH_ROTATION_KEY:-$(cat dev/hosted-keys/storage-refresh-rotation.key)}"
+# Email goes to the compose mock Resend, which delivers into Mailpit
+# (http://localhost:8025); it accepts any key.
+export RESEND_API_URL="${RESEND_API_URL:-http://localhost:8093}"
+export RESEND_API_KEY="${RESEND_API_KEY:-re_dev_mock}"
 export COOKIE_SECURE="${COOKIE_SECURE:-false}"
 export DEV_UI="${DEV_UI:-true}"
 export OTLP_METRICS_ENDPOINT="${OTLP_METRICS_ENDPOINT:-localhost:8428}"
