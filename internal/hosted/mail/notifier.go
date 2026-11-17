@@ -40,12 +40,15 @@ func NewNotifier(database *db.DB, mailer Mailer, publicURL string) *Notifier {
 // twice. sent reports whether an email went out, even when stamping it then
 // failed.
 //
+// The email carries an idempotency key made of the user, t and the user's
+// lapse (lapsed_at), so a send whose stamp failed to save is not delivered
+// again by the next call within the provider's window, while a later lapse
+// is announced afresh. purgeAt must be the same on every call for one lapse,
+// so a repeated send is the same message.
+//
 // Two calls for one user at once could both send: callers run under the job
 // lock (hostedjobs). The purge deletes the users row, so it must send Purged
 // after deleting the account's data and before deleting the row.
-//
-// Nothing calls it yet: billing's lapse handling and purge (launch plan S5)
-// will.
 func (n *Notifier) SendOnce(ctx context.Context, userID string, t Template, purgeAt time.Time) (sent bool, err error) {
 	column, ok := stampColumns[t]
 	if !ok {
@@ -53,8 +56,9 @@ func (n *Notifier) SendOnce(ctx context.Context, userID string, t Template, purg
 	}
 	var email string
 	var stamped bool
-	err = n.database.QueryRowContext(ctx, `SELECT email, `+column+` IS NOT NULL FROM users WHERE id = $1`, userID).
-		Scan(&email, &stamped)
+	var lapsedAt *time.Time
+	err = n.database.QueryRowContext(ctx, `SELECT email, `+column+` IS NOT NULL, lapsed_at FROM users WHERE id = $1`, userID).
+		Scan(&email, &stamped, &lapsedAt)
 	if err != nil {
 		return false, fmt.Errorf("reading user %s: %w", userID, err)
 	}
@@ -68,6 +72,11 @@ func (n *Notifier) SendOnce(ctx context.Context, userID string, t Template, purg
 	if err != nil {
 		return false, err
 	}
+	cycle := purgeAt
+	if lapsedAt != nil {
+		cycle = *lapsedAt
+	}
+	message.IdempotencyKey = idempotencyKey(userID, t, cycle)
 	if err := n.mailer.Send(ctx, message); err != nil {
 		return false, fmt.Errorf("sending %s email: %w", t, err)
 	}
@@ -75,4 +84,10 @@ func (n *Notifier) SendOnce(ctx context.Context, userID string, t Template, purg
 		return true, fmt.Errorf("stamping %s email: %w", t, err)
 	}
 	return true, nil
+}
+
+// idempotencyKey names one lapse email: user, template and the lapse it is
+// about.
+func idempotencyKey(userID string, t Template, lapse time.Time) string {
+	return fmt.Sprintf("lapse-email/%s/%s/%d", userID, t, lapse.UTC().UnixMicro())
 }
