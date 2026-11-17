@@ -48,7 +48,7 @@ macOS, not Windows.
    stdout, and the same lines again from `hosted-stack.sh env`:
 
    ```
-   HOSTED_STACK_API_URL=http://127.0.0.1:3105
+   HOSTED_STACK_API_URL=http://127.0.0.1:3125
    HOSTED_STACK_ISSUER=http://127.0.0.1:8192
    HOSTED_STACK_REGIONS=us-east,eu-central,ap-southeast
    HOSTED_STACK_STORAGE_URL_US_EAST=http://127.0.0.1:3115
@@ -92,11 +92,15 @@ macOS, not Windows.
    failed `up` cleans up after itself, after printing each service's log tail.
 
 Only one stack per machine runs at a time: the Compose project name is fixed.
+The API defaults to port 3125, clear of 3005 and of the 3105 this repo's
+comparison harness uses.
 
 ## In this repo
 
-`mise run hosted-stack:smoke` builds a release into a temporary directory,
-runs `scripts/hosted-stack-smoke.sh` on it (verify checksums, unpack, `up`,
+`mise run hosted-stack:smoke` builds a release for this machine only
+(`FUTO_RELEASE_HOST_ONLY=1 scripts/build-release.sh <version>`, which a client
+repo can also use to test against an unreleased server) into a temporary
+directory, runs `scripts/hosted-stack-smoke.sh` on it (verify checksums, unpack, `up`,
 `TestReleasedStack`, `down`), and leaves nothing running. CI's
 `test:hosted-stack` job does the same with the pipeline's `build:binaries`
 artifacts, and `publish:binaries` waits for it. The bundle's sources are

@@ -20,7 +20,7 @@
 #   HOSTED_STACK_API_BIN, HOSTED_STACK_STORAGE_BIN, HOSTED_STACK_MOCK_OIDC_BIN
 # Ports, all optional. The defaults stay clear of 3005, which the apps keep
 # for themselves, and of the server repo's own dev ports:
-#   HOSTED_STACK_API_PORT       3105
+#   HOSTED_STACK_API_PORT       3125
 #   HOSTED_STACK_STORAGE_PORT   3115; the three regions take it and the next two
 #   HOSTED_STACK_OIDC_PORT      8192
 #   HOSTED_STACK_POSTGRES_PORT  15532
@@ -38,7 +38,7 @@ keys=$here/test-only-keys
 tmp=${TMPDIR:-/tmp}
 state=${HOSTED_STACK_DIR:-${tmp%/}/futo-notes-hosted-stack}
 
-api_port=${HOSTED_STACK_API_PORT:-3105}
+api_port=${HOSTED_STACK_API_PORT:-3125}
 storage_port=${HOSTED_STACK_STORAGE_PORT:-3115}
 oidc_port=${HOSTED_STACK_OIDC_PORT:-8192}
 export HOSTED_STACK_POSTGRES_PORT=${HOSTED_STACK_POSTGRES_PORT:-15532}

@@ -42,6 +42,12 @@ build() {
 }
 
 for cmd in server api storage mock-oidc; do
+  # FUTO_RELEASE_HOST_ONLY=1 builds for this machine only, for local and
+  # client-CI test stacks; a release always builds every target.
+  if [[ "${FUTO_RELEASE_HOST_ONLY:-}" == 1 ]]; then
+    build "$cmd" "$(go env GOOS)" "$(go env GOARCH)"
+    continue
+  fi
   build "$cmd" linux amd64
   build "$cmd" linux arm64
   # 32-bit ARMv6: original Raspberry Pi Zero / Zero W and 32-bit Pi OS.
