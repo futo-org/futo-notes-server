@@ -198,6 +198,107 @@ directly.
   [MANAGED-LAUNCH.md](MANAGED-LAUNCH.md)). Email is not unique on hosted: the
   identity provider owns it, and an address can move between accounts.
 
+## App Store and Google Play
+
+Store billing is optional per store. A store is **on** when every one of its
+required variables is set, **off** when none is, and the API refuses to start
+when only some are. The chart sets the non-secret ones from its `appStore` and
+`play` values, but only when `appStore.bundleId` or `play.packageName` is set.
+The keys come from the `notes-api` Secret.
+
+| Variable | Chart value or Secret key | What it is |
+|---|---|---|
+| `APPLE_BUNDLE_ID` | `appStore.bundleId` | `tech.futo.notes` |
+| `APPLE_APP_APPLE_ID` | `appStore.appAppleId` | The app's numeric Apple ID (App Store Connect, App Information). Production notifications must carry it. |
+| `APPLE_ISSUER_ID`, `APPLE_KEY_ID` | `appStore.issuerId`, `appStore.keyId` | The In-App Purchase key's issuer and key id. |
+| `APPLE_PRIVATE_KEY` | Secret | **Secret.** The In-App Purchase key's `.p8` file, as is (PKCS #8 PEM, P-256). |
+| `APPLE_SUBSCRIPTION_PRODUCT_IDS` | `appStore.subscriptionProductIds` | The auto-renewable subscription product ids that entitle, comma-separated. |
+| `APPLE_ACCEPT_SANDBOX` | `appStore.acceptSandbox` | Optional. `true` in prod and staging (the chart default): App Review and TestFlight purchases are sandbox transactions in the release build. The API's own default is `false`. Sandbox rows are stored with `environment = sandbox`. |
+| `PLAY_PACKAGE_NAME` | `play.packageName` | `tech.futo.notes` |
+| `PLAY_SERVICE_ACCOUNT_JSON` | Secret | **Secret.** The Play API service account's JSON key file. |
+| `PLAY_SUBSCRIPTION_PRODUCT_IDS` | `play.subscriptionProductIds` | The subscription product ids that entitle, comma-separated. |
+| `PLAY_RTDN_AUDIENCE` | `play.rtdnAudience` | The audience of the push subscription's OIDC token. |
+| `PLAY_RTDN_SERVICE_ACCOUNT` | `play.rtdnServiceAccount` | The service account email the push subscription authenticates as. |
+
+### Webhooks and network paths
+
+| From | To | Why |
+|---|---|---|
+| Apple | `<publicUrl>/api/billing/webhooks/app_store` (POST) | App Store Server Notifications V2. Authenticated by the JWS inside the body. |
+| Pub/Sub | `<publicUrl>/api/billing/webhooks/play` (POST) | Play real-time developer notifications (RTDN). Authenticated by a Google-signed OIDC bearer token. |
+| API pods | `api.storekit.itunes.apple.com`, `api.storekit-sandbox.itunes.apple.com` (HTTPS) | App Store Server API: a subscription's status when the app submits a purchase, and at reconciliation. |
+| API pods | `androidpublisher.googleapis.com` (HTTPS) | Play Developer API: `subscriptionsv2.get`, acknowledge and cancel. |
+| API pods | `oauth2.googleapis.com` (HTTPS) | Access tokens for the Play service account (its key file's `token_uri`). |
+| API pods | `www.googleapis.com` (HTTPS, `/oauth2/v3/certs`) | Google's keys for the push tokens. Cached, and fetched again only for an unknown `kid`. |
+
+The ingress must let the two webhook routes through without any other
+authentication. A delivery that fails verification gets `400`.
+
+Apple's signatures are checked offline: the `x5c` chain must lead to Apple Root
+CA - G3 (embedded in the binary), carry Apple's App Store marker extensions, and
+be valid at the payload's `signedDate`. No OCSP request is made.
+
+### App Store Connect
+
+1. **Subscription.** Create the auto-renewable subscription in a subscription
+   group, with **Family Sharing off**. A family-shared transaction never
+   entitles. Put its product id in `appStore.subscriptionProductIds`.
+2. **In-App Purchase key.** Users and Access, Integrations, In-App Purchase:
+   generate a key. Download the `.p8`, which can be downloaded only once, into
+   the Secret as `APPLE_PRIVATE_KEY`. The key id goes in `appStore.keyId`, and
+   the issuer id shown on that page in `appStore.issuerId`.
+3. **Server notifications.** App Information, App Store Server Notifications.
+   Choose **Version 2** for both URLs:
+
+   | Field | URL |
+   |---|---|
+   | Production Server URL | `https://notes.futo.cloud/api/billing/webhooks/app_store` |
+   | Sandbox Server URL | `https://notes.futo.cloud/api/billing/webhooks/app_store` |
+
+   Sandbox points at prod too, because TestFlight and App Review use the
+   release build, which talks to prod. One app record has one URL of each
+   kind, so staging receives no notifications. It still learns of purchases
+   when the app submits them, and from reconciliation.
+
+Apple retries a notification that does not get a `200`. `TEST` notifications
+are answered `200` and change nothing.
+
+### Google Play
+
+1. **Subscription.** Play Console, Monetize, Subscriptions. Put the
+   subscription's product id in `play.subscriptionProductIds`.
+2. **API service account.** In the Google Cloud project, enable the *Google
+   Play Android Developer API* and create a service account, for example
+   `play-api@<project>.iam.gserviceaccount.com`. Create a JSON key for it, into
+   the Secret as `PLAY_SERVICE_ACCOUNT_JSON`. In Play Console, Users and
+   permissions, invite the service account's email with these permissions on
+   the app: **View financial data** and **Manage orders and subscriptions**.
+3. **RTDN topic.** Create a Pub/Sub topic, for example `play-rtdn`. Grant
+   `google-play-developer-notifications@system.gserviceaccount.com` the
+   **Pub/Sub Publisher** role on it. In Play Console, Monetization setup,
+   Real-time developer notifications, enter
+   `projects/<project>/topics/play-rtdn` and choose to receive subscriptions
+   and voided purchases. **Send test notification** should get a `200`.
+4. **Push subscription.** Create a push subscription on the topic:
+   - endpoint `https://notes.futo.cloud/api/billing/webhooks/play`;
+   - **Enable authentication**, with a service account of its own, for example
+     `rtdn-push@<project>.iam.gserviceaccount.com`. That email goes in
+     `play.rtdnServiceAccount`;
+   - an explicit **audience**, for example the endpoint URL. That goes in
+     `play.rtdnAudience`;
+   - exponential-backoff retry.
+
+   If the project predates April 2021, also grant the Pub/Sub service agent
+   (`service-<project-number>@gcp-sa-pubsub.iam.gserviceaccount.com`) the
+   **Service Account Token Creator** role on the push service account. Staging
+   gets a second push subscription on the same topic, pointing at its own
+   origin and with its own audience.
+
+Notifications only name a purchase token. The API always fetches its state
+with `subscriptionsv2.get`, and never trusts the message. A purchase the app
+submits is acknowledged at once, because Play refunds one left unacknowledged
+for three days. License testers' purchases are stored with `environment = sandbox`.
+
 ## Key rotation
 
 Every verifier accepts a **set** of public keys by `kid`, and every signer uses
