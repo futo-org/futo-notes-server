@@ -1,4 +1,6 @@
-FROM golang:1.27-bookworm AS builder
+# Base images pinned by digest so the publish jobs' scan build and push build
+# resolve the same bytes; Renovate keeps the digests current.
+FROM golang:1.27-bookworm@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea AS builder
 
 ARG TARGETOS
 ARG TARGETARCH
@@ -12,9 +14,10 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags="-s -w -X main.serverVersion=${VERSION}" \
     -o /out/futo-notes-server ./cmd/server
 
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
 
 RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends ca-certificates curl gosu \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 1000 notes \

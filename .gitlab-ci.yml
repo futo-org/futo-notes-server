@@ -57,6 +57,12 @@ test:image:
   script:
     - docker build --build-arg VERSION="$CI_COMMIT_SHORT_SHA" -t futo-notes-server:ci .
     - docker image inspect futo-notes-server:ci --format '{{.Architecture}} {{.Size}}'
+    # publish:image needs this job, so no image with a fixable HIGH or CRITICAL
+    # vulnerability ships: Debian packages and the Go modules in the binary.
+    # Unfixed ones are skipped; the Dockerfile's apt-get upgrade picks up a Debian
+    # fix on the next build, so re-running the pipeline is the remedy. The socket
+    # mount resolves on the dind daemon, which is where the image was built.
+    - docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.76.2@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 futo-notes-server:ci
 
 # This is the cutover gate, not a unit approximation. It creates databases with
 # the current and historical TypeScript servers, drives them with the native
@@ -129,6 +135,18 @@ soak:staging:
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule" && $FUTO_SOAK_CHECK == "true"'
 
+# Scan exactly what the publish job pushes, one platform at a time: test:image
+# scans a native build only, and publishing rebuilds amd64 and arm64. These
+# --load builds run on the same buildx builder with the same VERSION, so the
+# push that follows reuses their cached layers and publishes what was scanned.
+.scan-published-platforms:
+  script:
+    - |
+      for platform in amd64 arm64; do
+        docker buildx build --platform "linux/$platform" --provenance=false --build-arg VERSION="$SCAN_VERSION" --load --tag "futo-notes-server:scan-$platform" . || exit 1
+        docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.76.2@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 "futo-notes-server:scan-$platform" || exit 1
+      done
+
 publish:candidate-image:
   stage: publish
   image: docker:27
@@ -149,6 +167,8 @@ publish:candidate-image:
     - docker buildx create --use --name futo-notes-candidate --driver docker-container
   script:
     - CANDIDATE_TAG="candidate-$CI_COMMIT_SHORT_SHA"
+    - SCAN_VERSION="$CANDIDATE_TAG"
+    - !reference [.scan-published-platforms, script]
     - docker buildx build --platform linux/amd64,linux/arm64 --provenance=false --build-arg VERSION="$CANDIDATE_TAG" --tag "$DOCKERHUB_IMAGE:$CANDIDATE_TAG" --tag "$DOCKERHUB_IMAGE:go-candidate" --tag "$GITLAB_IMAGE:$CANDIDATE_TAG" --tag "$GITLAB_IMAGE:candidate" --push .
     - docker buildx imagetools inspect "$DOCKERHUB_IMAGE:go-candidate"
   rules:
@@ -177,6 +197,8 @@ publish:image:
   script:
     - VERSION_TAG=${CI_COMMIT_TAG:-$CI_COMMIT_SHORT_SHA}
     - TRACK_TAG=$(if [ -n "$CI_COMMIT_TAG" ]; then echo stable; else echo latest; fi)
+    - SCAN_VERSION="$VERSION_TAG"
+    - !reference [.scan-published-platforms, script]
     - docker buildx build --platform linux/amd64,linux/arm64 --provenance=false --build-arg VERSION="$VERSION_TAG" --tag "$DOCKERHUB_IMAGE:$VERSION_TAG" --tag "$DOCKERHUB_IMAGE:$TRACK_TAG" --tag "$GITLAB_IMAGE:$VERSION_TAG" --tag "$GITLAB_IMAGE:$TRACK_TAG" --push .
     - docker buildx imagetools inspect "$DOCKERHUB_IMAGE:$VERSION_TAG"
   rules:
