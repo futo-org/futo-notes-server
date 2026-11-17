@@ -236,7 +236,9 @@ Storage never calls the API. Replicas of the API never call each other.
   to `OTLP_METRICS_ENDPOINT` (host:port, plain HTTP) at `OTLP_METRICS_URL_PATH`
   (`/opentelemetry/v1/metrics` for VictoriaMetrics). Unset endpoint turns
   them off. `service.name` is `notes-api` or `notes-storage` (with `region`),
-  and `service.instance.id` is the pod name.
+  and `service.instance.id` is the pod name. HTTP series carry `method` (or
+  `other`), the chi `route` pattern (`unmatched` when none matched) and
+  `status`, never a path or user.
 
 Metrics worth alerting on:
 

@@ -103,7 +103,7 @@ The mock OIDC issuer (`cmd/mock-oidc`) logs in any subject. In a browser,
 `/authorize` shows a sign-in form; scripts can call `/test/authorize` with the
 same query plus `sub=` (optionally `email=`, `name=`) to get a code with no UI.
 PKCE (S256) is mandatory. Go tests can run it in-process with
-`mockoidc.StartTestServer`.
+`mockoidctest.Start`.
 
 Token keys are Ed25519 PEM blocks with a `kid` header; `mise run keygen -kid
 <kid>` prints a new pair. `dev/hosted-keys/` holds **dev-only** pairs for the
@@ -191,7 +191,7 @@ The end-to-end client flow against a dev stack:
 
 The API's integration tests use `HOSTED_TEST_DATABASE_URL` (one database shared
 by every hosted package; `mise run test:integration` sets it) and run the OIDC
-flows against an in-process `mockoidc.StartTestServer`.
+flows against an in-process `mockoidctest.Start`.
 
 With `DEV_UI=true` the API also serves job triggers, which run a storage job at
 once on that replica, outside its schedule and lock (the dev page has buttons
