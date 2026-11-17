@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/rs/zerolog"
 
@@ -55,7 +56,10 @@ type Config struct {
 	// AppRedirectSchemes are the custom URL schemes an app may name as its
 	// redirect_uri, besides loopback http.
 	AppRedirectSchemes []string
-	Regions            []Region
+	// AllowedEmailDomains are the lowercase email domains a new account may
+	// sign up with (ALLOWED_EMAIL_DOMAINS); empty lets anyone sign up.
+	AllowedEmailDomains []string
+	Regions             []Region
 	// SigningKey signs the access tokens storage services accept.
 	SigningKey hostedauth.SigningKey
 	// RefreshRotationKey derives each storage refresh token's successor
@@ -140,6 +144,9 @@ func Load(getenv Getenv) (Config, error) {
 		return Config{}, err
 	}
 	if cfg.AppRedirectSchemes, err = redirectSchemes(getenv("APP_REDIRECT_SCHEMES")); err != nil {
+		return Config{}, err
+	}
+	if cfg.AllowedEmailDomains, err = emailDomains(getenv("ALLOWED_EMAIL_DOMAINS")); err != nil {
 		return Config{}, err
 	}
 	path := getenv("REGIONS_FILE")
@@ -364,4 +371,21 @@ func redirectSchemes(value string) ([]string, error) {
 		schemes = append(schemes, scheme)
 	}
 	return schemes, nil
+}
+
+// emailDomains parses ALLOWED_EMAIL_DOMAINS: domains matched exactly, so no
+// wildcards, and a subdomain is listed on its own.
+func emailDomains(value string) ([]string, error) {
+	var domains []string
+	for domain := range strings.SplitSeq(value, ",") {
+		domain = strings.ToLower(strings.TrimSpace(domain))
+		if domain == "" {
+			continue
+		}
+		if strings.ContainsAny(domain, "@*") || strings.ContainsFunc(domain, unicode.IsSpace) || !strings.Contains(domain, ".") {
+			return nil, fmt.Errorf("ALLOWED_EMAIL_DOMAINS: %q is not a domain such as futo.org (no @, wildcards or spaces; list each subdomain itself)", domain)
+		}
+		domains = append(domains, domain)
+	}
+	return domains, nil
 }

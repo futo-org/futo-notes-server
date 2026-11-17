@@ -160,6 +160,34 @@ func TestLoadRedirectSchemes(t *testing.T) {
 	}
 }
 
+func TestLoadAllowedEmailDomains(t *testing.T) {
+	for value, want := range map[string]string{
+		"":                                       "",
+		" , ":                                    "",
+		"futo.org":                               "futo.org",
+		" FUTO.org , futo.tech ,, eng.futo.org ": "futo.org,futo.tech,eng.futo.org",
+	} {
+		env := validEnv(t)
+		env["ALLOWED_EMAIL_DOMAINS"] = value
+		cfg, err := config.Load(getenv(env))
+		if err != nil {
+			t.Fatalf("%q: %v", value, err)
+		}
+		if got := strings.Join(cfg.AllowedEmailDomains, ","); got != want {
+			t.Errorf("%q: domains = %q, want %q", value, got, want)
+		}
+	}
+
+	for _, value := range []string{"user@futo.org", "@futo.org", "*.futo.org", "futo .org", "futo.org,futo\tcom", "localhost", "futo.org,org"} {
+		env := validEnv(t)
+		env["ALLOWED_EMAIL_DOMAINS"] = value
+		_, err := config.Load(getenv(env))
+		if err == nil || !strings.Contains(err.Error(), "ALLOWED_EMAIL_DOMAINS") {
+			t.Errorf("%q: Load error = %v, want one naming ALLOWED_EMAIL_DOMAINS", value, err)
+		}
+	}
+}
+
 func TestLoadBaseNeedsOnlyTheDatabase(t *testing.T) {
 	base, err := config.LoadBase(getenv(map[string]string{
 		"POSTGRES_HOST": "localhost", "POSTGRES_PORT": "15432", "POSTGRES_DATABASE": "notes",
