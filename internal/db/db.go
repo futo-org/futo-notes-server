@@ -215,20 +215,29 @@ func Open(cfg config.Config) (*DB, error) {
 	} else {
 		database.SetMaxOpenConns(4)
 		database.SetMaxIdleConns(4)
+		// WAL is stored in the database file, so it is set once here rather than
+		// on every connection: switching journal_mode as a connection opened,
+		// while another connection held a lock, failed with SQLITE_BUSY at once
+		// (busy_timeout does not cover it), roughly 1 run in 10 of
+		// TestSQLiteConcurrentMigration.
+		if _, err := database.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+			database.Close()
+			return nil, fmt.Errorf("enabling WAL: %w", err)
+		}
 	}
 	return Wrap(database, dialect), nil
 }
 
 func sqliteDSN(path string) string {
 	// Encode pragma values so a path containing '?' or '#' cannot alter the
-	// connection settings. modernc applies each _pragma on every connection.
+	// connection settings. modernc applies each _pragma on every connection;
+	// journal_mode is set once in Open.
 	u := &url.URL{Scheme: "file", Path: path}
 	if !filepath.IsAbs(path) {
 		u.Opaque = path
 		u.Path = ""
 	}
 	query := u.Query()
-	query.Add("_pragma", "journal_mode(WAL)")
 	query.Add("_pragma", "busy_timeout(10000)")
 	query.Add("_pragma", "foreign_keys(1)")
 	query.Add("_pragma", "synchronous(NORMAL)")
