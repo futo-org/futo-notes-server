@@ -127,7 +127,7 @@ func routes(cfg config.Config, database *db.DB, blobStore *blobs.Store, eventHub
 func main() {
 	zerolog.TimeFieldFormat = time.RFC3339
 	zerolog.TimestampFunc = func() time.Time { return time.Now().UTC() }
-	configureLogging(zerolog.InfoLevel, false)
+	configureLogging(zerolog.InfoLevel, true)
 	if len(os.Args) > 1 && os.Args[1] == "migrate-to-sqlite" {
 		os.Exit(runMigrateToSQLite(os.Args[2:], os.Stdout, os.Stderr))
 	}
@@ -137,11 +137,14 @@ func main() {
 }
 
 // configureLogging points the global logger at stderr, as JSON or, when
-// pretty, as human-readable console output.
+// pretty, as human-readable console output, colored only on a terminal so
+// `docker logs` redirected to a file stays free of escape codes.
 func configureLogging(level zerolog.Level, pretty bool) {
 	var output io.Writer = os.Stderr
 	if pretty {
-		output = zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.RFC3339}
+		info, err := os.Stderr.Stat()
+		terminal := err == nil && info.Mode()&os.ModeCharDevice != 0
+		output = zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.RFC3339, NoColor: !terminal}
 	}
 	log.Logger = zerolog.New(output).With().Timestamp().Caller().Logger()
 	zerolog.SetGlobalLevel(level)

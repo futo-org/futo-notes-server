@@ -130,8 +130,8 @@ The server logs one JSON object per line to stderr (`docker compose logs` or
 - `LOG_LEVEL`: `trace`, `debug`, `info` (default), `warn`, `error`, `fatal`,
   `panic`, or `disabled` (`silent` also works). Any other value logs a
   warning and falls back to `info`.
-- `LOG_FORMAT`: `json` (default), or `pretty` for human-readable lines. The
-  server refuses to start if it holds any other value.
+- `LOG_FORMAT`: `pretty` (default), human-readable lines, or `json` for one
+  JSON object per line. The server refuses to start if it holds any other value.
 
 ## Connect the app
 

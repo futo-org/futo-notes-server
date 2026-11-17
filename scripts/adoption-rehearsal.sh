@@ -169,7 +169,7 @@ start_go() {
   (
     cd "$repo_root"
     exec env AUTH_MODE=password PORT="$port" DATABASE_URL="postgres://futo_notes:$postgres_password@$postgres_host:$postgres_port/$active_database" \
-      BLOB_DIR="$blob_dir" COOKIE_SECURE=false BLOB_GC_ENABLED=false DEV_UI=true \
+      BLOB_DIR="$blob_dir" COOKIE_SECURE=false BLOB_GC_ENABLED=false DEV_UI=true LOG_FORMAT=json \
       FUTO_NOTES_PASSWORD= FUTO_NOTES_PASSWORD_HASH="$password_hash" "$go_server"
   ) >"$server_log" 2>&1 &
   server_pid=$!

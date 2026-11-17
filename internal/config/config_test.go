@@ -61,11 +61,11 @@ func TestLogSettings(t *testing.T) {
 		wantPretty    bool
 		wantError     string
 	}{
-		{wantLevel: zerolog.InfoLevel},
+		{wantLevel: zerolog.InfoLevel, wantPretty: true},
 		{level: "debug", format: "json", wantLevel: zerolog.DebugLevel},
 		{level: "WARN", format: "pretty", wantLevel: zerolog.WarnLevel, wantPretty: true},
-		{level: "verbose", wantLevel: zerolog.InfoLevel},
-		{level: "silent", wantLevel: zerolog.Disabled},
+		{level: "verbose", wantLevel: zerolog.InfoLevel, wantPretty: true},
+		{level: "silent", wantLevel: zerolog.Disabled, wantPretty: true},
 		{format: "text", wantError: `LOG_FORMAT must be json or pretty, got "text"`},
 	} {
 		t.Setenv("LOG_LEVEL", tt.level)

@@ -44,7 +44,7 @@ type Config struct {
 	DBPoolMax          int           // DB_POOL_MAX, Postgres only
 	DBPoolIdleTimeout  time.Duration // DB_POOL_IDLE_TIMEOUT_MS, Postgres only
 	LogLevel           zerolog.Level // LOG_LEVEL, a zerolog level name; info by default
-	LogPretty          bool          // LOG_FORMAT=pretty, human-readable console logs instead of JSON
+	LogPretty          bool          // human-readable console logs (LOG_FORMAT=pretty, the default) instead of JSON
 }
 
 // Load reads the server configuration, applying .env values that the
@@ -80,7 +80,7 @@ func Load() (Config, error) {
 
 	var err error
 	cfg.LogLevel, _ = logLevel(os.Getenv("LOG_LEVEL"))
-	switch format := getDefault("LOG_FORMAT", "json"); format {
+	switch format := getDefault("LOG_FORMAT", "pretty"); format {
 	case "json":
 	case "pretty":
 		cfg.LogPretty = true
