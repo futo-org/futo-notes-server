@@ -17,7 +17,9 @@ const (
 )
 
 // Listen holds a dedicated native pgx connection and reconnects until ctx is
-// canceled. Every connection loss closes current streams before retrying.
+// canceled. It relays Channel to hub's subscribers and ends the streams
+// SessionsChannel names. Every connection loss closes current streams before
+// retrying.
 func Listen(ctx context.Context, databaseURL string, hub *Hub) {
 	listen(ctx, databaseURL, hub, listenerAppName)
 }
@@ -63,8 +65,10 @@ func listenOnce(ctx context.Context, databaseURL string, hub *Hub, appName strin
 	}
 	defer conn.Close(context.Background())
 
-	if _, err := conn.Exec(ctx, "LISTEN "+Channel); err != nil {
-		return false, err
+	for _, channel := range []string{Channel, SessionsChannel} {
+		if _, err := conn.Exec(ctx, "LISTEN "+channel); err != nil {
+			return false, err
+		}
 	}
 	// Subscribers can be created while the listener is in its reconnect
 	// backoff. They may have missed committed notifications, so close them as
@@ -79,6 +83,15 @@ func listenOnce(ctx context.Context, databaseURL string, hub *Hub, appName strin
 				return true, ctx.Err()
 			}
 			return true, err
+		}
+		if notification.Channel == SessionsChannel {
+			var end SessionEnd
+			if err := json.Unmarshal([]byte(notification.Payload), &end); err != nil {
+				log.Error().Err(err).Msg("sync events listener: dropping invalid session end")
+				continue
+			}
+			hub.End(end)
+			continue
 		}
 		var payload Notification
 		if err := json.Unmarshal([]byte(notification.Payload), &payload); err != nil {

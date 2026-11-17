@@ -31,7 +31,7 @@ func TestListenerTransactionalDeliveryAndReconnect(t *testing.T) {
 	}()
 	waitForListener(t, database, appName)
 
-	sub := hub.Subscribe("events-user")
+	sub := hub.Subscribe("events-user", "events-session")
 	defer hub.Unsubscribe(sub)
 	if _, err := database.ExecContext(t.Context(), `SELECT pg_notify($1, 'not-json')`, Channel); err != nil {
 		t.Fatal(err)
@@ -83,7 +83,7 @@ func TestListenerTransactionalDeliveryAndReconnect(t *testing.T) {
 	// A stream opened during the reconnect backoff was deaf to notifications
 	// committed before LISTEN came back. It must close at reconnect so the
 	// client pulls again instead of trusting that gap.
-	duringBackoff := hub.Subscribe("events-user")
+	duringBackoff := hub.Subscribe("events-user", "events-session")
 	defer hub.Unsubscribe(duringBackoff)
 	publishAndCommit(t, database, Notification{
 		UserID:         "events-user",
@@ -106,7 +106,7 @@ func TestListenerTransactionalDeliveryAndReconnect(t *testing.T) {
 	}
 
 	// A stream opened after LISTEN is restored receives later notifications.
-	recovered := hub.Subscribe("events-user")
+	recovered := hub.Subscribe("events-user", "events-session")
 	defer hub.Unsubscribe(recovered)
 	publishAndCommit(t, database, Notification{
 		UserID:         "events-user",
@@ -119,6 +119,64 @@ func TestListenerTransactionalDeliveryAndReconnect(t *testing.T) {
 	}
 }
 
+func TestListenerEndsTheStreamsASessionEndNames(t *testing.T) {
+	databaseURL := dbtest.PostgresURL(t, "EVENTS_TEST_DATABASE_URL")
+	database := dbtest.Postgres(t, "EVENTS_TEST_DATABASE_URL")
+
+	hub := NewHub()
+	ctx, cancel := context.WithCancel(t.Context())
+	listenerDone := make(chan struct{})
+	appName := "futo-notes-events-session-ends"
+	go func() {
+		listen(ctx, databaseURL, hub, appName)
+		close(listenerDone)
+	}()
+	defer func() {
+		cancel()
+		<-listenerDone
+	}()
+	waitForListener(t, database, appName)
+
+	revoked := hub.Subscribe("ends-user", "revoked-session")
+	kept := hub.Subscribe("ends-user", "kept-session")
+	other := hub.Subscribe("other-user", "revoked-session")
+	defer hub.Unsubscribe(kept)
+	defer hub.Unsubscribe(other)
+	notifyEnd := func(payload string) {
+		t.Helper()
+		if _, err := database.ExecContext(t.Context(), `SELECT pg_notify($1, $2)`, SessionsChannel, payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	notifyEnd(`not-json`)
+	notifyEnd(`{"userId":"ends-user","sessionId":"revoked-session"}`)
+	waitForClose(t, revoked)
+	for _, sub := range []*Subscription{kept, other} {
+		if _, open := sub.Drain(); !open {
+			t.Fatal("a session end closed another session's or user's stream")
+		}
+	}
+
+	notifyEnd(`{"userId":"ends-user"}`)
+	waitForClose(t, kept)
+	if _, open := other.Drain(); !open {
+		t.Fatal("a user's end closed another user's stream")
+	}
+}
+
+func waitForClose(t *testing.T, sub *Subscription) {
+	t.Helper()
+	select {
+	case _, open := <-sub.Wake():
+		if open {
+			t.Fatal("subscription woke rather than closed")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("subscription was not closed")
+	}
+}
+
 func waitForListener(t *testing.T, database *db.DB, appName string) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -127,7 +185,7 @@ func waitForListener(t *testing.T, database *db.DB, appName string) {
 		err := database.QueryRowContext(t.Context(), `SELECT EXISTS (
 			SELECT 1 FROM pg_stat_activity
 			WHERE application_name = $1 AND query = $2
-		)`, appName, "LISTEN "+Channel).Scan(&ready)
+		)`, appName, "LISTEN "+SessionsChannel).Scan(&ready)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -89,6 +90,38 @@ func TestSyncEventsPing(t *testing.T) {
 	}
 }
 
+func TestSyncEventsEndOnceTheSessionIsNotAlive(t *testing.T) {
+	hub := events.NewHub()
+	var checks atomic.Int32
+	handler := handleSyncEvents(hub, 5*time.Millisecond, func(r *http.Request) bool {
+		if SessionFrom(r).ID != "session" {
+			t.Errorf("alive asked about session %q", SessionFrom(r).ID)
+		}
+		return checks.Add(1) < 3
+	})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handler(w, r.WithContext(WithSession(r.Context(), &auth.Session{ID: "session", User: testUser})))
+	}))
+	defer server.Close()
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("reading the ended stream: %v", err)
+	}
+	if want := "event: ready\ndata:\n\n" + strings.Repeat("event: ping\ndata:\n\n", 2); string(body) != want {
+		t.Fatalf("stream = %q, want %q", body, want)
+	}
+}
+
 func newSyncTestServer(hub *events.Hub, pingInterval time.Duration) *httptest.Server {
 	return httptest.NewServer(syncTestHandler(hub, pingInterval))
 }
@@ -96,7 +129,7 @@ func newSyncTestServer(hub *events.Hub, pingInterval time.Duration) *httptest.Se
 // syncTestHandler serves sync events as testUser without going through an
 // authentication middleware.
 func syncTestHandler(hub *events.Hub, pingInterval time.Duration) http.Handler {
-	handler := handleSyncEventsWithInterval(hub, pingInterval)
+	handler := handleSyncEvents(hub, pingInterval, nil)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		session := &auth.Session{ID: "session", User: testUser}
 		handler(w, r.WithContext(WithSession(r.Context(), session)))
