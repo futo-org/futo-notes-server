@@ -1,13 +1,10 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"os"
-	"unicode/utf8"
 
 	"github.com/rs/zerolog/hlog"
 
@@ -101,34 +98,10 @@ func handleBatchFetchBlobs(store *blobs.Store) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		// Pointers, so that a JSON null is rejected rather than silently
-		// decoded as the empty string.
-		var request struct {
-			Keys []*string `json:"keys"`
-		}
-		if err := json.Unmarshal(body, &request); err != nil {
-			syncapi.WriteError(w, http.StatusBadRequest, "invalid json")
+		keys, err := blobframe.ParseRequest(body)
+		if err != nil {
+			syncapi.WriteError(w, http.StatusBadRequest, err.Error())
 			return
-		}
-		if len(request.Keys) == 0 {
-			syncapi.WriteError(w, http.StatusBadRequest, "keys must not be empty")
-			return
-		}
-		if len(request.Keys) > blobframe.MaxKeys {
-			syncapi.WriteError(w, http.StatusBadRequest, fmt.Sprintf("too many keys (max %d)", blobframe.MaxKeys))
-			return
-		}
-		keys := make([]string, 0, len(request.Keys))
-		for _, key := range request.Keys {
-			if key == nil {
-				syncapi.WriteError(w, http.StatusBadRequest, "keys must be strings")
-				return
-			}
-			if utf8.RuneCountInString(*key) > blobframe.MaxKeyChars {
-				syncapi.WriteError(w, http.StatusBadRequest, fmt.Sprintf("key too long (max %d chars)", blobframe.MaxKeyChars))
-				return
-			}
-			keys = append(keys, *key)
 		}
 
 		w.Header().Set("Content-Type", "application/octet-stream")

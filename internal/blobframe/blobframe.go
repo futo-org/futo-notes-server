@@ -1,5 +1,6 @@
-// Package blobframe encodes the binary response of a batch blob download
-// (self-hosted POST /api/blobs/batch, hosted storage POST /blobs/batch).
+// Package blobframe parses the request and encodes the binary response of a
+// batch blob download (self-hosted POST /api/blobs/batch, hosted storage
+// POST /blobs/batch).
 //
 // One frame per requested key, in request order, integers big-endian:
 //
@@ -10,9 +11,11 @@ package blobframe
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"unicode/utf8"
 )
 
 // Request limits and the response payload cap shared by every batch endpoint.
@@ -31,6 +34,37 @@ const (
 	// single upload can create.
 	MaxBlobBytes = 100 << 20
 )
+
+// ParseRequest decodes a batch request body, {"keys": [...]}, and returns its
+// keys in request order. Every error is a 400, and its message is the one the
+// response carries.
+func ParseRequest(body []byte) ([]string, error) {
+	// Pointers, so that a JSON null is rejected rather than silently decoded
+	// as the empty string.
+	var request struct {
+		Keys []*string `json:"keys"`
+	}
+	if err := json.Unmarshal(body, &request); err != nil {
+		return nil, errors.New("invalid json")
+	}
+	if len(request.Keys) == 0 {
+		return nil, errors.New("keys must not be empty")
+	}
+	if len(request.Keys) > MaxKeys {
+		return nil, fmt.Errorf("too many keys (max %d)", MaxKeys)
+	}
+	keys := make([]string, 0, len(request.Keys))
+	for _, key := range request.Keys {
+		if key == nil {
+			return nil, errors.New("keys must be strings")
+		}
+		if utf8.RuneCountInString(*key) > MaxKeyChars {
+			return nil, fmt.Errorf("key too long (max %d chars)", MaxKeyChars)
+		}
+		keys = append(keys, *key)
+	}
+	return keys, nil
+}
 
 // Overhead is the fixed size of a frame: u16 key length, u8 status and u32
 // blob length.
