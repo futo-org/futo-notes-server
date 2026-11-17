@@ -137,6 +137,17 @@ third note</textarea></div>
     </div>
   </section>
   <section class="card">
+    <h2>Email</h2>
+    <p class="muted">Renders a lapse email for the signed-in user, with the purge date it would carry if sent now, and sends it
+      through the configured Resend (the mock in dev, which delivers to <a href="http://localhost:8025">Mailpit</a>).
+      Without <code>RESEND_API_KEY</code> the send is only logged. The user's sent-email stamps are left alone.</p>
+    <div class="row">
+      <button data-email="lapsed">Send "lapsed"</button>
+      <button data-email="purge_warning">Send "purge in 7 days"</button>
+      <button data-email="purged">Send "purged"</button>
+    </div>
+  </section>
+  <section class="card">
     <h2>Jobs</h2>
     <p class="muted">Runs a storage job now on this replica, outside its schedule and lock. Reconciliation deletes keys older than 48h
       that the ledger does not know; <em>now</em> (RFC 3339) shifts its clock, and an empty user means every prefix.</p>
@@ -211,6 +222,7 @@ async function loadRegions() {
 }
 document.querySelectorAll("[data-get]").forEach((b) => b.onclick = () => call("GET", b.dataset.get));
 document.querySelectorAll("[data-job]").forEach((b) => b.onclick = () => call("POST", b.dataset.job));
+document.querySelectorAll("[data-email]").forEach((b) => b.onclick = () => call("POST", "/dev/email/" + b.dataset.email));
 $("reconcile").onclick = () => {
   const q = new URLSearchParams();
   if ($("reconcile-user").value) q.set("user", $("reconcile-user").value.trim());

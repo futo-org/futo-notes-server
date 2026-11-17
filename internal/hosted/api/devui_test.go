@@ -16,6 +16,7 @@ func TestDevRoutesAbsentWithoutDevUI(t *testing.T) {
 		{http.MethodPost, "/dev/jobs/account-purge"},
 		{http.MethodPost, "/dev/jobs/reconciliation"},
 		{http.MethodPost, "/dev/jobs/pairing-sweep"},
+		{http.MethodPost, "/dev/email/lapsed"},
 	} {
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, httptest.NewRequest(request.method, request.path, nil))

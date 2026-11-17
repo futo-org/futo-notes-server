@@ -74,7 +74,8 @@ info:
     `/dashboard` (server-rendered HTML for browsers, behind the session
     cookie and CSRF tokens; every state-changing page calls the same service
     code as the JSON operation it matches) and, when `DEV_UI` is set, a
-    manual test page at `/dev` with its `/dev/jobs/*` triggers. Those are
+    manual test page at `/dev` with its `/dev/jobs/*` and `/dev/email/*`
+    triggers. Those are
     pages and test tooling, not API: clients must not
     depend on them, so they are listed in `x-internal-routes` rather than
     described as operations.
@@ -95,6 +96,7 @@ x-internal-routes:
   - POST /dashboard/region
   - POST /dashboard/restore
   - POST /dashboard/sign-out
+  - POST /dev/email/{template}
   - POST /dev/jobs/account-purge
   - POST /dev/jobs/blob-gc
   - POST /dev/jobs/pairing-sweep
