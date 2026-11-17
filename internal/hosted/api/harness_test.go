@@ -146,6 +146,7 @@ func (h *harness) client() *client {
 		h.t.Fatal(err)
 	}
 	return &client{h: h, http: &http.Client{
+		Transport:     h.specCheck(),
 		Jar:           jar,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		Timeout:       10 * time.Second,

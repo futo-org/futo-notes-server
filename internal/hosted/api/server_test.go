@@ -17,8 +17,9 @@ import (
 )
 
 // newOfflineServer builds a server that never reaches its database or
-// identity provider, for the routes that need neither.
-func newOfflineServer(t *testing.T, reader sdkmetric.Reader) *api.Server {
+// identity provider, for the routes that need neither, with configure
+// applied to its configuration.
+func newOfflineServer(t *testing.T, reader sdkmetric.Reader, configure ...func(*config.Config)) *api.Server {
 	t.Helper()
 	// Opening connects to nothing until a query runs.
 	database, err := db.Open("sqlite:"+t.TempDir()+"/unused.db", db.Options{})
@@ -42,13 +43,17 @@ func newOfflineServer(t *testing.T, reader sdkmetric.Reader) *api.Server {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cfg := config.Config{
+		PublicURL:  "http://api.test",
+		OIDC:       config.OIDC{Issuer: "http://id.test", ClientID: "c", ClientSecret: "s"},
+		Regions:    []config.Region{{ID: "us-east", Name: "US", Endpoint: "http://s.test", ReceiptKeys: keys}},
+		SigningKey: key,
+	}
+	for _, c := range configure {
+		c(&cfg)
+	}
 	server, err := api.New(api.Options{
-		Config: config.Config{
-			PublicURL:  "http://api.test",
-			OIDC:       config.OIDC{Issuer: "http://id.test", ClientID: "c", ClientSecret: "s"},
-			Regions:    []config.Region{{ID: "us-east", Name: "US", Endpoint: "http://s.test", ReceiptKeys: keys}},
-			SigningKey: key,
-		},
+		Config:   cfg,
 		Database: database,
 		Hub:      events.NewHub(),
 		Metrics:  metrics,

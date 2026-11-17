@@ -142,8 +142,8 @@ derive from it). Its Secret `notes-storage-<region>` must hold
 ### API service
 
 `cmd/api` is the hosted API: the sync contract without the blob-byte routes,
-OIDC sign-in, storage tokens, and account, region and device management. It
-runs on the host, not in compose, because the mock issuer's URL is
+OIDC sign-in, storage tokens, and account, region and device management (API:
+`docs/openapi-hosted.yaml`). It runs on the host, not in compose, because the mock issuer's URL is
 `http://localhost:8092` and the API must reach it under the same name browsers
 do:
 

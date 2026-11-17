@@ -579,7 +579,7 @@ func TestSyncEventsReachStreamsThroughPostgres(t *testing.T) {
 	for {
 		// The listener may still be connecting, and connecting closes the
 		// streams opened before it; reconnect as a client would.
-		if found := readChange(t, h.api.URL, tokens.Token, func() {
+		if found := readChange(t, h, tokens.Token, func() {
 			receipt, _ := h.receipt("us-east", tokens.User.ID, 9)
 			app.expect(http.MethodPost, "/api/collections/"+claimed.Collection.ID+"/objects",
 				map[string]string{"receipt": receipt}, http.StatusCreated)
@@ -597,16 +597,16 @@ func TestSyncEventsReachStreamsThroughPostgres(t *testing.T) {
 // readChange opens a sync event stream, runs mutate once it is ready, and
 // reports whether a line starting with want arrives before the stream ends or
 // two seconds pass.
-func readChange(t *testing.T, base, token string, mutate func(), want string) bool {
+func readChange(t *testing.T, h *harness, token string, mutate func(), want string) bool {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/api/sync/events", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, h.api.URL+"/api/sync/events", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
-	res, err := http.DefaultClient.Do(req)
+	res, err := h.client().http.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
