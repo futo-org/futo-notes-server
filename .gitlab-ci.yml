@@ -49,9 +49,9 @@ test:go:
 test:image:
   extends: .skip-soak-schedule
   stage: test
-  image: docker:27
+  image: docker:29
   services:
-    - docker:27-dind
+    - docker:29-dind
   variables:
     DOCKER_TLS_CERTDIR: /certs
   script:
@@ -149,9 +149,9 @@ soak:staging:
 
 publish:candidate-image:
   stage: publish
-  image: docker:27
+  image: docker:29
   services:
-    - docker:27-dind
+    - docker:29-dind
   variables:
     DOCKER_TLS_CERTDIR: /certs
     DOCKERHUB_IMAGE: docker.io/futotech/notes-server
@@ -178,9 +178,9 @@ publish:candidate-image:
 
 publish:image:
   stage: publish
-  image: docker:27
+  image: docker:29
   services:
-    - docker:27-dind
+    - docker:29-dind
   variables:
     DOCKER_TLS_CERTDIR: /certs
     DOCKERHUB_IMAGE: docker.io/futotech/notes-server

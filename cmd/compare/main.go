@@ -7,6 +7,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"futo-notes-server/internal/config"
 	"os"
 	"strings"
 	"time"
@@ -39,6 +40,7 @@ func main() {
 	flag.IntVar(&opts.tsPort, "ts-port", 3105, "TypeScript server port")
 	flag.DurationVar(&opts.healthWait, "health-timeout", 30*time.Second, "server startup timeout")
 	flag.Parse()
+	opts.adminURL = config.NormalizeDatabaseURL(opts.adminURL)
 
 	if opts.mode != "dev" && opts.mode != "password" && opts.mode != "all" {
 		fmt.Fprintln(os.Stderr, "-mode must be dev, password, or all")
