@@ -153,7 +153,9 @@ func (h *harness) client() *client {
 		Transport:     h.specCheck(),
 		Jar:           jar,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-		Timeout:       10 * time.Second,
+		// Generous: a 200-entry batch under -race on a loaded CI runner has
+		// taken longer than 10s. Hangs are still caught by the test timeout.
+		Timeout: time.Minute,
 	}}
 }
 
