@@ -112,6 +112,38 @@ func Migrate(ctx context.Context, database *DB) ([]string, error) {
 	return names, nil
 }
 
+// Pending returns the names of the migrations Migrate would apply, without
+// applying them. It fails on a history Migrate would refuse.
+func Pending(ctx context.Context, database *DB) ([]string, error) {
+	migrations, err := loadMigrations(database.Dialect())
+	if err != nil {
+		return nil, fmt.Errorf("loading migrations: %w", err)
+	}
+	// Rolled back: a database that has never been migrated reports every
+	// migration without gaining bookkeeping tables.
+	tx, err := database.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Discard()
+	if err := ensureBookkeeping(ctx, tx); err != nil {
+		return nil, err
+	}
+	applied, err := appliedMigrations(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	pending, err := pendingMigrations(migrations, applied)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(pending))
+	for _, m := range pending {
+		names = append(names, m.name)
+	}
+	return names, nil
+}
+
 func ensureBookkeeping(ctx context.Context, tx *Tx) error {
 	stmts := []string{
 		`create table if not exists ` + migrationTable + ` (

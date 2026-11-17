@@ -151,6 +151,9 @@ func (d *DB) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) {
 // PingContext verifies that the database is reachable.
 func (d *DB) PingContext(ctx context.Context) error { return d.db.PingContext(ctx) }
 
+// Stats returns the connection pool statistics.
+func (d *DB) Stats() sql.DBStats { return d.db.Stats() }
+
 // Close closes the underlying connection pool.
 func (d *DB) Close() error { return d.db.Close() }
 
