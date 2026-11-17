@@ -176,6 +176,7 @@ func (s *Server) syncRoutes(r chi.Router) {
 	r.Put("/collections/{id}/key", strictKeyBody(syncapi.HandlePutCollectionKey(keys)))
 	r.Get("/collections/{id}/objects", syncapi.HandleListObjects(s.database))
 	r.Post("/collections/{id}/objects", syncapi.HandleCreateObject(s.database, s.publisher, blobs))
+	r.Post("/collections/{id}/objects/batch", s.handleBatchObjects(blobs))
 	r.Get("/collections/{id}/objects/{objectId}", syncapi.HandleGetObject(s.database))
 	r.Put("/collections/{id}/objects/{objectId}", syncapi.HandleUpdateObject(s.database, s.publisher, blobs))
 	r.Delete("/collections/{id}/objects/{objectId}", syncapi.HandleDeleteObject(s.database, s.publisher))
