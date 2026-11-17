@@ -12,6 +12,8 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+// captureLogs sends log output to the returned buffer. Requests log through
+// the logger in their context, which routes() puts there from log.Logger.
 func captureLogs(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	previous := log.Logger
@@ -25,6 +27,7 @@ func captureLogs(t *testing.T) *bytes.Buffer {
 func TestServerError(t *testing.T) {
 	logs := captureLogs(t)
 	request := httptest.NewRequest(http.MethodPost, "/api/things?cursor=1", nil)
+	request = request.WithContext(log.Logger.WithContext(request.Context()))
 	response := httptest.NewRecorder()
 
 	serverError(response, request, "loading things", errors.New("database unavailable"))
@@ -55,6 +58,7 @@ func TestRecoverPanic(t *testing.T) {
 		panic("broken handler")
 	}))
 	request := httptest.NewRequest(http.MethodPut, "/api/things/1?version=2", nil)
+	request = request.WithContext(log.Logger.WithContext(request.Context()))
 	response := httptest.NewRecorder()
 
 	handler.ServeHTTP(response, request)

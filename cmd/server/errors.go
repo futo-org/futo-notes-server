@@ -7,13 +7,13 @@ import (
 	"runtime/debug"
 
 	"github.com/rs/zerolog"
-	"github.com/rs/zerolog/log"
+	"github.com/rs/zerolog/hlog"
 )
 
 // serverError logs an internal failure with request context and answers with
 // the generic 500 body. action says what the handler was doing.
 func serverError(w http.ResponseWriter, r *http.Request, action string, err error) {
-	log.Error().Err(err).Str("action", action).Str("method", r.Method).Str("path", r.URL.Path).Msg("internal server error")
+	hlog.FromRequest(r).Error().Err(err).Str("action", action).Str("method", r.Method).Str("path", r.URL.Path).Msg("internal server error")
 	writeError(w, http.StatusInternalServerError, "internal server error")
 }
 
@@ -30,7 +30,7 @@ func recoverPanic(next http.Handler) http.Handler {
 			if err, ok := panicValue.(error); ok && errors.Is(err, http.ErrAbortHandler) {
 				panic(panicValue)
 			}
-			log.Error().
+			hlog.FromRequest(r).Error().
 				Str(zerolog.ErrorFieldName, fmt.Sprint(panicValue)).
 				Str("method", r.Method).
 				Str("path", r.URL.Path).

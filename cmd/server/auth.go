@@ -76,9 +76,10 @@ type invalidSessionResponse struct {
 // stale session never blocks logging in again.
 //
 // The exemption compares the decoded request path rather than registering the
-// login route ahead of this middleware: ServeMux matches the escaped path, so
-// a route would stop exempting spellings such as "/api/auth/dev%2Flogin",
-// which today skip authentication and reach the plain-text 404.
+// login route ahead of this middleware: the router keeps an escaped slash inside
+// its segment, so a route would stop exempting spellings such as
+// "/api/auth/dev%2Flogin", which skip authentication and reach the plain-text
+// 404.
 func requireAuth(cfg config.Config, database *db.DB, next http.Handler) http.Handler {
 	publicPath := loginPath(cfg.AuthMode)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

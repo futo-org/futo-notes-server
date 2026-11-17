@@ -17,7 +17,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/hlog"
 	"github.com/rs/zerolog/log"
 
 	"futo-notes-server/internal/auth"
@@ -121,54 +123,64 @@ func handleHealth(database *db.DB) http.HandlerFunc {
 }
 
 func routes(cfg config.Config, database *db.DB, blobStore *blobs.Store, eventHub *events.Hub, publisher events.Publisher) http.Handler {
-	api := http.NewServeMux()
+	api := chi.NewRouter()
+	api.NotFound(apiCatchAll)
+	api.MethodNotAllowed(apiCatchAll)
+	api.Use(func(next http.Handler) http.Handler { return requireAuth(cfg, database, next) })
+	endpoints := api.With(decodePathValues)
 	switch cfg.AuthMode {
 	case config.AuthModeDev:
-		api.HandleFunc("POST "+devLoginPath, handleDevLogin(cfg, database))
+		endpoints.Post(strings.TrimPrefix(devLoginPath, "/api"), handleDevLogin(cfg, database))
 	case config.AuthModePassword:
-		api.HandleFunc("POST "+passwordLoginPath,
+		endpoints.Post(strings.TrimPrefix(passwordLoginPath, "/api"),
 			rateLimited(auth.NewRateLimiter(), handlePasswordLogin(cfg, database)))
 	}
-	api.HandleFunc("GET /api/auth", handleCurrentUser)
-	api.HandleFunc("POST /api/auth/logout", handleLogout(database))
-	api.HandleFunc("POST /api/collections", handleClaimCollection(database))
-	api.HandleFunc("GET /api/collections", handleListCollections(database))
-	api.HandleFunc("GET /api/collections/{id}", handleGetCollection(database))
-	api.HandleFunc("DELETE /api/collections/{id}", handleDeleteCollection(database))
-	api.HandleFunc("GET /api/collections/{id}/key", handleGetCollectionKey(database))
-	api.HandleFunc("PUT /api/collections/{id}/key", handlePutCollectionKey(database))
-	api.HandleFunc("GET /api/collections/{id}/objects", handleListObjects(database))
-	api.HandleFunc("POST /api/collections/{id}/objects", handleCreateObject(database, publisher))
-	api.HandleFunc("GET /api/collections/{id}/objects/{objectId}", handleGetObject(database))
-	api.HandleFunc("PUT /api/collections/{id}/objects/{objectId}", handleUpdateObject(database, publisher))
-	api.HandleFunc("DELETE /api/collections/{id}/objects/{objectId}", handleDeleteObject(database, publisher))
-	api.HandleFunc("POST /api/collections/{id}/blob-objects", handleCreateBlobObject(database, blobStore, publisher))
-	api.HandleFunc("PUT /api/collections/{id}/blob-objects/{objectId}", handleUpdateBlobObject(database, blobStore, publisher))
-	api.HandleFunc("POST /api/collections/{id}/blob-objects/batch", handleBatchBlobObjects(database, blobStore, publisher))
-	api.HandleFunc("GET /api/collections/{id}/create-mutations/{mutationId}", handleRecoverCreate(database))
-	api.HandleFunc("POST /api/blobs", handleUploadBlob(database, blobStore))
-	api.HandleFunc("POST /api/blobs/batch", handleBatchFetchBlobs(blobStore))
-	api.HandleFunc("GET /api/blobs/{userId}/{blobId}", handleDownloadBlob(blobStore))
-	api.HandleFunc("DELETE /api/blobs/{userId}/{blobId}", handleDeleteBlob(database, blobStore))
-	api.HandleFunc("GET /api/sync/events", handleSyncEvents(eventHub))
-	api.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte("404 Not Found"))
-	})
+	handleGet(endpoints, "/auth", handleCurrentUser)
+	endpoints.Post("/auth/logout", handleLogout(database))
+	endpoints.Post("/collections", handleClaimCollection(database))
+	handleGet(endpoints, "/collections", handleListCollections(database))
+	handleGet(endpoints, "/collections/{id}", handleGetCollection(database))
+	endpoints.Delete("/collections/{id}", handleDeleteCollection(database))
+	handleGet(endpoints, "/collections/{id}/key", handleGetCollectionKey(database))
+	endpoints.Put("/collections/{id}/key", handlePutCollectionKey(database))
+	handleGet(endpoints, "/collections/{id}/objects", handleListObjects(database))
+	endpoints.Post("/collections/{id}/objects", handleCreateObject(database, publisher))
+	handleGet(endpoints, "/collections/{id}/objects/{objectId}", handleGetObject(database))
+	endpoints.Put("/collections/{id}/objects/{objectId}", handleUpdateObject(database, publisher))
+	endpoints.Delete("/collections/{id}/objects/{objectId}", handleDeleteObject(database, publisher))
+	endpoints.Post("/collections/{id}/blob-objects", handleCreateBlobObject(database, blobStore, publisher))
+	endpoints.Put("/collections/{id}/blob-objects/{objectId}", handleUpdateBlobObject(database, blobStore, publisher))
+	endpoints.Post("/collections/{id}/blob-objects/batch", handleBatchBlobObjects(database, blobStore, publisher))
+	handleGet(endpoints, "/collections/{id}/create-mutations/{mutationId}", handleRecoverCreate(database))
+	endpoints.Post("/blobs", handleUploadBlob(database, blobStore))
+	endpoints.Post("/blobs/batch", handleBatchFetchBlobs(blobStore))
+	handleGet(endpoints, "/blobs/{userId}/{blobId}", handleDownloadBlob(blobStore))
+	endpoints.Delete("/blobs/{userId}/{blobId}", handleDeleteBlob(database, blobStore))
+	handleGet(endpoints, "/sync/events", handleSyncEvents(eventHub))
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /{$}", handleCapability(string(cfg.AuthMode)))
-	mux.HandleFunc("GET /health", handleHealth(database))
-	mux.Handle("/api/", requireAuth(cfg, database, api))
+	router := chi.NewRouter()
+	router.Use(
+		hlog.NewHandler(log.Logger),
+		hlog.RequestIDHandler("request_id", "X-Request-Id"),
+		hlog.RemoteAddrHandler("remote_ip"),
+		hlog.UserAgentHandler("user_agent"),
+		hlog.AccessHandler(logAccess),
+		recoverPanic,
+		matchServeMux,
+	)
+	router.NotFound(http.NotFound)
+	router.MethodNotAllowed(serveMuxMethodNotAllowed(router))
+	handleGet(router, "/", handleCapability(string(cfg.AuthMode)))
+	handleGet(router, "/health", handleHealth(database))
+	router.Mount("/api", api)
 	if cfg.DevUI {
-		mux.HandleFunc("GET /dev", handleDevUI(database))
-		mux.HandleFunc("POST /dev/panic", handleDevPanic)
-		registerDevJobHandlers(mux, database, blobStore)
+		handleGet(router, "/dev", handleDevUI(database))
+		router.Post("/dev/panic", handleDevPanic)
+		registerDevJobHandlers(router, database, blobStore)
 		log.Info().Str("path", "/dev").Msg("dev UI enabled")
 	}
 
-	return recoverPanic(mux)
+	return router
 }
 
 func main() {

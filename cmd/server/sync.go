@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/rs/zerolog/log"
+	"github.com/rs/zerolog/hlog"
 
 	"futo-notes-server/internal/events"
 )
@@ -33,7 +33,7 @@ func handleSyncEventsWithInterval(hub *events.Hub, pingInterval time.Duration) h
 			return
 		}
 		if err := controller.Flush(); err != nil {
-			log.Error().Err(err).Str("method", r.Method).Str("path", r.URL.Path).Msg("flushing sync events response")
+			hlog.FromRequest(r).Error().Err(err).Str("method", r.Method).Str("path", r.URL.Path).Msg("flushing sync events response")
 			return
 		}
 
@@ -52,7 +52,7 @@ func handleSyncEventsWithInterval(hub *events.Hub, pingInterval time.Duration) h
 				for _, change := range changes {
 					data, err := json.Marshal(change)
 					if err != nil {
-						log.Error().Err(err).Str("method", r.Method).Str("path", r.URL.Path).Msg("encoding sync event change")
+						hlog.FromRequest(r).Error().Err(err).Str("method", r.Method).Str("path", r.URL.Path).Msg("encoding sync event change")
 						return
 					}
 					if _, err := fmt.Fprintf(w, "event: change\ndata: %s\n\n", data); err != nil {
