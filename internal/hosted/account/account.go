@@ -31,6 +31,9 @@ var (
 	ErrPendingDeletion = errors.New("account pending deletion")
 	// ErrNoRegion reports that the user has not chosen a region yet.
 	ErrNoRegion = errors.New("no region chosen")
+	// ErrPurgeStarted reports that the account's deletion grace period is
+	// over, so the deletion can no longer be cancelled.
+	ErrPurgeStarted = errors.New("account purge already started")
 )
 
 // Store reads and changes hosted account state.
@@ -142,8 +145,23 @@ func (s *Store) RequestDeletion(ctx context.Context, userID, keepSessionID strin
 }
 
 // Restore cancels a pending deletion. Restoring an account that is not
-// pending deletion changes nothing.
+// pending deletion changes nothing. Once the grace period is over it returns
+// ErrPurgeStarted: the purge may already have deleted the account's blobs.
 func (s *Store) Restore(ctx context.Context, userID string) error {
-	_, err := s.database.ExecContext(ctx, `UPDATE users SET deletion_requested_at = NULL, purge_at = NULL WHERE id = $1`, userID)
-	return err
+	// The database clock decides, not s.now, and the purge job claims a user
+	// by locking its row under the same clock (hostedjobs): one clock for
+	// every replica, and whichever of the two takes the row first wins.
+	result, err := s.database.ExecContext(ctx, `UPDATE users SET deletion_requested_at = NULL, purge_at = NULL
+		WHERE id = $1 AND (purge_at IS NULL OR purge_at > clock_timestamp())`, userID)
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrPurgeStarted
+	}
+	return nil
 }

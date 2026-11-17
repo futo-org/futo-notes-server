@@ -399,3 +399,26 @@ func TestRegionIsChosenOnceAndDeletionCanBeRestored(t *testing.T) {
 		t.Fatalf("restored account = %#v, %v", a, err)
 	}
 }
+
+func TestRestoreRefusesOnceThePurgeIsDue(t *testing.T) {
+	database := hostedtest.Postgres(t)
+	store := account.New(database)
+	ctx := t.Context()
+	user := newUser(t, database, store)
+
+	if err := store.Restore(ctx, user.ID); err != nil {
+		t.Fatalf("restoring an account with no deletion pending = %v", err)
+	}
+	if err := store.RequestDeletion(ctx, user.ID, uuid.NewV7().String()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ExecContext(ctx, `UPDATE users SET purge_at = now() - interval '1 second' WHERE id = $1`, user.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Restore(ctx, user.ID); !errors.Is(err, account.ErrPurgeStarted) {
+		t.Fatalf("restore after the grace period = %v, want ErrPurgeStarted", err)
+	}
+	if a, err := store.Account(ctx, user.ID); err != nil || a.DeletionRequestedAt == nil || a.PurgeAt == nil {
+		t.Fatalf("account after a refused restore = %#v, %v; want still pending", a, err)
+	}
+}

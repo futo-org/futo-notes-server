@@ -115,7 +115,12 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 // handleRestoreAccount serves POST /api/account/restore, which cancels a
 // pending deletion.
 func (s *Server) handleRestoreAccount(w http.ResponseWriter, r *http.Request) {
-	if err := s.accounts.Restore(r.Context(), principalFrom(r).Session.User.ID); err != nil {
+	err := s.accounts.Restore(r.Context(), principalFrom(r).Session.User.ID)
+	if errors.Is(err, account.ErrPurgeStarted) {
+		writeError(w, r, http.StatusConflict, "The deletion grace period is over; the account can no longer be restored")
+		return
+	}
+	if err != nil {
 		serverError(w, r, "restoring account", err)
 		return
 	}
