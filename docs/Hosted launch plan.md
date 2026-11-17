@@ -14,7 +14,7 @@ Status:
 | S3 | A6 | Done, in the MR stacked on S2 (`feat/hosted-batch-and-mail`). Storage batch upload is `POST /blobs/batch-upload`, next to batch fetch at `POST /blobs/batch` |
 | S4 | E | Done, in the same MR: the sender, templates, stamps and dev stack. Billing (S5) calls it. |
 | S5 | C | Done, in the MR stacked on S3/S4 (`feat/hosted-billing`): the model, gating, endpoints, webhooks, the mock web provider, the lapse and purge jobs, the emails, the dashboard, `/dev`, and the App Store and Play providers. |
-| S7 | C2 (web) | Done, stacked on S5: the Stripe web provider, embedded checkout, matching by OIDC `sub` |
+| S7 | C2 (web) | Done, stacked on S5: the Stripe web provider, our checkout page, matching by OIDC `sub` |
 
 ## Decisions (2026-11-17)
 
@@ -25,7 +25,7 @@ Status:
 | Hostnames | Prod `https://notes.futo.cloud`, staging `https://notes-staging.apps.futo.network`. |
 | Payment providers | **Pluggable.** The web provider is **Stripe**. App Store and Play are providers behind the same interface. |
 | Web customer matching | Each FUTO account is a Stripe Customer carrying `metadata.sub`, its OIDC `sub`; checkouts and subscriptions carry the same `sub`. **Never matched by email.** |
-| Web checkout | **Embedded** in our pages (Stripe embedded Checkout), never a redirect to a Stripe-hosted page. |
+| Web checkout | **Our own page** (Checkout Sessions with Stripe's Payment Element for the card), never a redirect to a Stripe-hosted page. USD, cards only. |
 | Store rails | Web, App Store and Play subscriptions **all ship at launch**. |
 | Price | One flat plan: **$5/month** on the web, **$5.75/month** in the App Store and Play. |
 | Lapse | The account turns **read-only** (writes get 402) and is **purged 90 days** after it lapses. |
@@ -269,12 +269,19 @@ type StoreProvider interface {
     now `Event.Subject`; the store resolves it through `users.sub`, and an
     unknown `sub` is acknowledged and logged. `Customer` gained `Subject`.
     The mock web provider uses the same scheme.
-  - **Embedded checkout.** An optional `billing.EmbeddedCheckout` interface
-    (`PublishableKey`, `StartCheckout`, `CompleteCheckout`) sits beside
-    `WebProvider.CheckoutURL`, which redirecting providers (the mock) keep;
-    Stripe's `CheckoutURL` answers `ErrNotSupported`. The dashboard mounts
-    the checkout in place; `POST /api/billing/checkout` gives the apps a
-    one-time link to `/billing/checkout/<token>`, our own page.
+  - **Custom checkout (S10).** An optional `billing.CustomCheckout`
+    interface (`PublishableKey`, `Plan`, `StartCheckout`,
+    `CompleteCheckout`) sits beside `WebProvider.CheckoutURL`, which
+    redirecting providers (the mock) keep; Stripe's `CheckoutURL` answers
+    `ErrNotSupported`. It replaced S7's `EmbeddedCheckout` (Stripe's
+    embedded Checkout page, which looked foreign, priced in local
+    currencies and rendered blank in dark mode): the session is now
+    `ui_mode=elements`, and our page draws the plan (`Plan`, read once from
+    the Stripe price), the account's email, our button and every state,
+    with only the card fields in Stripe's Payment Element, styled from our
+    tokens. Adaptive Pricing, Link and wallets are off per session. The
+    dashboard opens it in place; `POST /api/billing/checkout` gives the
+    apps a one-time link to `/billing/checkout/<token>`, the same page.
   - **Entitlement at completion.** The page confirms the Checkout Session
     with the server, which checks its `sub` against the caller and applies
     its subscription at once. Webhooks carry every later change.

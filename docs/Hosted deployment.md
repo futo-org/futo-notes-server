@@ -115,7 +115,7 @@ The web provider is **Stripe**, selling one plan at $5/month.
 |---|---|---|
 | `BILLING_WEB_PROVIDER` | rendered by the chart | `stripe` when `stripe.priceId` is set. Empty (the default) for none. `mock` is the dev and test-stack mock, whose checkout and portal are `/dev/billing` pages; the API refuses to start with it unless `DEV_UI=true`, so it never runs in production. |
 | `STRIPE_PRICE_ID` | `stripe.priceId` | The plan's price (`price_...`). Required with `stripe`. |
-| `STRIPE_PUBLISHABLE_KEY` | `stripe.publishableKey` | Mounts the embedded checkout in the browser; not secret. Must be the same mode (live or test) as the secret key. Required with `stripe`. |
+| `STRIPE_PUBLISHABLE_KEY` | `stripe.publishableKey` | Mounts the checkout's card fields (Stripe.js) in the browser; not secret. Must be the same mode (live or test) as the secret key. Required with `stripe`. |
 | `STRIPE_SECRET_KEY` | Secret | **Secret.** See Secrets. Required with `stripe`. |
 | `STRIPE_WEBHOOK_SECRET` | Secret | **Secret.** See Secrets. Required with `stripe`. |
 | `STRIPE_API_URL` | tests only | Replaces `https://api.stripe.com`. Never in a chart. |
@@ -130,13 +130,27 @@ How it works:
   refreshes find the account from the subscription's `metadata.sub`, or
   else its Customer's. Nothing is ever matched by email; the email is only
   copied onto the Customer for receipts.
-- **Checkout is embedded, never a redirect.** The dashboard's Subscribe
-  opens Stripe's embedded checkout inside the overview. The apps'
-  `POST /api/billing/checkout` answers a one-time link,
+- **Checkout is our own page, never a redirect.** The server opens a
+  Checkout Session with `ui_mode=elements`; our page shows the plan (its
+  amount and period read from the price), the account's email, Stripe's
+  Payment Element for the card (in Stripe's frames, so card data never
+  touches our pages: PCI SAQ A), and our own Subscribe button, which
+  confirms the session with Stripe.js (`initCheckoutElementsSdk`). The
+  Payment Element is styled through Stripe's Appearance API from the
+  dashboard's colour tokens and Barlow, and follows the system's light or
+  dark scheme as it changes. The dashboard's Subscribe opens it inside the
+  overview. The apps' `POST /api/billing/checkout` answers a one-time link,
   `<publicUrl>/billing/checkout/<token>` (HMAC-signed, names the account,
-  15 minutes, opens one checkout), to a page of ours that mounts the same
-  checkout without a dashboard session. The token key is derived from
-  `STRIPE_SECRET_KEY`, so rotating that key also voids outstanding links.
+  15 minutes, opens one checkout), to the same page without a dashboard
+  session. The token key is derived from `STRIPE_SECRET_KEY`, so rotating
+  that key also voids outstanding links.
+- **Everything the checkout must not offer is off per session, in code.**
+  Each Checkout Session sets `adaptive_pricing[enabled]=false` (the
+  customer pays the price's own USD amount, never a converted one),
+  `allowed_payment_method_types[]=card` and
+  `wallet_options[link][display]=never`; the page also hides Apple Pay,
+  Google Pay and Link in the Payment Element. None of it depends on the
+  Stripe account's dashboard settings.
 - **Entitlement does not wait for the webhook.** When the checkout
   completes, the page asks the server to confirm it: the server fetches the
   Checkout Session, checks it is the caller's (`sub`), and applies its
@@ -146,10 +160,12 @@ How it works:
   subscribe view, and `/billing/checkout/<token>`) load Stripe.js from
   `js.stripe.com`, which Stripe forbids self-hosting, and are served a
   Content-Security-Policy widened by exactly what Stripe documents for
-  Stripe.js and Checkout: `script-src` `js.stripe.com`, `*.js.stripe.com`,
-  `checkout.stripe.com`; `frame-src` the same plus `hooks.stripe.com`;
-  `connect-src` `api.stripe.com`, `checkout.stripe.com`; `img-src`
-  `*.stripe.com`. Every other page keeps the strict policy.
+  Stripe.js ([security guide](https://docs.stripe.com/security/guide#content-security-policy)):
+  `script-src` `js.stripe.com`, `*.js.stripe.com`; `frame-src` the same
+  plus `hooks.stripe.com` (3-D Secure); `connect-src` `api.stripe.com`.
+  Link, wallets and the Address Element are off, so nothing else is
+  allowed. Every other page, including the checkout's return and cancel
+  pages, keeps the strict policy.
 - **The portal** (Manage subscription) is a Stripe Customer Portal session
   that returns to `/dashboard`.
 
@@ -193,9 +209,9 @@ Do this once per account (live for prod, the sandbox for staging):
    subscriptions (at the end of the period) and updating payment methods;
    do **not** allow switching plans or changing quantities. Save it, which
    also creates the default configuration the API's portal sessions use.
-4. **Checkout.** Embedded checkout needs nothing more. Turn Adaptive Pricing
-   off (Settings, Payments) if the plan should be charged in USD only; the
-   sandbox shows local currencies by default.
+4. **Checkout.** Nothing to set: the currency, payment methods and look are
+   all set per session and on our page (see above), whatever the account's
+   Adaptive Pricing, payment method and branding settings say.
 5. **Tax.** Stripe Tax is out of scope for now: no tax is calculated or
    collected.
 
@@ -501,7 +517,7 @@ track (bookkeeping table `hosted_migrations`). The chart runs it as a Helm
 | API pods | Zitadel issuer | discovery, code exchange and JWKS |
 | API pods | `resendApiUrl` (HTTPS, `POST /emails`) | lapse and purge emails, when `RESEND_API_KEY` is set |
 | API pods | `api.stripe.com` (HTTPS) | Stripe: customers, checkout and portal sessions, subscriptions |
-| browsers | `js.stripe.com`, `*.js.stripe.com`, `checkout.stripe.com`, `api.stripe.com`, `hooks.stripe.com` | Stripe.js and the embedded checkout, on the pages that host it |
+| browsers | `js.stripe.com`, `*.js.stripe.com`, `api.stripe.com`, `hooks.stripe.com` | Stripe.js and the checkout's card fields, on the pages that host them |
 | payment providers | API `publicUrl`, path `/api/billing/webhooks/*` | subscription notifications; authenticated by the provider's signature, not a session. Stripe posts to `/api/billing/webhooks/web` from [its webhook IPs](https://docs.stripe.com/ips) |
 | API pods | `notes-db-rw` | Postgres, including `LISTEN/NOTIFY` for SSE across replicas |
 | storage pods | the region's S3 | blob bytes |
