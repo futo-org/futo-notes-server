@@ -274,8 +274,9 @@ paths:
         "302":
           description: |
             App sign-in: to the app's `redirect_uri` with `code` (one-time,
-            for `POST /api/auth/oidc/token`) or the provider's `error`, plus
-            the app's `state`.
+            for `POST /api/auth/oidc/token`), the provider's `error`, or
+            `error=invalid_request` when the provider sent neither, plus the
+            app's `state`.
           headers:
             Location:
               $ref: "#/components/headers/Location"
@@ -298,7 +299,9 @@ paths:
           description: |
             Missing, mismatched, unknown or already-used state, or a nonce
             mismatch (`Invalid login state`); or, for a dashboard sign-in,
-            the provider's error (`Sign-in was not completed: <error>`).
+            the provider's error (`Sign-in was not completed: <error>`) or a
+            callback with neither `code` nor `error` (`Sign-in was not
+            completed: missing code`).
           headers:
             X-Request-Id:
               $ref: "#/components/headers/RequestId"

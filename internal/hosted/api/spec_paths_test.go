@@ -233,10 +233,19 @@ func TestSpecSignInFailures(t *testing.T) {
 	}
 	callback := func(params url.Values) string { return "/api/auth/oidc/callback?" + params.Encode() }
 
-	// A callback with no code cannot be completed with the provider.
+	// A callback with neither a code nor an error is malformed: a 400 for a
+	// dashboard sign-in, invalid_request back to an app.
 	browser := h.client()
 	s := state(browser.do(http.MethodGet, "/api/auth/oidc/start", nil))
-	expectHostedError(t, browser.do(http.MethodGet, callback(url.Values{"state": {s}}), nil), http.StatusBadGateway)
+	expectHostedError(t, browser.do(http.MethodGet, callback(url.Values{"state": {s}}), nil), http.StatusBadRequest)
+	browser = h.client()
+	s = state(browser.do(http.MethodGet, "/api/auth/oidc/start?"+url.Values{
+		"redirect_uri": {"http://127.0.0.1:43123/callback"}, "code_challenge": {challenge}, "state": {"app-state"},
+	}.Encode(), nil))
+	res := browser.do(http.MethodGet, callback(url.Values{"state": {s}}), nil)
+	if res.status != http.StatusFound || res.header.Get("Location") != "http://127.0.0.1:43123/callback?error=invalid_request&state=app-state" {
+		t.Fatalf("app callback with no code = %d %v", res.status, res.header)
+	}
 
 	// The provider's error ends a dashboard sign-in here, and goes back to
 	// an app.
@@ -248,7 +257,7 @@ func TestSpecSignInFailures(t *testing.T) {
 	s = state(browser.do(http.MethodGet, "/api/auth/oidc/start?"+url.Values{
 		"redirect_uri": {"http://127.0.0.1:43123/callback"}, "code_challenge": {challenge}, "state": {"app-state"},
 	}.Encode(), nil))
-	res := browser.do(http.MethodGet, callback(url.Values{"state": {s}, "error": {"access_denied"}}), nil)
+	res = browser.do(http.MethodGet, callback(url.Values{"state": {s}, "error": {"access_denied"}}), nil)
 	if res.status != http.StatusFound || res.header.Get("Location") != "http://127.0.0.1:43123/callback?error=access_denied&state=app-state" {
 		t.Fatalf("app callback with a provider error = %d %v", res.status, res.header)
 	}

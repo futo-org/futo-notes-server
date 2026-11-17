@@ -174,7 +174,17 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteError(w, r, http.StatusBadRequest, "Sign-in was not completed: "+providerError)
 		return
 	}
-	identity, err := s.identify(r.Context(), q.Get("code"), login)
+	code := q.Get("code")
+	if code == "" {
+		s.metrics.login(r.Context(), login.ForApp(), loginInvalidState)
+		if login.ForApp() {
+			redirectApp(w, r, login, url.Values{"error": {"invalid_request"}})
+			return
+		}
+		httputil.WriteError(w, r, http.StatusBadRequest, "Sign-in was not completed: missing code")
+		return
+	}
+	identity, err := s.identify(r.Context(), code, login)
 	if errors.Is(err, errNonceMismatch) {
 		s.metrics.login(r.Context(), login.ForApp(), loginInvalidState)
 		httputil.WriteError(w, r, http.StatusBadRequest, "Invalid login state")
