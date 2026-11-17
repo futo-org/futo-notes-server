@@ -191,9 +191,9 @@ func TestTestAuthorizeShortcut(t *testing.T) {
 	}
 }
 
-// authTimeOf runs /test/authorize for sub with extra parameters and returns
-// the auth_time of the ID token it leads to.
-func authTimeOf(t *testing.T, srv *httptest.Server, rp relyingParty, sub string, extra url.Values) int64 {
+// testClaims runs /test/authorize for sub with extra parameters and decodes
+// the claims of the ID token it leads to into claims.
+func testClaims(t *testing.T, srv *httptest.Server, rp relyingParty, sub string, extra url.Values, claims any) {
 	t.Helper()
 	pkce := oauth2.GenerateVerifier()
 	u, _ := url.Parse(rp.oauth.AuthCodeURL("s", oauth2.S256ChallengeOption(pkce)))
@@ -213,13 +213,64 @@ func authTimeOf(t *testing.T, srv *httptest.Server, rp relyingParty, sub string,
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}
+	if err := idToken.Claims(claims); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// authTimeOf runs /test/authorize for sub with extra parameters and returns
+// the auth_time of the ID token it leads to.
+func authTimeOf(t *testing.T, srv *httptest.Server, rp relyingParty, sub string, extra url.Values) int64 {
+	t.Helper()
 	var claims struct {
 		AuthTime int64 `json:"auth_time"`
 	}
-	if err := idToken.Claims(&claims); err != nil || claims.AuthTime == 0 {
-		t.Fatalf("auth_time claim = %d, %v", claims.AuthTime, err)
+	testClaims(t, srv, rp, sub, extra, &claims)
+	if claims.AuthTime == 0 {
+		t.Fatal("no auth_time claim")
 	}
 	return claims.AuthTime
+}
+
+func TestEmailVerifiedOverride(t *testing.T) {
+	srv := mockoidctest.Start(t, testConfig())
+	rp := newRelyingParty(t, srv.URL)
+	for value, want := range map[string]bool{"": true, "true": true, "false": false} {
+		var claims struct {
+			EmailVerified *bool `json:"email_verified"`
+		}
+		testClaims(t, srv, rp, "user-1", url.Values{"email_verified": {value}}, &claims)
+		if claims.EmailVerified == nil || *claims.EmailVerified != want {
+			t.Errorf("email_verified=%q: claim = %v, want %v", value, claims.EmailVerified, want)
+		}
+	}
+
+	u, _ := url.Parse(rp.oauth.AuthCodeURL("s", oauth2.S256ChallengeOption(oauth2.GenerateVerifier())))
+	q := u.Query()
+	q.Set("sub", "user-1")
+	q.Set("email_verified", "maybe")
+	resp, err := noRedirects.Get(srv.URL + "/test/authorize?" + q.Encode())
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("email_verified=maybe: status %d, want 400", resp.StatusCode)
+	}
+
+	// The form offers it as a checkbox, and never passes a query's value
+	// through as a hidden field ahead of it.
+	q.Set("email_verified", "false")
+	page, err := http.Get(srv.URL + "/authorize?" + q.Encode())
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(page.Body)
+	page.Body.Close()
+	if !strings.Contains(string(body), `<input name="email_verified" type="checkbox" value="false"`) ||
+		strings.Contains(string(body), `type="hidden" name="email_verified"`) {
+		t.Errorf("login form:\n%s", body)
+	}
 }
 
 func TestTestAuthorizeSignsInAfresh(t *testing.T) {

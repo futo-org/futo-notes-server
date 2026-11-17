@@ -12,6 +12,10 @@
 // issued. /test/authorize's auth_time parameter (Unix seconds) overrides the
 // claim, to play a provider that answers with an older SSO session or ignores
 // max_age.
+//
+// Every email is verified unless the login says email_verified=false (the
+// form's checkbox, or /test/authorize's parameter), to play a provider that
+// has not confirmed the address.
 package mockoidc
 
 import (
@@ -56,9 +60,10 @@ type Config struct {
 
 // Identity is what a login asserts about the user.
 type Identity struct {
-	Subject string
-	Email   string
-	Name    string
+	Subject       string
+	Email         string
+	Name          string
+	EmailVerified bool
 }
 
 // Provider is an in-memory OIDC issuer. It is safe for concurrent use.
@@ -197,6 +202,13 @@ func identityFrom(q url.Values) (Identity, error) {
 	if id.Subject == "" {
 		return Identity{}, errors.New("sub is required")
 	}
+	switch verified := q.Get("email_verified"); verified {
+	case "", "true":
+		id.EmailVerified = true
+	case "false":
+	default:
+		return Identity{}, fmt.Errorf("email_verified must be true or false, got %q", verified)
+	}
 	if id.Email == "" {
 		id.Email = id.Subject + "@example.test"
 	}
@@ -213,7 +225,7 @@ func (p *Provider) authorizeForm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The form's own fields must be the first values the POST sees.
-	for _, k := range []string{"sub", "email", "name"} {
+	for _, k := range []string{"sub", "email", "name", "email_verified"} {
 		params.Del(k)
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -373,7 +385,7 @@ func scopedClaims(id Identity, scopes []string) jwt.MapClaims {
 	}
 	if slices.Contains(scopes, "email") {
 		c["email"] = id.Email
-		c["email_verified"] = true
+		c["email_verified"] = id.EmailVerified
 	}
 	return c
 }
