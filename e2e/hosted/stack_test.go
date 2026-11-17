@@ -191,6 +191,7 @@ func startStack(t *testing.T) *stack {
 		"OIDC_CLIENT_SECRET=" + oidcClientSecret,
 		"REGIONS_FILE=" + regionsFile,
 		"API_SIGNING_KEY=" + readFile(t, root, "dev/hosted-keys/api.key.pem"),
+		"STORAGE_REFRESH_ROTATION_KEY=" + readFile(t, root, "dev/hosted-keys/storage-refresh-rotation.key"),
 		"COOKIE_SECURE=false",
 		"DEV_UI=true",
 		"DRAIN_DELAY_MS=0",

@@ -107,9 +107,10 @@ PKCE (S256) is mandatory. Go tests can run it in-process with
 
 Token keys are Ed25519 PEM blocks with a `kid` header; `mise run keygen -kid
 <kid>` prints a new pair. `dev/hosted-keys/` holds **dev-only** pairs for the
-API and the three regions; never use them outside local development and tests.
-`charts/apps/storage/values.yaml` carries copies of them for `useDevKeys`;
-change both together.
+API and the three regions, plus `storage-refresh-rotation.key`, the API's
+dev `STORAGE_REFRESH_ROTATION_KEY`; never use them outside local development
+and tests. `charts/apps/storage/values.yaml` and `charts/apps/api/values.yaml`
+carry copies of them for `useDevKeys`; change them together.
 
 ### Storage service
 

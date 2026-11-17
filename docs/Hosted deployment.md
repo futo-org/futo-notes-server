@@ -79,6 +79,7 @@ keys are committed.
 | CNPG backup (`backup.secretName`) | `ACCESS_KEY_ID`, `ACCESS_SECRET_KEY`, `CA_CERT` | The backup object store. barman cannot skip TLS verification, so `CA_CERT` is required. |
 | `notes-api` | `OIDC_CLIENT_SECRET` | The Zitadel application's client secret. |
 | | `API_SIGNING_KEY` | One Ed25519 private key PEM (with `kid`): signs storage access and admin tokens. |
+| | `STORAGE_REFRESH_ROTATION_KEY` | 32 random bytes, base64 (`openssl rand -base64 32`): derives each storage refresh token's successor, `base64url(HMAC-SHA256(key, token))`, so an exchange whose response was lost can be repeated. The API refuses to start without it. |
 | `notes-storage-<region>` | `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | Credentials for the region's bucket: get, put, list and delete objects. |
 | | `API_PUBLIC_KEYS` | The public half of the API signing key, one PEM block per `kid` (several during rotation). Same value in every region. |
 | | `RECEIPT_SIGNING_KEY` | This region's Ed25519 private key PEM (with `kid`): signs upload receipts. |
@@ -181,6 +182,16 @@ Access tokens live 24 h; admin tokens live 5 min.
 
 Doing step 3 before step 2 has finished in every region makes that region
 reject new tokens with 401.
+
+### Storage refresh rotation key
+
+No overlap is needed. Set `STORAGE_REFRESH_ROTATION_KEY` in `notes-api` to a
+new `openssl rand -base64 32` and restart the API Deployment. Every device's
+newest refresh token keeps working, because the API stores each successor when
+it first issues it. The only casualty is a device that presents a token it
+already exchanged under the old key (its response was lost across the
+restart): it gets `401` `refresh_token_invalid` and signs in again. Its
+session is not revoked.
 
 ### Region receipt key
 
@@ -330,10 +341,12 @@ as soon as the new one is in place.
   once. Unclaimed receipts signed with the old key are refused, so those
   clients re-upload. Then review ledger rows claimed in that region since the
   suspected compromise.
+- **Storage refresh rotation key**: rotate it as above. Holding it alone
+  gives nothing: deriving a successor needs the refresh token too.
 - **OIDC client secret**: regenerate it in Zitadel, update `notes-api`
   `OIDC_CLIENT_SECRET`, and restart the API. Existing sessions are unaffected.
 - **A user's session or refresh token**: revoke the device from the dashboard or
-  with `DELETE /api/sessions/{id}`. A refresh token that was already rotated
-  and is presented again revokes its session by itself. Access tokens already
+  with `DELETE /api/sessions/{id}`. A refresh token presented again after
+  its successor was exchanged revokes its session by itself. Access tokens already
   issued stay valid until they expire (at most 24 h). That is the accepted cost
   of keeping storage stateless.

@@ -116,16 +116,19 @@ regions:
 
 # Dev-only literal: the mock issuer's client secret. Prod's Secret (same name,
 # notes-api) arrives via an ExternalSecret with secretData nulled in the base
-# HelmRelease; it must hold OIDC_CLIENT_SECRET and API_SIGNING_KEY (the
-# Ed25519 key access tokens are signed with; every storage region lists its
-# public half).
+# HelmRelease; it must hold OIDC_CLIENT_SECRET, API_SIGNING_KEY (the Ed25519
+# key access tokens are signed with; every storage region lists its public
+# half) and STORAGE_REFRESH_ROTATION_KEY (base64 of 32 random bytes,
+# `openssl rand -base64 32`), which derives each storage refresh token's
+# successor; see docs/Hosted deployment.md for rotating it.
 secretData:
   OIDC_CLIENT_SECRET: notes-dev-secret
 
-# OPT-IN dev signing key: a copy of dev/hosted-keys/api.key.pem (keep them in
-# sync). Rendered into the Secret ONLY when useDevKeys is true (local dev
-# only). Default false: with no key provided the pod fails loudly instead of
-# minting storage tokens with a published key.
+# OPT-IN dev keys: copies of dev/hosted-keys/api.key.pem and
+# dev/hosted-keys/storage-refresh-rotation.key (keep them in sync). Rendered
+# into the Secret ONLY when useDevKeys is true (local dev only). Default
+# false: with no keys provided the pod fails loudly instead of minting storage
+# tokens with published keys.
 useDevKeys: false
 devApiSigningKey: |
   -----BEGIN PRIVATE KEY-----
@@ -133,6 +136,7 @@ devApiSigningKey: |
 
   MC4CAQAwBQYDK2VwBCIEIMqka7skX4urbRvM17paUV+TkdUo2YKn/YJzKQ6t3MDJ
   -----END PRIVATE KEY-----
+devStorageRefreshRotationKey: ZgjmXfc6wQRWNBFWdNo7n44GbOsbCrmD1jL363GGMmM=
 
 env:
   - name: API_PORT

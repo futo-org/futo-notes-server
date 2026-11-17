@@ -219,7 +219,9 @@ client changes, tracked separately:
 - Hosted sessions, and the storage refresh tokens bound to them, last **90 days, sliding**: every
   use extends them. Self-hosted stays at a fixed 7 days.
 - The storage refresh token is opaque and **rotates on every exchange**, with reuse detection.
-  Presenting an already-rotated token revokes the whole session.
+  Its successor is derived from it (`HMAC-SHA256(STORAGE_REFRESH_ROTATION_KEY, token)`), so
+  presenting a token again returns the same successor until that successor is exchanged. Presenting
+  it after that revokes the whole session.
 - While a deletion is pending, only account, restore, session and logout endpoints work.
 
 ## Build order

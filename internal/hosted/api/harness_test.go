@@ -115,6 +115,7 @@ func newHarnessWith(t *testing.T, configure func(*config.Config)) *harness {
 		AppRedirectSchemes: []string{appScheme},
 		Regions:            regions,
 		SigningKey:         apiKey,
+		RefreshRotationKey: bytes.Repeat([]byte{0x42}, 32),
 	}
 	configure(&cfg)
 	server, err := api.New(api.Options{

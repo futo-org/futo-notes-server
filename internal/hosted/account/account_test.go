@@ -1,6 +1,7 @@
 package account_test
 
 import (
+	"bytes"
 	"errors"
 	"sync"
 	"sync/atomic"
@@ -42,6 +43,9 @@ func newUser(t *testing.T, database *db.DB, store *account.Store) auth.User {
 	return user
 }
 
+// rotationKey derives refresh token successors in these tests.
+var rotationKey = bytes.Repeat([]byte{0x17}, account.RotationKeySize)
+
 const verifier = "dBjftJeZ4CVP-mJ92K9YQ4WllYjv4Ac4lDmRVLz4xBxl0vpEqbr7iw"
 
 var challenge = oauth2.S256ChallengeFromVerifier(verifier)
@@ -62,7 +66,7 @@ func appSession(t *testing.T, store *account.Store, user auth.User) account.AppS
 
 func TestUpsertUserBySubRefreshesProfile(t *testing.T) {
 	database := hostedtest.Postgres(t)
-	store := account.New(database)
+	store := account.New(database, rotationKey)
 	sub := "upsert-" + uuid.NewV7().String()
 	first, err := store.UpsertUser(t.Context(), account.Identity{Subject: sub, Email: "a-" + sub + "@example.test", Name: "First"})
 	if err != nil {
@@ -92,7 +96,7 @@ func TestUpsertUserBySubRefreshesProfile(t *testing.T) {
 func TestSessionsSlideAndExpire(t *testing.T) {
 	database := hostedtest.Postgres(t)
 	c := newClock()
-	store := c.store(account.New(database))
+	store := c.store(account.New(database, rotationKey))
 	ctx := t.Context()
 	user := newUser(t, database, store)
 
@@ -151,7 +155,7 @@ func TestSessionsSlideAndExpire(t *testing.T) {
 func TestRefreshTokenRotationAndReuseDetection(t *testing.T) {
 	database := hostedtest.Postgres(t)
 	c := newClock()
-	store := c.store(account.New(database))
+	store := c.store(account.New(database, rotationKey))
 	ctx := t.Context()
 	user := newUser(t, database, store)
 	session := appSession(t, store, user)
@@ -174,18 +178,31 @@ func TestRefreshTokenRotationAndReuseDetection(t *testing.T) {
 		t.Fatalf("exchange = %#v", first)
 	}
 
-	c.advance(2 * time.Second)
-	if _, err := store.ExchangeRefreshToken(ctx, session.RefreshToken); !errors.Is(err, account.ErrRefreshTokenRotating) {
-		t.Fatalf("rotated token within the grace = %v, want ErrRefreshTokenRotating", err)
+	if first.Reissued {
+		t.Fatalf("first exchange reported as reissued: %#v", first)
+	}
+
+	// The response was lost: the device presents the same token again and
+	// gets the same successor, signed in still.
+	c.advance(time.Hour)
+	again, err := store.ExchangeRefreshToken(ctx, session.RefreshToken)
+	if err != nil {
+		t.Fatalf("re-presenting a token whose successor is unused = %v", err)
+	}
+	if again.RefreshToken != first.RefreshToken || !again.Reissued || again.RegionID != "us-east" {
+		t.Fatalf("re-presented exchange = %#v, want the same successor %q", again, first.RefreshToken)
 	}
 	second, err := store.ExchangeRefreshToken(ctx, first.RefreshToken)
 	if err != nil {
-		t.Fatalf("the replacement still works after a concurrent loser: %v", err)
+		t.Fatalf("the successor after a lost response: %v", err)
+	}
+	if second.RefreshToken == first.RefreshToken || second.Reissued {
+		t.Fatalf("second exchange = %#v", second)
 	}
 
-	c.advance(time.Minute)
+	// The chain has moved on past the token's successor: reuse.
 	if _, err := store.ExchangeRefreshToken(ctx, session.RefreshToken); !errors.Is(err, account.ErrRefreshTokenReused) {
-		t.Fatalf("rotated token later = %v, want ErrRefreshTokenReused", err)
+		t.Fatalf("token whose successor was exchanged = %v, want ErrRefreshTokenReused", err)
 	}
 	if _, err := store.ExchangeRefreshToken(ctx, second.RefreshToken); !errors.Is(err, account.ErrInvalidRefreshToken) {
 		t.Fatalf("current token after reuse = %v, want the session revoked", err)
@@ -195,9 +212,62 @@ func TestRefreshTokenRotationAndReuseDetection(t *testing.T) {
 	}
 }
 
-func TestConcurrentRefreshExchangesHaveOneWinner(t *testing.T) {
+func TestRefreshTokensStoreHashesOnly(t *testing.T) {
 	database := hostedtest.Postgres(t)
-	store := account.New(database)
+	store := account.New(database, rotationKey)
+	ctx := t.Context()
+	user := newUser(t, database, store)
+	if err := store.ChooseRegion(ctx, user.ID, "us-east"); err != nil {
+		t.Fatal(err)
+	}
+	session := appSession(t, store, user)
+	exchange, err := store.ExchangeRefreshToken(ctx, session.RefreshToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, token := range []string{session.RefreshToken, exchange.RefreshToken} {
+		var n int
+		if err := database.QueryRowContext(ctx, `SELECT count(*) FROM storage_refresh_tokens WHERE token_hash = $1`,
+			auth.HashToken(token)).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 1 {
+			t.Fatalf("rows under the hash of %q = %d, want 1", token, n)
+		}
+	}
+}
+
+func TestRefreshTokenAfterRotationKeyChange(t *testing.T) {
+	database := hostedtest.Postgres(t)
+	store := account.New(database, rotationKey)
+	ctx := t.Context()
+	user := newUser(t, database, store)
+	if err := store.ChooseRegion(ctx, user.ID, "us-east"); err != nil {
+		t.Fatal(err)
+	}
+	session := appSession(t, store, user)
+	exchange, err := store.ExchangeRefreshToken(ctx, session.RefreshToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rotated := account.New(database, bytes.Repeat([]byte{0x5a}, account.RotationKeySize))
+	if _, err := rotated.ExchangeRefreshToken(ctx, session.RefreshToken); !errors.Is(err, account.ErrInvalidRefreshToken) {
+		t.Fatalf("spent token after the rotation key changed = %v, want ErrInvalidRefreshToken", err)
+	}
+	if _, err := rotated.Authenticate(ctx, session.Token); err != nil {
+		t.Fatalf("a token derived under the old key must not revoke the session: %v", err)
+	}
+	// The successor itself was stored, so it still exchanges under the new
+	// key.
+	if _, err := rotated.ExchangeRefreshToken(ctx, exchange.RefreshToken); err != nil {
+		t.Fatalf("the unexchanged successor after the key changed = %v", err)
+	}
+}
+
+func TestConcurrentRefreshExchangesShareOneSuccessor(t *testing.T) {
+	database := hostedtest.Postgres(t)
+	store := account.New(database, rotationKey)
 	ctx := t.Context()
 	user := newUser(t, database, store)
 	if err := store.ChooseRegion(ctx, user.ID, "eu-central"); err != nil {
@@ -206,39 +276,45 @@ func TestConcurrentRefreshExchangesHaveOneWinner(t *testing.T) {
 	session := appSession(t, store, user)
 
 	const racers = 8
-	results := make([]error, racers)
+	results := make([]account.Exchange, racers)
+	errs := make([]error, racers)
 	var start, done sync.WaitGroup
 	start.Add(1)
 	for i := range racers {
 		done.Go(func() {
 			start.Wait()
-			_, results[i] = store.ExchangeRefreshToken(ctx, session.RefreshToken)
+			results[i], errs[i] = store.ExchangeRefreshToken(ctx, session.RefreshToken)
 		})
 	}
 	start.Done()
 	done.Wait()
 
-	won := 0
-	for _, err := range results {
-		switch {
-		case err == nil:
-			won++
-		case errors.Is(err, account.ErrRefreshTokenRotating):
-		default:
-			t.Fatalf("racer error = %v, want nil or ErrRefreshTokenRotating", err)
+	rotatedBy := 0
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("racer %d error = %v, want every racer to succeed", i, err)
+		}
+		if results[i].RefreshToken != results[0].RefreshToken {
+			t.Fatalf("racers got different successors: %q and %q", results[i].RefreshToken, results[0].RefreshToken)
+		}
+		if !results[i].Reissued {
+			rotatedBy++
 		}
 	}
-	if won != 1 {
-		t.Fatalf("winners = %d, want exactly 1 (%v)", won, results)
+	if rotatedBy != 1 {
+		t.Fatalf("racers that rotated the token = %d, want exactly 1", rotatedBy)
 	}
 	if _, err := store.Authenticate(ctx, session.Token); err != nil {
-		t.Fatalf("losing a race must not revoke the session: %v", err)
+		t.Fatalf("concurrent exchanges must not revoke the session: %v", err)
+	}
+	if _, err := store.ExchangeRefreshToken(ctx, results[0].RefreshToken); err != nil {
+		t.Fatalf("the shared successor = %v", err)
 	}
 }
 
 func TestRefreshExchangeRefusedWhilePendingDeletion(t *testing.T) {
 	database := hostedtest.Postgres(t)
-	store := account.New(database)
+	store := account.New(database, rotationKey)
 	ctx := t.Context()
 	user := newUser(t, database, store)
 	if err := store.ChooseRegion(ctx, user.ID, "us-east"); err != nil {
@@ -261,12 +337,19 @@ func TestRefreshExchangeRefusedWhilePendingDeletion(t *testing.T) {
 	if _, err := store.ExchangeRefreshToken(ctx, session.RefreshToken); err != nil {
 		t.Fatalf("a refused exchange must leave the token unspent: %v", err)
 	}
+	// Re-presenting the spent token is refused the same way.
+	if err := store.RequestDeletion(ctx, user.ID, p.Session.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ExchangeRefreshToken(ctx, session.RefreshToken); !errors.Is(err, account.ErrPendingDeletion) {
+		t.Fatalf("re-presented token while pending deletion = %v, want ErrPendingDeletion", err)
+	}
 }
 
 func TestAppCodesAreSingleUseAndBoundToTheChallenge(t *testing.T) {
 	database := hostedtest.Postgres(t)
 	c := newClock()
-	store := c.store(account.New(database))
+	store := c.store(account.New(database, rotationKey))
 	ctx := t.Context()
 	user := newUser(t, database, store)
 
@@ -309,7 +392,7 @@ func TestAppCodesAreSingleUseAndBoundToTheChallenge(t *testing.T) {
 func TestLoginsAreTakenOnceAndExpire(t *testing.T) {
 	database := hostedtest.Postgres(t)
 	c := newClock()
-	store := c.store(account.New(database))
+	store := c.store(account.New(database, rotationKey))
 	ctx := t.Context()
 
 	login := account.Login{State: auth.GenerateToken(), Nonce: "n", CodeVerifier: "v",
@@ -341,7 +424,7 @@ func TestLoginsAreTakenOnceAndExpire(t *testing.T) {
 func TestRegionIsChosenOnceAndDeletionCanBeRestored(t *testing.T) {
 	database := hostedtest.Postgres(t)
 	c := newClock()
-	store := c.store(account.New(database))
+	store := c.store(account.New(database, rotationKey))
 	ctx := t.Context()
 	user := newUser(t, database, store)
 
@@ -399,7 +482,7 @@ func TestRegionIsChosenOnceAndDeletionCanBeRestored(t *testing.T) {
 
 func TestRestoreRefusesOnceThePurgeIsDue(t *testing.T) {
 	database := hostedtest.Postgres(t)
-	store := account.New(database)
+	store := account.New(database, rotationKey)
 	ctx := t.Context()
 	user := newUser(t, database, store)
 

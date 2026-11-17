@@ -5,6 +5,7 @@ package config
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/rs/zerolog"
 
+	"futo-notes-server/internal/hosted/account"
 	"futo-notes-server/internal/hostedauth"
 	"futo-notes-server/internal/hostedenv"
 )
@@ -51,9 +53,12 @@ type Config struct {
 	AppRedirectSchemes []string
 	Regions            []Region
 	// SigningKey signs the access tokens storage services accept.
-	SigningKey   hostedauth.SigningKey
-	CookieSecure bool
-	DevUI        bool
+	SigningKey hostedauth.SigningKey
+	// RefreshRotationKey derives each storage refresh token's successor
+	// (STORAGE_REFRESH_ROTATION_KEY).
+	RefreshRotationKey []byte
+	CookieSecure       bool
+	DevUI              bool
 	// DrainDelay is how long readiness fails before the listener closes, and
 	// ShutdownTimeout how long in-flight requests may then take.
 	DrainDelay      time.Duration
@@ -140,6 +145,9 @@ func Load(getenv Getenv) (Config, error) {
 	}
 	if cfg.SigningKey, err = hostedauth.ParseSigningKey([]byte(signingKey)); err != nil {
 		return Config{}, fmt.Errorf("API_SIGNING_KEY: %w", err)
+	}
+	if cfg.RefreshRotationKey, err = rotationKey(getenv("STORAGE_REFRESH_ROTATION_KEY")); err != nil {
+		return Config{}, err
 	}
 	if cfg.CookieSecure, err = hostedenv.Bool(getenv, "COOKIE_SECURE", true); err != nil {
 		return Config{}, err
@@ -272,6 +280,20 @@ func publicURL(value string) (string, error) {
 		return "", fmt.Errorf("PUBLIC_URL must be an http(s) origin such as https://notes.example.com, got %q", value)
 	}
 	return strings.TrimSuffix(value, "/"), nil
+}
+
+// rotationKey parses STORAGE_REFRESH_ROTATION_KEY: standard base64 of
+// account.RotationKeySize random bytes.
+func rotationKey(value string) ([]byte, error) {
+	if value == "" {
+		return nil, errors.New("STORAGE_REFRESH_ROTATION_KEY is required")
+	}
+	key, err := base64.StdEncoding.DecodeString(strings.TrimSpace(value))
+	if err != nil || len(key) != account.RotationKeySize {
+		return nil, fmt.Errorf("STORAGE_REFRESH_ROTATION_KEY must be the base64 of %d random bytes (openssl rand -base64 %d)",
+			account.RotationKeySize, account.RotationKeySize)
+	}
+	return key, nil
 }
 
 // redirectSchemes parses APP_REDIRECT_SCHEMES. http and https are refused:

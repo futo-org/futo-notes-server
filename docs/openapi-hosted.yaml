@@ -401,11 +401,13 @@ paths:
         Returns a 24h access token for the user's region's storage service
         and the refresh token that replaces the one sent.
 
-        The refresh token **rotates on every exchange**. Presenting a token
-        that was rotated more than a few seconds ago is treated as theft: it
-        signs the session out (`401`). Presenting it within that grace, as a
-        concurrent request would, answers `409`; use the token the other
-        request got.
+        The refresh token **rotates on every exchange**, and its replacement
+        is derived from it. Presenting a token again while its replacement
+        has never been exchanged answers `200` with **the same replacement**
+        and a fresh access token. So a retry after a lost response, or two
+        concurrent requests, all end up with one token to keep. Presenting it
+        once the replacement has itself been exchanged is treated as theft:
+        it signs the session out (`401`).
       requestBody:
         required: true
         content:
@@ -440,7 +442,10 @@ paths:
                     format: date-time
                   refresh_token:
                     type: string
-                    description: The replacement refresh token. The one sent is now spent.
+                    description: |
+                      The replacement refresh token. Keep it in place of the one
+                      sent. Sending the old one again returns this same token
+                      until this one is exchanged.
                   region:
                     type: object
                     required: [id, endpoint]
@@ -461,8 +466,10 @@ paths:
                 $ref: "#/components/schemas/HostedError"
         "401":
           description: |
-            Unknown or revoked refresh token (`Invalid refresh token`), or a
-            reused one, which also signs the session out
+            Unknown or revoked refresh token, or one whose replacement can no
+            longer be derived after a server key rotation (`Invalid refresh
+            token`): sign in again. Or a token whose replacement was already
+            exchanged, which also signs the session out
           headers:
             X-Request-Id:
               $ref: "#/components/headers/RequestId"
@@ -473,9 +480,7 @@ paths:
         "403":
           $ref: "#/components/responses/PendingDeletion"
         "409":
-          description: |
-            The token was rotated by a concurrent request moments ago, or
-            no region has been chosen yet
+          description: No region has been chosen yet
           headers:
             X-Request-Id:
               $ref: "#/components/headers/RequestId"

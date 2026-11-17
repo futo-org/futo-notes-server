@@ -180,14 +180,19 @@ func TestHostedScenario(t *testing.T) {
 
 	// Reusing a rotated refresh token signs the whole session out.
 	watch := s.login(t, sub, "e2e watch")
-	watchSession := currentSession(watch)
 	spent := watch.refresh
 	watch.storageToken()
-	watch.expect("refresh token reused within the rotation grace", watch.exchange(spent), http.StatusConflict)
-	watch.expect("session after a concurrent exchange", watch.api(http.MethodGet, "/api/auth", nil, ""), http.StatusOK)
-	// Past the grace a second use is reuse, not a race.
-	s.exec(t, `UPDATE storage_refresh_tokens SET rotated_at = rotated_at - interval '1 minute'
-		WHERE session_id = $1 AND rotated_at IS NOT NULL`, watchSession)
+	// Until its successor is used, the spent token returns that successor
+	// again, as after a lost response.
+	var again storageGrant
+	resp = watch.exchange(spent)
+	watch.expect("refresh token presented again before its successor is used", resp, http.StatusOK)
+	if err := json.Unmarshal(resp.body, &again); err != nil || again.RefreshToken != watch.refresh {
+		t.Fatalf("re-presented refresh token: %v %s, want the successor", err, resp.body)
+	}
+	watch.expect("session after a lost response", watch.api(http.MethodGet, "/api/auth", nil, ""), http.StatusOK)
+	// Once the successor is used, the spent token is reuse.
+	watch.storageToken()
 	watch.expect("refresh token reused", watch.exchange(spent), http.StatusUnauthorized)
 	watch.expect("current refresh token after reuse", watch.exchange(watch.refresh), http.StatusUnauthorized)
 	watch.expect("session after reuse", watch.api(http.MethodGet, "/api/auth", nil, ""), http.StatusUnauthorized)

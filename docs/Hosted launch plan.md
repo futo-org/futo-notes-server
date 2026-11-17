@@ -45,8 +45,10 @@ a token then works like this:
   is reuse. Revoke the session (401 `refresh_token_reused`), as today.
 
 The server still stores only hashes. The new secret is `STORAGE_REFRESH_ROTATION_KEY`
-(32 bytes, chart Secret), and rotating it invalidates every unexchanged successor
-once. The reuse rule moves from "spent" to "spent and its successor spent".
+(32 bytes, chart Secret). Each successor's hash is stored when it is first issued,
+so rotating the key only breaks re-presenting a token exchanged under the old key
+(401 `refresh_token_invalid`, session kept). The reuse rule moves from "spent" to
+"spent and its successor spent".
 
 ### A2. A stable `code` on every hosted error
 

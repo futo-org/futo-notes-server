@@ -362,7 +362,7 @@ func TestAccountPurgeEmptiesStorageAndRowsAndResumes(t *testing.T) {
 	e := newStorageEnv(t)
 	ctx := t.Context()
 	due, notDue, noRegion := e.user(testRegion), e.user(testRegion), e.user("")
-	accounts := account.New(e.database)
+	accounts := account.New(e.database, make([]byte, account.RotationKeySize))
 	objectStore := objects.New(e.database, events.PostgresPublisher{})
 	for _, userID := range []string{due, notDue, noRegion} {
 		if err := accounts.RequestDeletion(ctx, userID, uuid.NewV7().String()); err != nil {

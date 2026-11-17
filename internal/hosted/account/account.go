@@ -38,20 +38,23 @@ var (
 
 // Store reads and changes hosted account state.
 type Store struct {
-	database *db.DB
-	now      func() time.Time
+	database    *db.DB
+	rotationKey []byte
+	now         func() time.Time
 }
 
 // New returns a Store over database, which must have both migration tracks
-// applied.
-func New(database *db.DB) *Store {
-	return &Store{database: database, now: time.Now}
+// applied. rotationKey (RotationKeySize bytes) derives each storage refresh
+// token's successor; replacing it invalidates every successor not yet
+// exchanged.
+func New(database *db.DB, rotationKey []byte) *Store {
+	return &Store{database: database, rotationKey: rotationKey, now: time.Now}
 }
 
 // WithClock returns a copy of the store that reads the time from now, for
 // tests.
 func (s *Store) WithClock(now func() time.Time) *Store {
-	return &Store{database: s.database, now: now}
+	return &Store{database: s.database, rotationKey: s.rotationKey, now: now}
 }
 
 // Identity is what the identity provider asserts about a signed-in user.

@@ -32,7 +32,8 @@ type storageTokenRegion struct {
 
 // handleStorageToken serves POST /api/storage/token: a device spends its
 // storage refresh token for a 24h access token to its region's storage
-// service and the refresh token that replaces it.
+// service and the refresh token that replaces it. Spending it again before
+// the replacement is used returns the same replacement.
 func (s *Server) handleStorageToken(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		RefreshToken string `json:"refresh_token"`
@@ -55,10 +56,6 @@ func (s *Server) handleStorageToken(w http.ResponseWriter, r *http.Request) {
 		hlog.FromRequest(r).Warn().Msg("storage refresh token reused; session revoked")
 		httputil.WriteError(w, r, http.StatusUnauthorized, "Refresh token already used; the session has been signed out")
 		return
-	case errors.Is(err, account.ErrRefreshTokenRotating):
-		s.metrics.refresh(r.Context(), "concurrent")
-		httputil.WriteError(w, r, http.StatusConflict, "Refresh token was just rotated by a concurrent request; use the token that request returned")
-		return
 	case errors.Is(err, account.ErrPendingDeletion):
 		s.metrics.refresh(r.Context(), "pending_deletion")
 		syncapi.WriteError(w, http.StatusForbidden, account.ErrPendingDeletion.Error())
@@ -71,8 +68,12 @@ func (s *Server) handleStorageToken(w http.ResponseWriter, r *http.Request) {
 		serverError(w, r, "exchanging storage refresh token", err)
 		return
 	}
-	s.metrics.refresh(r.Context(), "rotated")
-	s.metrics.issued(r.Context(), tokenStorageRefresh)
+	if exchange.Reissued {
+		s.metrics.refresh(r.Context(), "reissued")
+	} else {
+		s.metrics.refresh(r.Context(), "rotated")
+		s.metrics.issued(r.Context(), tokenStorageRefresh)
+	}
 
 	region, ok := s.regions[exchange.RegionID]
 	if !ok {

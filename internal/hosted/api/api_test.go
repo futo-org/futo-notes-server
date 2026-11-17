@@ -262,10 +262,18 @@ func TestRegionChoiceAndStorageTokens(t *testing.T) {
 		t.Fatal("access token opens another region")
 	}
 
-	// The old token right after rotating reads as a concurrent exchange, not
-	// reuse, and the new one keeps working.
-	expectHostedError(t, anonymous.do(http.MethodPost, "/api/storage/token",
-		map[string]string{"refresh_token": tokens.StorageRefreshToken}), http.StatusConflict)
+	// Presenting the old token again, as after a lost response or from a
+	// concurrent request, returns the same successor, and that successor
+	// keeps working.
+	var again struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	anonymous.expect(http.MethodPost, "/api/storage/token",
+		map[string]string{"refresh_token": tokens.StorageRefreshToken}, http.StatusOK).json(t, &again)
+	if again.RefreshToken != issued.RefreshToken || again.AccessToken == "" {
+		t.Fatalf("re-presented refresh token = %#v, want the successor %q", again, issued.RefreshToken)
+	}
 	anonymous.expect(http.MethodPost, "/api/storage/token", map[string]string{"refresh_token": issued.RefreshToken}, http.StatusOK)
 	expectHostedError(t, anonymous.do(http.MethodPost, "/api/storage/token",
 		map[string]string{"refresh_token": "unknown"}), http.StatusUnauthorized)
@@ -276,12 +284,13 @@ func TestRefreshTokenReuseRevokesTheSession(t *testing.T) {
 	h := newHarness(t)
 	app, tokens := h.appLogin(h.newSub())
 	app.expect(http.MethodPut, "/api/account/region", map[string]string{"region_id": "eu-central"}, http.StatusOK)
-	app.expect(http.MethodPost, "/api/storage/token", map[string]string{"refresh_token": tokens.StorageRefreshToken}, http.StatusOK)
-	// Move the rotation out of the concurrent-exchange grace.
-	if _, err := h.database.ExecContext(t.Context(), `UPDATE storage_refresh_tokens SET rotated_at = rotated_at - interval '1 minute'
-		WHERE rotated_at IS NOT NULL AND session_id IN (SELECT id FROM sessions WHERE user_id = $1)`, tokens.User.ID); err != nil {
-		t.Fatal(err)
+	var first struct {
+		RefreshToken string `json:"refresh_token"`
 	}
+	app.expect(http.MethodPost, "/api/storage/token", map[string]string{"refresh_token": tokens.StorageRefreshToken}, http.StatusOK).json(t, &first)
+	// Exchanging the successor moves the chain on, so the first token is
+	// now reuse however soon it comes back.
+	app.expect(http.MethodPost, "/api/storage/token", map[string]string{"refresh_token": first.RefreshToken}, http.StatusOK)
 	expectHostedError(t, app.do(http.MethodPost, "/api/storage/token",
 		map[string]string{"refresh_token": tokens.StorageRefreshToken}), http.StatusUnauthorized)
 	if res := app.do(http.MethodGet, "/api/collections", nil); res.status != http.StatusUnauthorized ||

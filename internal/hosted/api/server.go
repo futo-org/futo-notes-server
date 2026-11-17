@@ -74,7 +74,7 @@ func New(o Options) (*Server, error) {
 	return &Server{
 		cfg:       o.Config,
 		database:  o.Database,
-		accounts:  account.New(o.Database),
+		accounts:  account.New(o.Database, o.Config.RefreshRotationKey),
 		hub:       o.Hub,
 		publisher: events.PostgresPublisher{},
 		minter:    hostedauth.NewMinter(o.Config.SigningKey),
