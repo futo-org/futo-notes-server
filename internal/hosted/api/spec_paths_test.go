@@ -247,6 +247,12 @@ func TestSpecSignInFailures(t *testing.T) {
 		t.Fatalf("app callback with no code = %d %v", res.status, res.header)
 	}
 
+	// A code the provider rejects cannot complete the sign-in.
+	browser = h.client()
+	s = state(browser.do(http.MethodGet, "/api/auth/oidc/start", nil))
+	expectHostedError(t, browser.do(http.MethodGet, callback(url.Values{"state": {s}, "code": {"unknown-code"}}), nil),
+		http.StatusBadGateway)
+
 	// The provider's error ends a dashboard sign-in here, and goes back to
 	// an app.
 	browser = h.client()
