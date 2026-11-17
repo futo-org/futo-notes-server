@@ -13,7 +13,7 @@ Status:
 | S2 | B1, B2, D | Done, in the MR stacked on !34 (`feat/hosted-vault-unlock-test-stack`) |
 | S3 | A6 | Done, in the MR stacked on S2 (`feat/hosted-batch-and-mail`). Storage batch upload is `POST /blobs/batch-upload`, next to batch fetch at `POST /blobs/batch` |
 | S4 | E | Done, in the same MR: the sender, templates, stamps and dev stack. Billing (S5) calls it. |
-| S5 | C | Not started |
+| S5 | C | S5a, the billing core, done on `feat/hosted-billing`: the model, gating, endpoints, webhooks, the mock web provider, the lapse and purge jobs, the emails, the dashboard and `/dev`. S5b, the App Store and Play adapters, in parallel. The real web adapter waits for the provider choice. |
 
 ## Decisions (2026-11-17)
 
@@ -208,6 +208,21 @@ GET  /api/pairings/{id}                                             → 202 | 20
       account to submit that subscription gets it.
 - **Dedup.** `billing_deliveries (source, delivery_id)` deduplicates webhooks.
 
+- **As built (S5a).**
+  - `users.store_account_token` and `users.lapsed_at`, the `entitlements` and
+    `billing_deliveries` tables: hosted migration `006_billing.sql`.
+  - An event older than the stored `event_at` is ignored; an equal one is
+    applied again, which changes nothing.
+  - A store event's owner is its row's owner, or else the account its
+    `AccountToken` names. A submission binds an unowned subscription to the
+    submitter unless the token names another live account (`409`).
+  - Entitled: a row `active` with `expires_at` after `now()`, or `grace` with
+    `grace_until` after `now()`. `Principal.Entitled` comes from the same
+    query as the session.
+  - Applying an event that entitles the account clears `lapsed_at` and the
+    three email stamps in the same transaction, unless the purge already
+    claimed the account.
+
 ### C2. Pluggable providers
 
 ```go
@@ -250,6 +265,16 @@ type StoreProvider interface {
 
 The capability document's `billing` becomes `true`.
 
+As built (S5a): `GET /api/billing` answers `{entitled, status, source,
+product_id, expires_at, grace_until, will_renew, store_account_token,
+rails: {web, app_store, play}}`. The subscription fields are `null` for an
+account that never subscribed. A rail is `true` when its provider is
+configured; prices come from the stores' own SDKs and the web checkout, not
+from this response. Webhooks answer `200 {"duplicate": bool}`, `400
+invalid_delivery`, `404` for an unconfigured source, and `413` over 1 MiB.
+The web provider is `BILLING_WEB_PROVIDER` (empty or `mock`; the mock needs
+`DEV_UI`). The store providers register in `cmd/api/billing.go`.
+
 ### C4. Gating
 
 - **Writes** answer `402` with code `subscription_required`, in the sync shape the
@@ -260,6 +285,16 @@ The capability document's `billing` becomes `true`.
 - **Storage access tokens** for an unentitled account carry a read-only scope,
   and storage refuses uploads without the write scope.
 - **Precedence:** 401, then 403 (pending deletion), then 402.
+- **As built (S5a).**
+  - The gated writes are the five above plus the batch claim
+    (`POST .../objects/batch`). Claiming a collection (`POST /api/collections`)
+    is not gated.
+  - The 402 body is `{"code":"subscription_required","error":"subscription required"}`.
+  - The read-only scope is `blobs.read`. Storage answers uploads with it
+    `403 write_not_allowed`.
+  - **Gating follows billing.** With no provider configured, `billing` is
+    `false` and nothing is gated, so a deployment with no way to pay stays
+    writable. Production must configure a provider.
 
 ### C5. Lapse and retention
 
@@ -283,6 +318,33 @@ All jobs run under `hostedjobs.locked`:
   no provider news for 7 days, are refreshed from the provider.
 - **Delivery-log pruning** after 30 days.
 - **Lapse purge** 90 days after lapse, sending the emails in E on the way.
+
+As built (S5a):
+
+- All three billing jobs run in the 6-hourly maintenance group, in this
+  order: reconciliation, `subscription lapses`, account purge, delivery
+  pruning.
+- Reconciliation refreshes rows that are still live (`active`, `grace`,
+  `on_hold`) and end within 24 h, or have had no update for 7 days. `expired`
+  and `revoked` rows are final. A provider reports a resubscription itself.
+- `subscription lapses` does the following:
+  - It sets `lapsed_at` when an account that has subscribed stops being
+    entitled. The value is when its entitlement ended: the paid period's
+    end, or a refund or hold reported before then.
+  - It sends the lapsed email, the warning at `lapsed_at + 83 days`, and
+    then claims the purge at `lapsed_at + 90 days` (`purge_at = now()`) and
+    purges.
+  - A failed send holds that account's later steps until the next run, so
+    nobody is purged unwarned.
+  - An account without an email address is purged without emails.
+  - Accounts pending a requested deletion are skipped: that purge comes
+    sooner.
+- The purge cancels web and Play renewals before deleting anything, and
+  stays due while a cancellation fails. For a lapsed account, it then
+  deletes the collections, sends the purged email, and deletes the user.
+- The lapse emails carry a Resend `Idempotency-Key`,
+  `lapse-email/<user>/<template>/<lapsed_at>`, and the purge date
+  `lapsed_at + 90 days`, so a repeated send is the same message.
 
 ### C7. Config
 

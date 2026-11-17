@@ -96,6 +96,41 @@ names the key and its generation, for example `api-2026-11` or
 Pods read Secrets only at startup. After changing one, restart the Deployment
 (`kubectl rollout restart deployment/<name>`).
 
+## Billing: web provider
+
+Billing is on when any payment provider is configured: the capability
+document says `"billing": true`, writes from an account without a
+subscription answer `402 subscription_required`, and its storage tokens are
+read-only (`blobs.read`). With no provider, billing is off and nothing is
+gated. The App Store and Play providers have their own settings (next to
+this section once they land).
+
+| Variable | Where | What |
+|---|---|---|
+| `BILLING_WEB_PROVIDER` | `env` | The web payment provider. Empty (the default) for none. `mock` is the dev and test-stack mock, whose checkout and portal are `/dev/billing` pages; the API refuses to start with it unless `DEV_UI=true`, so it never runs in production. The real provider (FUTOpay, Polar or Stripe) is not chosen yet; it will get its own value and settings. |
+| `BILLING_MOCK_WEBHOOK_SECRET` | dev and test stack only | With `mock`: the secret (16 characters or more) the mock signs its webhook deliveries with. Never in a chart. |
+
+Providers notify the API at `POST <publicUrl>/api/billing/webhooks/{web,app_store,play}`.
+These routes skip session auth and are authenticated by each provider's
+signature, so the ingress must admit them from the provider (see Network
+paths). Each delivery's id is kept 30 days to drop retries.
+
+The billing jobs run in the 6-hourly maintenance group, under the job lock:
+
+- `entitlement reconciliation` asks providers about live subscriptions that
+  end within a day or have had no news for a week.
+- `subscription lapses` records when an account stops being entitled
+  (`users.lapsed_at`), emails it then, warns it 83 days later, and purges it
+  90 days later through the account purge. Resubscribing at any point
+  before the purge clears the lapse and its email stamps.
+- `account purge`, before deleting an account (requested or lapsed), stops
+  its web and Play subscriptions renewing. App Store subscriptions cannot be
+  cancelled from the server. `DELETE /api/account` does the same at once.
+- `billing delivery pruning` drops delivery ids older than 30 days.
+
+Each email carries a Resend `Idempotency-Key` made of the user, the email and
+the lapse, so a send whose stamp failed to save is not delivered twice.
+
 ## Regions file
 
 `api`'s `regions` value is rendered into the ConfigMap `notes-api-regions` as
@@ -245,6 +280,7 @@ track (bookkeeping table `hosted_migrations`). The chart runs it as a Helm
 | API pods | each region's `endpoint`, path `/internal/*` | blob GC, orphan reconciliation and account purge. The API calls the same `endpoint` clients use. If the ingress restricts `/internal/*`, it must still admit the API's egress. These routes require an admin JWT either way. |
 | API pods | Zitadel issuer | discovery, code exchange and JWKS |
 | API pods | `resendApiUrl` (HTTPS, `POST /emails`) | lapse and purge emails, when `RESEND_API_KEY` is set |
+| payment providers | API `publicUrl`, path `/api/billing/webhooks/*` | subscription notifications; authenticated by the provider's signature, not a session |
 | API pods | `notes-db-rw` | Postgres, including `LISTEN/NOTIFY` for SSE across replicas |
 | storage pods | the region's S3 | blob bytes |
 | all pods | OTLP endpoint | metrics |
@@ -271,7 +307,7 @@ Metrics worth alerting on:
 | Metric | Service | Watch for |
 |---|---|---|
 | `http.server.request.errors`, `.duration` (by `route`) | both | 5xx rate and p99 latency |
-| `jobs.runs` (`job`, `outcome`) and `jobs.items` | api | any failed run, and no successful `account purge` or `blob GC` run for more than 12 h |
+| `jobs.runs` (`job`, `outcome`) and `jobs.items` | api | any failed run, and no successful `account purge`, `blob GC`, `entitlement reconciliation` or `subscription lapses` run for more than 12 h |
 | `storage_client.errors` (`region`, `operation`) | api | a region's internal endpoint failing |
 | `tokens.refreshes` (`outcome=reuse_detected`) | api | a spike means stolen refresh tokens or a client bug |
 | `receipts.verification_failures` (`reason`) | api | `invalid` after a receipt key change means step 2 was missed |
@@ -316,6 +352,13 @@ next run retries by itself.
 3. Due accounts: `SELECT id, region_id, purge_at FROM users WHERE purge_at <=
    now();`. A user whose `region_id` no longer exists in the regions file
    cannot be purged until it is restored there.
+4. A purge also stops the account's web and Play subscriptions renewing first,
+   and stays due while a provider refuses (`cancelling <source> subscription`
+   in the log). A subscription whose provider is no longer configured blocks
+   it the same way: restore the provider's configuration, or cancel the
+   subscription at the provider and set its row's `will_renew` to false.
+   A lapsed account's purge also waits for the purged email unless the user
+   has no address; check `RESEND_API_KEY` and Resend's status.
 
 ### A storage region is down
 
