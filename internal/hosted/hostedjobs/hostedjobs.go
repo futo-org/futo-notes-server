@@ -18,6 +18,7 @@ import (
 
 	"futo-notes-server/internal/db"
 	"futo-notes-server/internal/hosted/account"
+	"futo-notes-server/internal/hosted/pairing"
 	"futo-notes-server/internal/hosted/storageclient"
 	"futo-notes-server/internal/jobs"
 )
@@ -26,7 +27,8 @@ import (
 type RecordRun func(ctx context.Context, job string, err error)
 
 // Sessions is the hourly job group: expired sessions (and with them their
-// storage refresh tokens) and abandoned logins.
+// storage refresh tokens), abandoned logins, and expired pairings, whose
+// sealed vault keys should not outlive their window by long.
 func Sessions(database *db.DB, accounts *account.Store) []jobs.Job {
 	return []jobs.Job{
 		jobs.SessionReaping(database),
@@ -34,6 +36,13 @@ func Sessions(database *db.DB, accounts *account.Store) []jobs.Job {
 			Name: "oidc logins",
 			Run: func(ctx context.Context) (string, error) {
 				deleted, err := accounts.DeleteExpiredLogins(ctx)
+				return fmt.Sprintf("deleted %d", deleted), err
+			},
+		},
+		{
+			Name: "pairings",
+			Run: func(ctx context.Context) (string, error) {
+				deleted, err := pairing.DeleteExpired(ctx, database)
 				return fmt.Sprintf("deleted %d", deleted), err
 			},
 		},

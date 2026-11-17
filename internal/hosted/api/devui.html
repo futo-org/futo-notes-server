@@ -100,6 +100,27 @@
     </div>
   </section>
   <section class="card">
+    <h2>Pairing</h2>
+    <p class="muted">The new device opens a pairing and polls; the unlocked device (another tab signed in as the same user, or this one)
+      posts the vault key sealed to the pairing's public key. The server never opens the ciphertext, so any string stands in for it here.
+      A pairing lasts 5 minutes, and the first poll that returns the key deletes it.</p>
+    <div class="row">
+      <input id="pair-device" placeholder="device name" value="dev tab">
+      <input id="pair-platform" placeholder="platform" value="web" style="min-width:90px;flex:0">
+      <button id="pair-open">Open pairing (new device)</button>
+    </div>
+    <div class="row">
+      <input id="pair-id" placeholder="pairing id">
+      <input id="pair-ciphertext" placeholder="sealed key" value="sealed-vault-key">
+      <button id="pair-post">Post sealed key (unlocked device)</button>
+    </div>
+    <div class="row">
+      <button id="pair-poll">Poll once</button>
+      <button id="pair-wait">Poll until collected</button>
+      <button data-job="/dev/jobs/pairing-sweep">Sweep expired pairings</button>
+    </div>
+  </section>
+  <section class="card">
     <h2>Jobs</h2>
     <p class="muted">Runs a storage job now on this replica, outside its schedule and lock. Reconciliation deletes keys older than 48h
       that the ledger does not know; <em>now</em> (RFC 3339) shifts its clock, and an empty user means every prefix.</p>
@@ -250,6 +271,22 @@ $("key-rotate").onclick = async () => {
 };
 $("key-partial").onclick = () => call("PUT", keyPath(), Object.assign(keyBody({}), { recovery_key_salt: "only-a-salt", recovery_key_kdf: undefined, recovery_encrypted_vault_key: undefined }));
 $("key-get").onclick = async () => keySeen(await call("GET", keyPath()));
+$("pair-open").onclick = async () => {
+  const publicKey = b64url(crypto.getRandomValues(new Uint8Array(32)));
+  const res = await call("POST", "/api/pairings", { public_key: publicKey, device_name: $("pair-device").value, platform: $("pair-platform").value });
+  if (res.status === 201) $("pair-id").value = res.body.id;
+};
+const pairPath = () => "/api/pairings/" + encodeURIComponent($("pair-id").value.trim());
+$("pair-post").onclick = () => call("POST", pairPath() + "/key", { ciphertext: $("pair-ciphertext").value });
+$("pair-poll").onclick = () => call("GET", pairPath());
+$("pair-wait").onclick = async () => {
+  for (let i = 0; i < 150; i++) {
+    const res = await call("GET", pairPath());
+    if (res.status !== 202) return;
+    $("out").textContent = "202 pending, poll " + (i + 1) + "\n" + $("out").textContent;
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+};
 $("list").onclick = () => call("GET", "/api/collections/" + $("collection").value + "/objects");
 loadRegions();
 finishAppLogin().then(refreshWho);

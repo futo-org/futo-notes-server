@@ -137,6 +137,8 @@ func (s *Server) router() chi.Router {
 			})
 		})
 
+		api.Group(s.pairingRoutes)
+
 		api.Group(func(hosted chi.Router) {
 			hosted.Use(s.authenticate(hostedErrors))
 			hosted.Get("/account", s.handleAccount)

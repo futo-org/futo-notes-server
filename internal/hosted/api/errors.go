@@ -31,6 +31,9 @@ const (
 	codeReceiptExpired         = "receipt_expired"
 	codeReceiptWrongRegion     = "receipt_wrong_region"
 	codeReceiptWrongUser       = "receipt_wrong_user"
+	codePayloadTooLarge        = "payload_too_large"
+	// codePairingAlreadyKeyed answers a second key posted to a pairing.
+	codePairingAlreadyKeyed = "pairing_already_keyed"
 	// codeReauthenticationRequired asks the client to sign in again with
 	// reauthenticate=true before deleting the account.
 	codeReauthenticationRequired = "reauthentication_required"
