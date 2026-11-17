@@ -45,8 +45,8 @@ const (
 	startupTimeout    = 30 * time.Second
 )
 
-// Overridden by release builds with -X main.apiVersion=<tag>.
-var apiVersion = "0.1.0-dev"
+// Overridden by release builds with -X main.version=<tag>.
+var version = "0.1.0-dev"
 
 func main() {
 	zerolog.TimeFieldFormat = time.RFC3339
@@ -160,7 +160,7 @@ func run() error {
 	}
 
 	hub := events.NewHub()
-	server, err := api.New(api.Options{Config: cfg, Database: database, Hub: hub, Metrics: metrics, Version: apiVersion})
+	server, err := api.New(api.Options{Config: cfg, Database: database, Hub: hub, Metrics: metrics, Version: version})
 	if err != nil {
 		return err
 	}
@@ -183,7 +183,7 @@ func run() error {
 	defer stopSignals()
 	served := make(chan error, 1)
 	go func() {
-		log.Info().Int("port", cfg.Port).Str("version", apiVersion).Msg("starting api")
+		log.Info().Int("port", cfg.Port).Str("version", version).Msg("starting api")
 		served <- httpSrv.Serve(listener)
 	}()
 	select {
@@ -254,7 +254,7 @@ func setupMetrics(cfg config.Config) (meterShutdown, otelmetric.Meter, error) {
 	// which the TSDB merges and reads as counter resets.
 	resource, err := sdkresource.Merge(sdkresource.Default(), sdkresource.NewSchemaless(
 		attribute.String("service.name", serviceName),
-		attribute.String("service.version", apiVersion),
+		attribute.String("service.version", version),
 		attribute.String("service.instance.id", host),
 	))
 	if err != nil {

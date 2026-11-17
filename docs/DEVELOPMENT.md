@@ -139,6 +139,50 @@ derive from it). Its Secret `notes-storage-<region>` must hold
 `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `API_PUBLIC_KEYS` and
 `RECEIPT_SIGNING_KEY`.
 
+### API service
+
+`cmd/api` is the hosted API: the sync contract without the blob-byte routes,
+OIDC sign-in, storage tokens, and account, region and device management. It
+runs on the host, not in compose, because the mock issuer's URL is
+`http://localhost:8092` and the API must reach it under the same name browsers
+do:
+
+```bash
+mise run docker:start   # Postgres :15432, mock-oidc :8092
+mise run storage:dev    # optional: a region to upload to (:3015)
+mise run api:dev        # applies migrations, then serves :3005
+```
+
+`api:dev` uses the dev keys, `dev/hosted-regions.json` (the three storage dev
+ports) and `DEV_UI=true`: <http://localhost:3005/dev> drives dashboard and app
+sign-in, regions, devices, deletion, storage tokens and receipt-backed object
+writes. App sign-in there needs the page opened as `http://127.0.0.1:3005/dev`,
+because only loopback IP literals are allowed app redirect targets.
+
+`api migrate` applies the shared migrations and then the hosted track
+(`internal/hosted/hosteddb`, bookkeeping table `hosted_migrations`); `api`
+refuses to start while either has migrations pending. In Kubernetes the chart's
+pre-install/pre-upgrade hook Job runs it.
+
+The end-to-end client flow against a dev stack:
+
+1. `GET /api/auth/oidc/start?redirect_uri=http://127.0.0.1:<port>/cb&code_challenge=<S256>&state=<s>`
+   in a browser; after sign-in the API redirects to `redirect_uri` with
+   `code` and `state`.
+2. `POST /api/auth/oidc/token {"code", "code_verifier"}` returns
+   `{token, storage_refresh_token, user}`; `token` is the bearer session.
+3. `PUT /api/account/region {"region_id": "us-east"}` (once).
+4. `POST /api/storage/token {"refresh_token"}` returns an access token for the
+   region, its endpoint, and the next refresh token (the old one is spent).
+5. `POST <endpoint>/blobs` with the access token stores ciphertext and returns
+   `{key, size, receipt}`.
+6. `POST /api/collections/{id}/objects {"receipt"}` (or `PUT .../objects/{objectId}
+   {"version", "receipt"}`) claims it.
+
+The API's integration tests use `HOSTED_TEST_DATABASE_URL` (one database shared
+by every hosted package; `mise run test:integration` sets it) and run the OIDC
+flows against an in-process `mockoidc.StartTestServer`.
+
 ## Image tags
 
 The released image is `futotech/notes-server:stable` for both `linux/amd64` and

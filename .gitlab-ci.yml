@@ -35,10 +35,11 @@ test:go:
     BLOBS_TEST_DATABASE_URL: postgres://futo_notes:ci@postgres:5432/blobs_test
     SERVER_TEST_DATABASE_URL: postgres://futo_notes:ci@postgres:5432/server_test
     MIGRATION_TEST_DATABASE_URL: postgres://futo_notes:ci@postgres:5432/migration_test
+    HOSTED_TEST_DATABASE_URL: postgres://futo_notes:ci@postgres:5432/hosted_test
   before_script:
     - apt-get update && apt-get install -y --no-install-recommends postgresql-client
     - |
-      for db in objects_test events_test jobs_test blobs_test server_test migration_test; do
+      for db in objects_test events_test jobs_test blobs_test server_test migration_test hosted_test; do
         PGPASSWORD=ci createdb -h postgres -U futo_notes "$db"
       done
   script:
@@ -99,6 +100,18 @@ test:storage-image:
   script:
     - docker build -f cmd/storage/Dockerfile --build-arg VERSION="$CI_COMMIT_SHORT_SHA" -t futo-notes-storage:ci .
     - docker image inspect futo-notes-storage:ci --format '{{.Architecture}} {{.Size}}'
+
+test:api-image:
+  extends: .skip-soak-schedule
+  stage: test
+  image: docker:27
+  services:
+    - docker:27-dind
+  variables:
+    DOCKER_TLS_CERTDIR: /certs
+  script:
+    - docker build -f cmd/api/Dockerfile --build-arg VERSION="$CI_COMMIT_SHORT_SHA" -t futo-notes-api:ci .
+    - docker image inspect futo-notes-api:ci --format '{{.Architecture}} {{.Size}}'
 
 # This is the cutover gate, not a unit approximation. It creates databases with
 # the current and historical TypeScript servers, drives them with the native
@@ -272,6 +285,33 @@ publish:storage-image:
     - if: $CI_COMMIT_TAG
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
 
+publish:api-image:
+  stage: publish
+  image: docker:27
+  services:
+    - docker:27-dind
+  variables:
+    DOCKER_TLS_CERTDIR: /certs
+    GITLAB_IMAGE: $CI_REGISTRY_IMAGE/api
+  needs:
+    - test:go
+    - lint:go
+    - test:api-image
+  before_script:
+    - printf '%s' "$CI_REGISTRY_PASSWORD" | docker login --username "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+    - docker run --privileged --rm tonistiigi/binfmt:qemu-v10.2.3 --install arm64
+    - docker buildx create --use --name futo-notes-api --driver docker-container
+  script:
+    - VERSION_TAG=${CI_COMMIT_TAG:-$CI_COMMIT_SHORT_SHA}
+    - TRACK_TAG=$(if [ -n "$CI_COMMIT_TAG" ]; then echo stable; else echo latest; fi)
+    - docker buildx build -f cmd/api/Dockerfile --platform linux/amd64,linux/arm64 --provenance=false --build-arg VERSION="$VERSION_TAG" --tag "$GITLAB_IMAGE:$VERSION_TAG" --tag "$GITLAB_IMAGE:$TRACK_TAG" --push .
+    - docker buildx imagetools inspect "$GITLAB_IMAGE:$VERSION_TAG"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule" && $FUTO_SOAK_CHECK == "true"'
+      when: never
+    - if: $CI_COMMIT_TAG
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
 # Chart versions are 0.0.<pipeline iid>; appVersion is the short SHA, the tag
 # the image publish jobs push on the default branch. Charts go out only once
 # every image they point at exists, so each app chart's image job is in
@@ -282,6 +322,7 @@ publish:charts:
   needs:
     - k8s:validate
     - publish:storage-image
+    - publish:api-image
   script:
     - mise install helm
     - mise run charts:package "0.0.$CI_PIPELINE_IID" "$CI_COMMIT_SHORT_SHA" dist/charts

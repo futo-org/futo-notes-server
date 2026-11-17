@@ -16,7 +16,7 @@ set -euo pipefail
 compose=(docker compose -f compose.hosted.yml)
 pg_host=${PG_TEST_HOST:-localhost:15432}
 
-for db in objects_test events_test jobs_test blobs_test server_test migration_test; do
+for db in objects_test events_test jobs_test blobs_test server_test migration_test hosted_test; do
   "${compose[@]}" exec -T database dropdb --if-exists --force -U postgres "$db" 2>/dev/null
   "${compose[@]}" exec -T database createdb -U postgres "$db"
   var="$(echo "${db%_test}" | tr '[:lower:]' '[:upper:]')_TEST_DATABASE_URL"

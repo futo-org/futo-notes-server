@@ -1,0 +1,166 @@
+# The hosted API: sync, OIDC sign-in, storage tokens and accounts. Every
+# replica is stateless (sessions and logins in flight live in Postgres, sync
+# events fan out through Postgres LISTEN/NOTIFY), so any replica serves any
+# request without sticky sessions.
+
+# Three replicas + a PDB: a node drain or a bad node never takes sync down.
+replicas: 3
+
+pdb:
+  # One replica down at a time during voluntary disruptions.
+  minAvailable: 2
+
+# Never dip below the declared replica count mid-rollout.
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 25%
+    maxUnavailable: 0
+
+# Spread replicas over nodes so one node loss leaves two serving.
+# nodeTaintsPolicy Honor keeps cordoned and control-plane nodes out of the skew
+# count, or a drain would wedge scheduling; matchLabelKeys spreads each
+# ReplicaSet on its own mid-rollout.
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: DoNotSchedule
+    nodeTaintsPolicy: Honor
+    matchLabelKeys: [pod-template-hash]
+
+# Must exceed DRAIN_DELAY_MS + SHUTDOWN_TIMEOUT_MS (15s + 60s defaults), or the
+# kubelet kills the pod mid-request. Sync event streams end when the drain
+# closes the listener, so they do not hold it open.
+terminationGracePeriodSeconds: 90
+
+# Requests are small JSON; no blob bytes pass through the API. Never set a CPU
+# limit: throttling stretches tail latency.
+resources:
+  requests: { cpu: 100m, memory: 128Mi }
+  limits: { memory: 512Mi }
+
+# Stable in-cluster name, independent of the Helm release name (dev == prod).
+fullnameOverride: notes-api
+
+image:
+  repository: registry.gitlab.futo.org/futo-notes/futo-notes-server/api
+  # Empty defaults to the chart appVersion, which CI sets to the image tag it ships with.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+ports:
+  - name: http
+    containerPort: 3005
+
+service:
+  type: ClusterIP
+
+# CloudNativePG cluster (charts/platform/cnpg-cluster clusterName). The API and
+# the migration Job read POSTGRES_* from its generated "<cluster>-app" Secret.
+postgresClusterName: notes-db
+
+# Runs `api migrate` as a pre-install/pre-upgrade hook (templates/migration-job.yaml).
+# Pods refuse to start while migrations are pending, so turning this off means
+# migrating some other way first.
+migration:
+  enabled: true
+
+# The external origin users reach the API at. The OIDC callback is
+# <publicUrl>/api/auth/oidc/callback and must be registered with the identity
+# provider exactly.
+publicUrl: http://localhost:3005
+# Zitadel in prod. Dev points at the mock issuer, whose issuer URL must be the
+# same name the API and browsers resolve.
+oidcIssuer: http://mock-oidc:8092
+oidcClientId: notes-dev
+# Custom URL schemes apps may sign in through (redirect_uri), besides loopback
+# http. Empty until the apps ship hosted sign-in.
+appRedirectSchemes: []
+
+# The regions users choose from, rendered into the regions ConfigMap. endpoint
+# is the storage service's address as clients reach it; receipt_public_keys
+# lists every kid the region signs receipts with (old and new during
+# rotation). Dev: the compose/port-forward storage ports and the dev key
+# fixtures, copies of dev/hosted-regions.json (keep them in sync).
+regions:
+  - id: us-east
+    name: US East
+    description: Dev region served by the us-east storage service.
+    endpoint: http://localhost:3015
+    receipt_public_keys: |
+      -----BEGIN PUBLIC KEY-----
+      kid: dev-us-east-1
+
+      MCowBQYDK2VwAyEAQGQ7BdjDfan/tl+ALSVldSPP6DNW63u6Y/LKwjOcfEk=
+      -----END PUBLIC KEY-----
+  - id: eu-central
+    name: EU Central
+    description: Dev region served by the eu-central storage service.
+    endpoint: http://localhost:3016
+    receipt_public_keys: |
+      -----BEGIN PUBLIC KEY-----
+      kid: dev-eu-central-1
+
+      MCowBQYDK2VwAyEAqTuLNZFmwa3AyXRTsf7unn+YsCghgNShgCHJ8IlWHIg=
+      -----END PUBLIC KEY-----
+  - id: ap-southeast
+    name: Asia Pacific Southeast
+    description: Dev region served by the ap-southeast storage service.
+    endpoint: http://localhost:3017
+    receipt_public_keys: |
+      -----BEGIN PUBLIC KEY-----
+      kid: dev-ap-southeast-1
+
+      MCowBQYDK2VwAyEABlGLcn59vhOW49esdpWbmgkkQf82tNnUvmYDUKYUgJQ=
+      -----END PUBLIC KEY-----
+
+# Dev-only literal: the mock issuer's client secret. Prod's Secret (same name,
+# notes-api) arrives via an ExternalSecret with secretData nulled in the base
+# HelmRelease; it must hold OIDC_CLIENT_SECRET and API_SIGNING_KEY (the
+# Ed25519 key access tokens are signed with; every storage region lists its
+# public half).
+secretData:
+  OIDC_CLIENT_SECRET: notes-dev-secret
+
+# OPT-IN dev signing key: a copy of dev/hosted-keys/api.key.pem (keep them in
+# sync). Rendered into the Secret ONLY when useDevKeys is true (local dev
+# only). Default false: with no key provided the pod fails loudly instead of
+# minting storage tokens with a published key.
+useDevKeys: false
+devApiSigningKey: |
+  -----BEGIN PRIVATE KEY-----
+  kid: dev-api-1
+
+  MC4CAQAwBQYDK2VwBCIEIMqka7skX4urbRvM17paUV+TkdUo2YKn/YJzKQ6t3MDJ
+  -----END PRIVATE KEY-----
+
+env:
+  - name: API_PORT
+    value: "3005"
+  - name: LOG_LEVEL
+    value: debug
+  # Dev serves plain http on localhost, where a Secure cookie is dropped.
+  - name: COOKIE_SECURE
+    value: "false"
+  # Dev only: the fleet default is 15s, which would make every pod delete sit
+  # for a quarter minute with nothing to drain.
+  - name: DRAIN_DELAY_MS
+    value: "1000"
+  - name: OTLP_METRICS_ENDPOINT
+    value: victoria-metrics:8428
+  - name: OTLP_METRICS_URL_PATH
+    value: /opentelemetry/v1/metrics
+
+# Appended after the chart Secret (notes-api), so a key here wins over it.
+extraEnvFrom: []
+
+startupProbe:
+  tcpSocket: { port: http }
+  periodSeconds: 2
+  failureThreshold: 90
+# HTTP rather than TCP so a draining pod leaves the Service's endpoints before
+# its listener closes. No livenessProbe, deliberately.
+readinessProbe:
+  httpGet: { path: /readyz, port: http }
+  periodSeconds: 2
+  failureThreshold: 2
