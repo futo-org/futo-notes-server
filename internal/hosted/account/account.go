@@ -39,6 +39,17 @@ var (
 	ErrReauthenticationRequired = errors.New("reauthentication required")
 )
 
+// PendingDeletionError is ErrPendingDeletion with when the account will be
+// purged, so a client need not ask for its account to show it.
+type PendingDeletionError struct {
+	PurgeAt time.Time
+}
+
+func (e *PendingDeletionError) Error() string { return ErrPendingDeletion.Error() }
+
+// Unwrap makes errors.Is(err, ErrPendingDeletion) hold.
+func (e *PendingDeletionError) Unwrap() error { return ErrPendingDeletion }
+
 // ReauthWindow is how recent a session's sign-in must be to delete the
 // account.
 const ReauthWindow = 10 * time.Minute

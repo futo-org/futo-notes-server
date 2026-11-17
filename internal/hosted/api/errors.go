@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/rs/zerolog/hlog"
 
@@ -72,6 +73,16 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 
 // writePendingDeletion answers the 403 for an account scheduled for
 // deletion, in the sync contract's shape with its code, wherever it occurs.
-func writePendingDeletion(w http.ResponseWriter) {
-	syncapi.WriteCodedError(w, http.StatusForbidden, codeAccountPendingDeletion, account.ErrPendingDeletion.Error())
+func writePendingDeletion(w http.ResponseWriter, purgeAt *time.Time) {
+	syncapi.WriteJSON(w, http.StatusForbidden, pendingDeletionResponse{
+		Code: codeAccountPendingDeletion, Error: account.ErrPendingDeletion.Error(), PurgeAt: purgeAt,
+	})
+}
+
+// pendingDeletionResponse is the sync-shaped 403 of an account pending
+// deletion, with when it will be purged.
+type pendingDeletionResponse struct {
+	Code    string     `json:"code"`
+	Error   string     `json:"error"`
+	PurgeAt *time.Time `json:"purge_at,omitempty"`
 }

@@ -288,8 +288,8 @@ func (s *Server) entitled(p account.Principal) bool {
 // pending deletion; only account, session and logout endpoints keep working.
 func requireActiveAccount(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if principalFrom(r).PendingDeletion() {
-			writePendingDeletion(w)
+		if p := principalFrom(r); p.PendingDeletion() {
+			writePendingDeletion(w, p.PurgeAt)
 			return
 		}
 		next.ServeHTTP(w, r)

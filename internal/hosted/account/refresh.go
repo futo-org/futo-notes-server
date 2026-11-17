@@ -86,17 +86,17 @@ func (s *Store) ExchangeRefreshToken(ctx context.Context, token string) (Exchang
 
 	hash := auth.HashToken(token)
 	var sessionID string
-	var rotatedAt, deletionRequestedAt *time.Time
+	var rotatedAt, deletionRequestedAt, purgeAt *time.Time
 	var expiresAt time.Time
 	var exchange Exchange
 	var region sql.NullString
-	err = tx.QueryRowContext(ctx, `SELECT t.session_id, t.rotated_at, s.expires_at, u.id, u.region_id, u.deletion_requested_at,
+	err = tx.QueryRowContext(ctx, `SELECT t.session_id, t.rotated_at, s.expires_at, u.id, u.region_id, u.deletion_requested_at, u.purge_at,
 			`+billing.EntitledSQL("u.id")+`
 		FROM storage_refresh_tokens t
 		JOIN sessions s ON s.id = t.session_id
 		JOIN users u ON u.id = s.user_id
 		WHERE t.token_hash = $1 FOR UPDATE OF t`, hash).
-		Scan(&sessionID, &rotatedAt, &expiresAt, &exchange.UserID, &region, &deletionRequestedAt, &exchange.Entitled)
+		Scan(&sessionID, &rotatedAt, &expiresAt, &exchange.UserID, &region, &deletionRequestedAt, &purgeAt, &exchange.Entitled)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Exchange{}, ErrInvalidRefreshToken
 	}
@@ -131,6 +131,8 @@ func (s *Store) ExchangeRefreshToken(ctx context.Context, token string) (Exchang
 		}
 	}
 	switch {
+	case deletionRequestedAt != nil && purgeAt != nil:
+		return Exchange{}, &PendingDeletionError{PurgeAt: *purgeAt}
 	case deletionRequestedAt != nil:
 		return Exchange{}, ErrPendingDeletion
 	case !region.Valid:

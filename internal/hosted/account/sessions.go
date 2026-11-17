@@ -33,6 +33,8 @@ type Principal struct {
 	// RegionID is "" until the user chooses a region.
 	RegionID            string
 	DeletionRequestedAt *time.Time
+	// PurgeAt is when a pending deletion purges the account.
+	PurgeAt *time.Time
 	// Entitled reports that the account has a subscription that lets it
 	// write (billing.EntitledSQL).
 	Entitled bool
@@ -111,11 +113,11 @@ func (s *Store) Authenticate(ctx context.Context, token string) (Principal, erro
 	var expiresAt, lastUsedAt time.Time
 	var region sql.NullString
 	err := s.database.QueryRowContext(ctx, `SELECT s.id, s.expires_at, s.last_used_at, s.authenticated_at,
-			u.id, u.email, u.name, u.region_id, u.deletion_requested_at, `+billing.EntitledSQL("u.id")+`
+			u.id, u.email, u.name, u.region_id, u.deletion_requested_at, u.purge_at, `+billing.EntitledSQL("u.id")+`
 		FROM sessions s JOIN users u ON u.id = s.user_id
 		WHERE s.access_token_hash = $1`, auth.HashToken(token)).
 		Scan(&p.Session.ID, &expiresAt, &lastUsedAt, &p.AuthenticatedAt,
-			&p.Session.User.ID, &p.Session.User.Email, &p.Session.User.Name, &region, &p.DeletionRequestedAt, &p.Entitled)
+			&p.Session.User.ID, &p.Session.User.Email, &p.Session.User.Name, &region, &p.DeletionRequestedAt, &p.PurgeAt, &p.Entitled)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Principal{}, auth.ErrNoSession
 	}

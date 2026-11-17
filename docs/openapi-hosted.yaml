@@ -51,7 +51,7 @@ info:
     - **Pending deletion.** Between `DELETE /api/account` and the purge 30
       days later, every sync operation except logout, the pairing relay,
       and `POST /api/storage/token`, answer
-      `403 {"code": "account_pending_deletion", "error": "account pending deletion"}`.
+      `403 {"code": "account_pending_deletion", "error": "account pending deletion", "purge_at": "<time>"}`.
       Account, session and restore operations keep working.
 
     ## Two error shapes
@@ -2149,12 +2149,13 @@ components:
     PendingDeletion:
       description: |
         `account_pending_deletion`: the account is scheduled for deletion.
-        Restore it with `POST /api/account/restore` to sync again.
+        `purge_at` says when it will be purged. Restore it with
+        `POST /api/account/restore` to sync again.
       content:
         application/json:
           schema:
             type: object
-            required: [code, error]
+            required: [code, error, purge_at]
             additionalProperties: false
             properties:
               code:
@@ -2163,6 +2164,9 @@ components:
               error:
                 type: string
                 enum: [account pending deletion]
+              purge_at:
+                type: string
+                format: date-time
     SubscriptionRequired:
       description: |
         `subscription_required`: billing is on and the account has no

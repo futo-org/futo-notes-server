@@ -59,7 +59,11 @@ func (s *Server) handleStorageToken(w http.ResponseWriter, r *http.Request) {
 		return
 	case errors.Is(err, account.ErrPendingDeletion):
 		s.metrics.refresh(r.Context(), "pending_deletion")
-		writePendingDeletion(w)
+		var purgeAt *time.Time
+		if pending, ok := errors.AsType[*account.PendingDeletionError](err); ok {
+			purgeAt = &pending.PurgeAt
+		}
+		writePendingDeletion(w, purgeAt)
 		return
 	case errors.Is(err, account.ErrNoRegion):
 		s.metrics.refresh(r.Context(), "no_region")
