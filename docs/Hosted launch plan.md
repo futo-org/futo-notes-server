@@ -31,6 +31,8 @@ Status:
 | Lapse | The account turns **read-only** (writes get 402) and is **purged 90 days** after it lapses. |
 | Lapse and purge emails | Sent by a new mail sender with a **Resend** driver (E). |
 | Family Sharing | **Off** for the App Store subscription. |
+| Store product id | `com.futo.notes.sync.monthly`, the same on the App Store and Play. |
+| Privacy policy | `https://docs.futo.cloud/legal/privacy`. |
 | Account deletion | Requires a **recent sign-in** (A7). |
 | One store account, two FUTO accounts | The subscription stays with the account it was bought under (C1). |
 | Client CI | The server **releases the hosted binaries plus a compose bundle** the apps' test harness can start. |
@@ -198,9 +200,10 @@ GET  /api/pairings/{id}                                             → 202 | 20
       second one to that store account.
     - Submitting it, or "Restore Purchases", answers `409`
       `store_subscription_owned_elsewhere`. The server never moves it.
-    - The app says: "This Apple ID's (Google account's) subscription belongs to
-      another FUTO account. Sign in with that account, or subscribe on the web."
-      It does not name the other account.
+    - The app says: "This store subscription belongs to another FUTO account.
+      Sign in with that account to use it." It does not name the other account,
+      and does not point to the web: outside the US the store rules forbid that
+      (the apps' ADR 0005).
   - **Why not move it automatically.** Moving on restore would let anyone holding
     a shared store login take a subscription away from its owner, and Apple
     cannot change an `appAccountToken` after purchase anyway.
@@ -219,6 +222,11 @@ GET  /api/pairings/{id}                                             → 202 | 20
   - A store event's owner is its row's owner, or else the account its
     `AccountToken` names. A submission binds an unowned subscription to the
     submitter unless the token names another live account (`409`).
+  - An App Store transaction without `appAccountToken` (offer-code
+    redemptions, possibly resubscribing from iOS Settings) is accepted with no
+    token (S8). A submission binds it by its row, or else to the submitter; a
+    notification with no row is acknowledged and logged, as for unknown
+    accounts.
   - Entitled: a row `active` with `expires_at` after `now()`, or `grace` with
     `grace_until` after `now()`. `Principal.Entitled` comes from the same
     query as the session.
