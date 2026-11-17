@@ -116,9 +116,9 @@ test:image:
 test:storage-image:
   extends: .skip-soak-schedule
   stage: test
-  image: docker:27
+  image: docker:29@sha256:4bbc7223f81db790097c6dea42fb93e05b8fead4f0431fbe6ccaba6e8473201c
   services:
-    - docker:27-dind
+    - docker:29-dind@sha256:4bbc7223f81db790097c6dea42fb93e05b8fead4f0431fbe6ccaba6e8473201c
   variables:
     DOCKER_TLS_CERTDIR: /certs
   script:
@@ -128,9 +128,9 @@ test:storage-image:
 test:api-image:
   extends: .skip-soak-schedule
   stage: test
-  image: docker:27
+  image: docker:29@sha256:4bbc7223f81db790097c6dea42fb93e05b8fead4f0431fbe6ccaba6e8473201c
   services:
-    - docker:27-dind
+    - docker:29-dind@sha256:4bbc7223f81db790097c6dea42fb93e05b8fead4f0431fbe6ccaba6e8473201c
   variables:
     DOCKER_TLS_CERTDIR: /certs
   script:
@@ -285,9 +285,9 @@ publish:image:
 # GitLab registry carry the self-hosted server.
 publish:storage-image:
   stage: publish
-  image: docker:27
+  image: docker:29@sha256:4bbc7223f81db790097c6dea42fb93e05b8fead4f0431fbe6ccaba6e8473201c
   services:
-    - docker:27-dind
+    - docker:29-dind@sha256:4bbc7223f81db790097c6dea42fb93e05b8fead4f0431fbe6ccaba6e8473201c
   variables:
     DOCKER_TLS_CERTDIR: /certs
     HOSTED_IMAGE: oci.futo.org/futo-notes/notes-storage
@@ -312,9 +312,9 @@ publish:storage-image:
 
 publish:api-image:
   stage: publish
-  image: docker:27
+  image: docker:29@sha256:4bbc7223f81db790097c6dea42fb93e05b8fead4f0431fbe6ccaba6e8473201c
   services:
-    - docker:27-dind
+    - docker:29-dind@sha256:4bbc7223f81db790097c6dea42fb93e05b8fead4f0431fbe6ccaba6e8473201c
   variables:
     DOCKER_TLS_CERTDIR: /certs
     HOSTED_IMAGE: oci.futo.org/futo-notes/notes-api
