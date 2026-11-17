@@ -69,5 +69,57 @@ services:
       retries: 30
       start_period: 5s
 
+  # The hosted services themselves, one storage region each. Profile
+  # "services" keeps them out of `docker:start`; start them with
+  #   docker compose -f compose.hosted.yml --profile services up -d --build
+  # They bind the same host ports as `mise run storage:dev`.
+  storage-us-east: &storage
+    profiles: [services]
+    build:
+      context: .
+      dockerfile: cmd/storage/Dockerfile
+    # The service takes keys from env only; reading the committed dev fixtures
+    # here keeps a single copy of them.
+    entrypoint:
+      - sh
+      - -c
+      - API_PUBLIC_KEYS="$$(cat /keys/api.pub.pem)" RECEIPT_SIGNING_KEY="$$(cat /keys/$$REGION_ID.key.pem)" exec dumb-init storage
+    volumes:
+      - ./dev/hosted-keys:/keys:ro
+    environment: &storage-env
+      REGION_ID: us-east
+      S3_BUCKET: notes-us-east
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-minio}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-miniominio}
+      S3_FORCE_PATH_STYLE: 'true'
+      OTLP_METRICS_ENDPOINT: victoria-metrics:8428
+      OTLP_METRICS_URL_PATH: /opentelemetry/v1/metrics
+      DRAIN_DELAY_MS: '0'
+      LOG_LEVEL: debug
+    ports:
+      - 3015:3015
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+
+  storage-eu-central:
+    <<: *storage
+    environment:
+      <<: *storage-env
+      REGION_ID: eu-central
+      S3_BUCKET: notes-eu-central
+    ports:
+      - 3016:3015
+
+  storage-ap-southeast:
+    <<: *storage
+    environment:
+      <<: *storage-env
+      REGION_ID: ap-southeast
+      S3_BUCKET: notes-ap-southeast
+    ports:
+      - 3017:3015
+
 volumes:
   hosted-pg-data:

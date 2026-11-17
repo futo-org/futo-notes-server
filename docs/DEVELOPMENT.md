@@ -96,6 +96,7 @@ mise run docker:stop      # add -v to drop the Postgres volume
 | MinIO | 9000 (S3), 9001 (console) | `minio`/`miniominio`; buckets `notes-us-east`, `notes-eu-central`, `notes-ap-southeast` |
 | victoria-metrics | 8428 | OTLP at `/opentelemetry/v1/metrics` |
 | mock-oidc | 8092 | client `notes-dev` / `notes-dev-secret` |
+| storage (us-east, eu-central, ap-southeast) | 3015, 3016, 3017 | profile `services` or `mise run storage:dev`; see below |
 
 The mock OIDC issuer (`cmd/mock-oidc`) logs in any subject. In a browser,
 `/authorize` shows a sign-in form; scripts can call `/test/authorize` with the
@@ -106,6 +107,37 @@ PKCE (S256) is mandatory. Go tests can run it in-process with
 Token keys are Ed25519 PEM blocks with a `kid` header; `mise run keygen -kid
 <kid>` prints a new pair. `dev/hosted-keys/` holds **dev-only** pairs for the
 API and the three regions; never use them outside local development and tests.
+`charts/apps/storage/values.yaml` carries copies of them for `useDevKeys`;
+change both together.
+
+### Storage service
+
+`cmd/storage` is one region's blob store (API: `docs/openapi-storage.yaml`).
+Run a region on the host against the compose MinIO, with the dev keys:
+
+```bash
+mise run storage:dev              # us-east on :3015 (or REGION_ID=...)
+mise run storage:dev eu-central   # :3016
+mise run storage:dev ap-southeast # :3017
+```
+
+Or run all three in containers (same host ports, so not both at once):
+
+```bash
+docker compose -f compose.hosted.yml --profile services up -d --build
+```
+
+Requests need tokens minted with `dev/hosted-keys/api.key.pem` (until the API
+exists, mint them in Go with `hostedauth.NewMinter`). The storage integration
+tests run against MinIO when `S3_TEST_ENDPOINT` is set, which
+`mise run test:integration` does; they use bucket `notes-us-east` and a fresh
+user prefix per test.
+
+The Helm chart `charts/apps/storage` is installed once per region; a region's
+release sets only `region` (names, `REGION_ID` and the `notes-<region>` bucket
+derive from it). Its Secret `notes-storage-<region>` must hold
+`S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `API_PUBLIC_KEYS` and
+`RECEIPT_SIGNING_KEY`.
 
 ## Image tags
 

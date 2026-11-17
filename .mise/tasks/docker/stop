@@ -3,4 +3,5 @@
 #MISE dir="{{config_root}}"
 set -e
 
-docker compose -f compose.hosted.yml down --remove-orphans "$@"
+# --profile '*' so the profiled services stop too.
+docker compose -f compose.hosted.yml --profile '*' down --remove-orphans "$@"
