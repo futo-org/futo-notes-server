@@ -514,24 +514,9 @@ func (s *Server) handleDashboardSignOut(w http.ResponseWriter, r *http.Request) 
 // setSessionCookie gives the browser the session cookie for token, expiring
 // with the session.
 func (s *Server) setSessionCookie(w http.ResponseWriter, token string) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     syncapi.SessionCookie,
-		Value:    token,
-		Path:     "/",
-		MaxAge:   int(account.SessionTTL.Seconds()),
-		HttpOnly: true,
-		Secure:   s.cfg.CookieSecure,
-		SameSite: http.SameSiteLaxMode,
-	})
+	syncapi.SetSessionCookie(w, token, int(account.SessionTTL.Seconds()), s.cfg.CookieSecure)
 }
 
 func (s *Server) clearSessionCookie(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     syncapi.SessionCookie,
-		Path:     "/",
-		MaxAge:   -1,
-		HttpOnly: true,
-		Secure:   s.cfg.CookieSecure,
-		SameSite: http.SameSiteLaxMode,
-	})
+	syncapi.SetSessionCookie(w, "", -1, s.cfg.CookieSecure)
 }

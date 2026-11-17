@@ -12,6 +12,20 @@ import (
 // SessionCookie is the name of the cookie that carries a session token.
 const SessionCookie = "session"
 
+// SetSessionCookie sets the session cookie to token for maxAge seconds, which
+// is http.Cookie.MaxAge: a negative maxAge deletes the cookie.
+func SetSessionCookie(w http.ResponseWriter, token string, maxAge int, secure bool) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     SessionCookie,
+		Value:    token,
+		Path:     "/",
+		MaxAge:   maxAge,
+		HttpOnly: true,
+		Secure:   secure,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
 type sessionCtxKey struct{}
 
 // WithSession returns ctx carrying the authenticated session, for the

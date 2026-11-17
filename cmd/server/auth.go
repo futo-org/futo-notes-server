@@ -111,15 +111,7 @@ func startSession(w http.ResponseWriter, r *http.Request, cfg config.Config, dat
 		syncapi.ServerError(w, r, action+": creating session", err)
 		return
 	}
-	http.SetCookie(w, &http.Cookie{
-		Name:     syncapi.SessionCookie,
-		Value:    token,
-		Path:     "/",
-		MaxAge:   int(auth.SessionTTL.Seconds()),
-		HttpOnly: true,
-		Secure:   cfg.CookieSecure,
-		SameSite: http.SameSiteLaxMode,
-	})
+	syncapi.SetSessionCookie(w, token, int(auth.SessionTTL.Seconds()), cfg.CookieSecure)
 	syncapi.WriteJSON(w, http.StatusOK, loginResponse{Token: token, User: user})
 }
 
