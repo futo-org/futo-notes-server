@@ -228,8 +228,10 @@ Storage never calls the API. Replicas of the API never call each other.
 ## Observability
 
 - **Logs**: zerolog JSON on stderr, one access line per request, with
-  `request_id` (returned to clients as `X-Request-Id`). `LOG_LEVEL` and
-  `LOG_FORMAT` (`json` or `pretty`).
+  `request_id` (returned to clients as `X-Request-Id`). `LOG_LEVEL` is
+  `trace`, `debug`, `info` (default), `warn`, `error`, `fatal`, `panic` or
+  `disabled`, and `LOG_FORMAT` is `json` (default) or `pretty`, the same in
+  api, storage and mock-oidc. Any other value refuses to start.
 - **Metrics**: OTLP over HTTP, pushed every `OTLP_METRICS_INTERVAL_MS` (15 s)
   to `OTLP_METRICS_ENDPOINT` (host:port, plain HTTP) at `OTLP_METRICS_URL_PATH`
   (`/opentelemetry/v1/metrics` for VictoriaMetrics). Unset endpoint turns

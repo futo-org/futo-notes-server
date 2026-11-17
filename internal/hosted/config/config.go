@@ -20,6 +20,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"futo-notes-server/internal/hostedauth"
+	"futo-notes-server/internal/hostedenv"
 )
 
 // Base is the configuration every API command needs, migrate included.
@@ -91,15 +92,11 @@ var schemePattern = regexp.MustCompile(`^[a-z][a-z0-9+.-]*$`)
 func LoadBase(getenv Getenv) (Base, error) {
 	var base Base
 	var err error
-	if base.LogLevel, err = logLevel(getenv("LOG_LEVEL")); err != nil {
+	if base.LogLevel, err = hostedenv.LogLevel(getenv("LOG_LEVEL")); err != nil {
 		return Base{}, err
 	}
-	switch format := envOr(getenv, "LOG_FORMAT", "json"); format {
-	case "json":
-	case "pretty":
-		base.LogPretty = true
-	default:
-		return Base{}, fmt.Errorf("LOG_FORMAT must be json or pretty, got %q", format)
+	if base.LogPretty, err = hostedenv.LogPretty(getenv("LOG_FORMAT")); err != nil {
+		return Base{}, err
 	}
 	if base.Database, err = loadDatabase(getenv); err != nil {
 		return Base{}, err
@@ -114,7 +111,7 @@ func Load(getenv Getenv) (Config, error) {
 		return Config{}, err
 	}
 	cfg := Config{Base: base}
-	if cfg.Port, err = envInt(getenv, "API_PORT", 3005, 1000); err != nil {
+	if cfg.Port, err = hostedenv.Int(getenv, "API_PORT", 3005, 1000); err != nil {
 		return Config{}, err
 	}
 	if cfg.PublicURL, err = publicURL(getenv("PUBLIC_URL")); err != nil {
@@ -144,23 +141,23 @@ func Load(getenv Getenv) (Config, error) {
 	if cfg.SigningKey, err = hostedauth.ParseSigningKey([]byte(signingKey)); err != nil {
 		return Config{}, fmt.Errorf("API_SIGNING_KEY: %w", err)
 	}
-	if cfg.CookieSecure, err = envBool(getenv, "COOKIE_SECURE", true); err != nil {
+	if cfg.CookieSecure, err = hostedenv.Bool(getenv, "COOKIE_SECURE", true); err != nil {
 		return Config{}, err
 	}
-	if cfg.DevUI, err = envBool(getenv, "DEV_UI", false); err != nil {
+	if cfg.DevUI, err = hostedenv.Bool(getenv, "DEV_UI", false); err != nil {
 		return Config{}, err
 	}
-	if cfg.DrainDelay, err = envMillis(getenv, "DRAIN_DELAY_MS", 15*time.Second, 0); err != nil {
+	if cfg.DrainDelay, err = hostedenv.Millis(getenv, "DRAIN_DELAY_MS", 15*time.Second, 0); err != nil {
 		return Config{}, err
 	}
-	if cfg.ShutdownTimeout, err = envMillis(getenv, "SHUTDOWN_TIMEOUT_MS", 60*time.Second, 0); err != nil {
+	if cfg.ShutdownTimeout, err = hostedenv.Millis(getenv, "SHUTDOWN_TIMEOUT_MS", 60*time.Second, 0); err != nil {
 		return Config{}, err
 	}
 	cfg.OTLPMetricsEndpoint = getenv("OTLP_METRICS_ENDPOINT")
 	cfg.OTLPMetricsURLPath = getenv("OTLP_METRICS_URL_PATH")
 	// Well under vmagent's one-minute idle timeout, which a once-a-minute
 	// export races.
-	if cfg.OTLPMetricsInterval, err = envMillis(getenv, "OTLP_METRICS_INTERVAL_MS", 15*time.Second, 1); err != nil {
+	if cfg.OTLPMetricsInterval, err = hostedenv.Millis(getenv, "OTLP_METRICS_INTERVAL_MS", 15*time.Second, 1); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
@@ -197,7 +194,7 @@ func ParseRegions(data []byte) ([]Region, error) {
 		if slices.ContainsFunc(regions, func(r Region) bool { return r.ID == entry.ID }) {
 			return nil, fmt.Errorf("duplicate region %q", entry.ID)
 		}
-		if u, err := url.Parse(entry.Endpoint); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		if !hostedenv.IsHTTPURL(entry.Endpoint) {
 			return nil, fmt.Errorf("region %q: endpoint must be an http(s) URL", entry.ID)
 		}
 		keys, err := hostedauth.ParseKeySet([]byte(entry.ReceiptPublicKeys))
@@ -230,7 +227,7 @@ func loadDatabase(getenv Getenv) (Database, error) {
 	if len(missing) > 0 {
 		return Database{}, fmt.Errorf("%s required", strings.Join(missing, ", "))
 	}
-	port, err := envInt(getenv, "POSTGRES_PORT", 5432, 1)
+	port, err := hostedenv.Int(getenv, "POSTGRES_PORT", 5432, 1)
 	if err != nil {
 		return Database{}, err
 	}
@@ -241,10 +238,10 @@ func loadDatabase(getenv Getenv) (Database, error) {
 		Path:   "/" + getenv("POSTGRES_DATABASE"),
 	}
 	database := Database{URL: u.String()}
-	if database.PoolMax, err = envInt(getenv, "DB_POOL_MAX", 10, 1); err != nil {
+	if database.PoolMax, err = hostedenv.Int(getenv, "DB_POOL_MAX", 10, 1); err != nil {
 		return Database{}, err
 	}
-	if database.PoolIdleTimeout, err = envMillis(getenv, "DB_POOL_IDLE_TIMEOUT_MS", 10*time.Second, 0); err != nil {
+	if database.PoolIdleTimeout, err = hostedenv.Millis(getenv, "DB_POOL_IDLE_TIMEOUT_MS", 10*time.Second, 0); err != nil {
 		return Database{}, err
 	}
 	return database, nil
@@ -259,7 +256,7 @@ func loadOIDC(getenv Getenv) (OIDC, error) {
 	if o.Issuer == "" || o.ClientID == "" || o.ClientSecret == "" {
 		return OIDC{}, errors.New("OIDC_ISSUER, OIDC_CLIENT_ID and OIDC_CLIENT_SECRET are required")
 	}
-	if u, err := url.Parse(o.Issuer); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+	if !hostedenv.IsHTTPURL(o.Issuer) {
 		return OIDC{}, fmt.Errorf("OIDC_ISSUER must be an http(s) URL, got %q", o.Issuer)
 	}
 	return o, nil
@@ -293,54 +290,4 @@ func redirectSchemes(value string) ([]string, error) {
 		schemes = append(schemes, scheme)
 	}
 	return schemes, nil
-}
-
-func logLevel(value string) (zerolog.Level, error) {
-	if value == "" {
-		return zerolog.InfoLevel, nil
-	}
-	level, err := zerolog.ParseLevel(value)
-	if err != nil || level == zerolog.NoLevel {
-		return 0, fmt.Errorf("LOG_LEVEL must be one of trace, debug, info, warn, error, fatal, panic, disabled; got %q", value)
-	}
-	return level, nil
-}
-
-func envOr(getenv Getenv, key, fallback string) string {
-	if v := getenv(key); v != "" {
-		return v
-	}
-	return fallback
-}
-
-func envInt(getenv Getenv, key string, fallback, minimum int) (int, error) {
-	v := getenv(key)
-	if v == "" {
-		return fallback, nil
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil || n < minimum {
-		return 0, fmt.Errorf("%s must be a number >= %d, got %q", key, minimum, v)
-	}
-	return n, nil
-}
-
-func envMillis(getenv Getenv, key string, fallback time.Duration, minimum int) (time.Duration, error) {
-	if getenv(key) == "" {
-		return fallback, nil
-	}
-	n, err := envInt(getenv, key, 0, minimum)
-	return time.Duration(n) * time.Millisecond, err
-}
-
-func envBool(getenv Getenv, key string, fallback bool) (bool, error) {
-	v := getenv(key)
-	if v == "" {
-		return fallback, nil
-	}
-	b, err := strconv.ParseBool(v)
-	if err != nil {
-		return false, fmt.Errorf("%s must be true or false, got %q", key, v)
-	}
-	return b, nil
 }

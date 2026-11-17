@@ -8,10 +8,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
-	"os"
 	"os/signal"
 	"syscall"
 	"time"
@@ -21,6 +19,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 
 	"futo-notes-server/internal/hostedauth"
+	"futo-notes-server/internal/hostedenv"
 	"futo-notes-server/internal/hostedmetrics"
 	"futo-notes-server/internal/storagesvc/config"
 	"futo-notes-server/internal/storagesvc/handlers"
@@ -32,17 +31,10 @@ import (
 var version = "dev"
 
 func main() {
-	zerolog.TimeFieldFormat = time.RFC3339
-	zerolog.TimestampFunc = func() time.Time { return time.Now().UTC() }
-
+	hostedenv.ConfigureLogger(zerolog.InfoLevel, false)
 	cfg := config.LoadConfig()
-
-	var output io.Writer = os.Stderr
-	if cfg.LogPretty {
-		output = zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.RFC3339}
-	}
-	log.Logger = zerolog.New(output).With().Timestamp().Caller().Str("region", cfg.RegionID).Logger()
-	zerolog.SetGlobalLevel(cfg.LogLevel)
+	hostedenv.ConfigureLogger(cfg.LogLevel, cfg.LogPretty)
+	log.Logger = log.Logger.With().Str("region", cfg.RegionID).Logger()
 
 	// Bind before the rest of startup so the tcpSocket startup probe sees the
 	// process alive.

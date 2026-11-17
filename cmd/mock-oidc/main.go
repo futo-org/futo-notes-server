@@ -8,7 +8,8 @@
 //	MOCK_OIDC_REDIRECT_URIS              comma-separated, matched exactly
 //	                                     (default http://localhost:3005/api/auth/oidc/callback)
 //	MOCK_OIDC_POST_LOGOUT_REDIRECT_URIS  comma-separated (default http://localhost:3005/)
-//	LOG_LEVEL                            zerolog level (default info)
+//	LOG_LEVEL                            trace, debug, info (default), warn, error,
+//	                                     fatal, panic or disabled
 //	LOG_FORMAT                           json or pretty (default json)
 package main
 
@@ -16,7 +17,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"os"
@@ -32,29 +32,22 @@ import (
 	"github.com/rs/zerolog/hlog"
 	"github.com/rs/zerolog/log"
 
+	"futo-notes-server/internal/hostedenv"
 	"futo-notes-server/internal/httputil"
 	"futo-notes-server/internal/mockoidc"
 )
 
 func main() {
-	zerolog.TimeFieldFormat = time.RFC3339
-	zerolog.TimestampFunc = func() time.Time { return time.Now().UTC() }
-
-	var output io.Writer = os.Stderr
-	switch format := envOr("LOG_FORMAT", "json"); format {
-	case "json":
-	case "pretty":
-		output = zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.RFC3339}
-	default:
-		fmt.Fprintf(os.Stderr, "LOG_FORMAT must be json or pretty, got %q\n", format)
-		os.Exit(1)
-	}
-	log.Logger = zerolog.New(output).With().Timestamp().Caller().Logger()
-	level, err := zerolog.ParseLevel(envOr("LOG_LEVEL", "info"))
+	hostedenv.ConfigureLogger(zerolog.InfoLevel, false)
+	level, err := hostedenv.LogLevel(os.Getenv("LOG_LEVEL"))
 	if err != nil {
-		log.Fatal().Err(err).Msg("invalid LOG_LEVEL")
+		log.Fatal().Err(err).Msg("invalid configuration")
 	}
-	zerolog.SetGlobalLevel(level)
+	pretty, err := hostedenv.LogPretty(os.Getenv("LOG_FORMAT"))
+	if err != nil {
+		log.Fatal().Err(err).Msg("invalid configuration")
+	}
+	hostedenv.ConfigureLogger(level, pretty)
 
 	port, err := strconv.Atoi(envOr("MOCK_OIDC_PORT", "8092"))
 	if err != nil || port < 1000 || port > 65535 {

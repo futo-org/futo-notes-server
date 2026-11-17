@@ -6,7 +6,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"os"
@@ -27,6 +26,7 @@ import (
 	"futo-notes-server/internal/hosted/hostedjobs"
 	"futo-notes-server/internal/hosted/storageclient"
 	"futo-notes-server/internal/hostedauth"
+	"futo-notes-server/internal/hostedenv"
 	"futo-notes-server/internal/hostedmetrics"
 	"futo-notes-server/internal/jobs"
 )
@@ -45,9 +45,7 @@ const (
 var version = "0.1.0-dev"
 
 func main() {
-	zerolog.TimeFieldFormat = time.RFC3339
-	zerolog.TimestampFunc = func() time.Time { return time.Now().UTC() }
-	configureLogging(zerolog.InfoLevel, false)
+	hostedenv.ConfigureLogger(zerolog.InfoLevel, false)
 
 	if len(os.Args) > 1 && os.Args[1] == "migrate" {
 		if err := migrate(); err != nil {
@@ -63,15 +61,6 @@ func main() {
 	}
 }
 
-func configureLogging(level zerolog.Level, pretty bool) {
-	var output io.Writer = os.Stderr
-	if pretty {
-		output = zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.RFC3339}
-	}
-	log.Logger = zerolog.New(output).With().Timestamp().Caller().Logger()
-	zerolog.SetGlobalLevel(level)
-}
-
 func openDatabase(cfg config.Database) (*db.DB, error) {
 	return db.Open(cfg.URL, db.Options{PoolMax: cfg.PoolMax, PoolIdleTimeout: cfg.PoolIdleTimeout})
 }
@@ -82,7 +71,7 @@ func migrate() error {
 	if err != nil {
 		return err
 	}
-	configureLogging(cfg.LogLevel, cfg.LogPretty)
+	hostedenv.ConfigureLogger(cfg.LogLevel, cfg.LogPretty)
 	database, err := openDatabase(cfg.Database)
 	if err != nil {
 		return err
@@ -125,7 +114,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
-	configureLogging(cfg.LogLevel, cfg.LogPretty)
+	hostedenv.ConfigureLogger(cfg.LogLevel, cfg.LogPretty)
 
 	// Bound before the slow startup work, so the startup probe sees the
 	// process alive.

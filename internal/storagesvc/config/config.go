@@ -3,9 +3,7 @@
 package config
 
 import (
-	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"strconv"
 	"time"
@@ -14,6 +12,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"futo-notes-server/internal/hostedauth"
+	"futo-notes-server/internal/hostedenv"
 )
 
 // Config is the storage service's configuration.
@@ -94,6 +93,7 @@ func Parse(getenv func(string) string) (Config, error) {
 }
 
 // parser records the first error so Parse reads as a flat list of keys.
+// fail ignores a nil error.
 type parser struct {
 	getenv func(string) string
 	err    error
@@ -132,41 +132,6 @@ func (p *parser) port(key string) int {
 	return n
 }
 
-func (p *parser) url(key string) string {
-	v := p.required(key)
-	if v == "" {
-		return ""
-	}
-	if u, err := url.Parse(v); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		p.fail(fmt.Errorf("%s must be an absolute http(s) URL", key))
-	}
-	return v
-}
-
-func (p *parser) bool(key string, fallback bool) bool {
-	v := p.getenv(key)
-	if v == "" {
-		return fallback
-	}
-	b, err := strconv.ParseBool(v)
-	if err != nil {
-		p.fail(fmt.Errorf("%s must be true or false", key))
-	}
-	return b
-}
-
-func (p *parser) durationMS(key string, fallback time.Duration, minimum int) time.Duration {
-	v := p.getenv(key)
-	if v == "" {
-		return fallback
-	}
-	ms, err := strconv.Atoi(v)
-	if err != nil || ms < minimum {
-		p.fail(fmt.Errorf("%s must be a number >= %d", key, minimum))
-	}
-	return time.Duration(ms) * time.Millisecond
-}
-
 func (p *parser) keySet(key string) hostedauth.KeySet {
 	v := p.required(key)
 	if v == "" {
@@ -191,26 +156,34 @@ func (p *parser) signingKey(key string) hostedauth.SigningKey {
 	return k
 }
 
+func (p *parser) url(key string) string {
+	v := p.required(key)
+	if v != "" && !hostedenv.IsHTTPURL(v) {
+		p.fail(fmt.Errorf("%s must be an absolute http(s) URL", key))
+	}
+	return v
+}
+
+func (p *parser) bool(key string, fallback bool) bool {
+	b, err := hostedenv.Bool(p.getenv, key, fallback)
+	p.fail(err)
+	return b
+}
+
+func (p *parser) durationMS(key string, fallback time.Duration, minimum int) time.Duration {
+	d, err := hostedenv.Millis(p.getenv, key, fallback, minimum)
+	p.fail(err)
+	return d
+}
+
 func (p *parser) logLevel(key string) zerolog.Level {
-	v := p.getenv(key)
-	if v == "" {
-		return zerolog.InfoLevel
-	}
-	level, err := zerolog.ParseLevel(v)
-	if err != nil {
-		p.fail(fmt.Errorf("%s must be a valid level (trace, debug, info, warn, error, fatal, panic)", key))
-	}
+	level, err := hostedenv.LogLevel(p.getenv(key))
+	p.fail(err)
 	return level
 }
 
 func (p *parser) logPretty(key string) bool {
-	switch v := p.getenv(key); v {
-	case "", "json":
-		return false
-	case "pretty":
-		return true
-	default:
-		p.fail(errors.New(key + " must be 'json' or 'pretty'"))
-		return false
-	}
+	pretty, err := hostedenv.LogPretty(p.getenv(key))
+	p.fail(err)
+	return pretty
 }
