@@ -13,9 +13,9 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/url"
@@ -233,16 +233,23 @@ func readFile(t *testing.T, root, name string) string {
 
 // freePort returns a loopback port nothing listens on. The services take
 // their ports from configuration, so the port is released before they bind
-// it; another process could claim it in between, which the CI container
-// does not have.
+// it. It comes from below the kernels' ephemeral ranges (Linux from 32768,
+// macOS from 49152), so the servers other test packages open on ":0" while
+// packages run in parallel can never be handed it in between.
 func freePort(t *testing.T) int {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	const low, span = 20000, 10000
+	for range 200 {
+		port := low + rand.IntN(span)
+		l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err != nil {
+			continue
+		}
+		_ = l.Close()
+		return port
 	}
-	defer l.Close()
-	return l.Addr().(*net.TCPAddr).Port
+	t.Fatalf("no free loopback port in %d-%d", low, low+span-1)
+	return 0
 }
 
 // process is a service running as a subprocess, its output in a log file.
