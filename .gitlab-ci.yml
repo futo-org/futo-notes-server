@@ -206,7 +206,7 @@ test:hosted-stack:
   stage: build
   image: golang:1.27.4-alpine3.23@sha256:f70850ef6ce341e8b6427f677049145d63c0b7ce002d4d7e3d464828b1b96dcd
   services:
-    - docker:27-dind
+    - docker:29-dind@sha256:4bbc7223f81db790097c6dea42fb93e05b8fead4f0431fbe6ccaba6e8473201c
   needs:
     - job: build:binaries
       artifacts: true
