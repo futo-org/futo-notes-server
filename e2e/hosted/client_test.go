@@ -35,6 +35,7 @@ const (
 type device struct {
 	t         *testing.T
 	s         *stack
+	sub       string
 	userAgent string
 	client    *http.Client
 	token     string
@@ -52,7 +53,7 @@ func (s *stack) login(t *testing.T, sub, userAgent string) *device {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := &device{t: t, s: s, userAgent: userAgent, client: &http.Client{
+	d := &device{t: t, s: s, sub: sub, userAgent: userAgent, client: &http.Client{
 		Jar:           jar,
 		Timeout:       requestTimeout,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
