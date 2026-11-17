@@ -84,7 +84,7 @@ of this touches the self-hosted flows above.
 
 ```bash
 mise install              # pinned go, golangci-lint, helm, kubeconform
-mise run docker:start     # compose.hosted.yml: Postgres, MinIO, victoria-metrics, mock-oidc
+mise run docker:start     # compose.hosted.yml: Postgres, MinIO, victoria-metrics, mock-oidc, Mailpit, mock-resend
 mise run test:integration # every suite, against that stack
 mise run lint
 mise run k8s:validate     # helm template | kubeconform for charts/
@@ -98,6 +98,8 @@ mise run docker:stop      # add -v to drop the Postgres volume
 | MinIO | 9000 (S3), 9001 (console) | `minio`/`miniominio`; buckets `notes-us-east`, `notes-eu-central`, `notes-ap-southeast` |
 | victoria-metrics | 8428 | OTLP at `/opentelemetry/v1/metrics` |
 | mock-oidc | 8092 | client `notes-dev` / `notes-dev-secret` |
+| Mailpit | 8025 (UI and REST API), 1025 (SMTP) | every email the API sends in dev lands here |
+| mock-resend | 8093 | Resend's `POST /emails` (any bearer key), relayed to Mailpit over SMTP (`cmd/mock-resend`) |
 | storage (us-east, eu-central, ap-southeast) | 3015, 3016, 3017 | profile `services` or `mise run storage:dev`; see below |
 
 The mock OIDC issuer (`cmd/mock-oidc`) logs in any subject. In a browser,
@@ -155,7 +157,7 @@ OIDC sign-in, storage tokens, and account, region and device management (API:
 do:
 
 ```bash
-mise run docker:start   # Postgres :15432, mock-oidc :8092
+mise run docker:start   # Postgres :15432, mock-oidc :8092, Mailpit :8025, mock-resend :8093
 mise run storage:dev    # optional: a region to upload to (:3015)
 mise run api:dev        # applies migrations, then serves :3005
 ```
@@ -165,6 +167,17 @@ ports) and `DEV_UI=true`: <http://localhost:3005/dev> links the dashboard and dr
 sign-in, regions, devices, deletion, storage tokens and receipt-backed object
 writes. App sign-in there needs the page opened as `http://127.0.0.1:3005/dev`,
 because only loopback IP literals are allowed app redirect targets.
+
+Email (`internal/hosted/mail`): `api:dev` points `RESEND_API_URL` at the
+compose mock-resend with a dummy `RESEND_API_KEY`, so every email the API
+sends lands in Mailpit at <http://localhost:8025> and nothing leaves the
+machine. Without `RESEND_API_KEY` the API logs and skips each send instead. The
+dev page's Email buttons (`POST /dev/email/{lapsed,purge_warning,purged}`)
+render a lapse email for the signed-in user and send it. The templates are
+`internal/hosted/mail/templates/<name>.html` (inside `layout.html`) and
+`<name>.txt`, whose `subject` template is the subject line. The mail tests
+assert delivery through Mailpit's REST API when `MAILPIT_TEST_URL` and
+`MAILPIT_TEST_SMTP_ADDR` are set, which `mise run test:integration` does.
 
 `api migrate` applies the shared migrations and then the hosted track
 (`internal/hosted/hosteddb`, bookkeeping table `hosted_migrations`); `api`

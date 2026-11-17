@@ -11,8 +11,8 @@ Status:
 |---|---|---|
 | S1 | A1–A5, A7 | Done, in MR !34 |
 | S2 | B1, B2, D | Done, in the MR stacked on !34 (`feat/hosted-vault-unlock-test-stack`) |
-| S3 | A6 | Done, stacked on the S2 MR. Storage batch upload is `POST /blobs/batch-upload`, next to batch fetch at `POST /blobs/batch` |
-| S4 | E | Not started |
+| S3 | A6 | Done, in the MR stacked on S2 (`feat/hosted-batch-and-mail`). Storage batch upload is `POST /blobs/batch-upload`, next to batch fetch at `POST /blobs/batch` |
+| S4 | E | Done, in the same MR: the sender, templates, stamps and dev stack. Billing (S5) calls it. |
 | S5 | C | Not started |
 
 ## Decisions (2026-11-17)
@@ -307,6 +307,9 @@ outbound and inbound network paths these need.
   shortcut, which replaces the old stand-in mode.
 
 ## E. Email
+
+Built in `internal/hosted/mail` (S4). Nothing sends the lapse emails until
+billing (S5) calls `Notifier.SendOnce`.
 
 The API gains a mail sender, modelled on Backups (`~/src/backups/docs/email.md`):
 
