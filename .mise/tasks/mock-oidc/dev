@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+#MISE description="Run the mock OIDC issuer on the host (stop the compose one first: both use 8092)"
+#MISE dir="{{config_root}}"
+set -e
+
+export LOG_FORMAT=${LOG_FORMAT:-pretty}
+export LOG_LEVEL=${LOG_LEVEL:-debug}
+
+go run ./cmd/mock-oidc

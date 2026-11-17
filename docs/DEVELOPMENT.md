@@ -75,6 +75,38 @@ FUTO_SOAK_ENGINES='postgres sqlite' \
 ./scripts/staging-soak-check.sh "$CANDIDATE_TAG" "$SOAK_START"
 ```
 
+## Hosted development
+
+The hosted service (see [Hosted service plan](Hosted%20service%20plan.md)) uses
+[mise](https://mise.jdx.dev) for tools and tasks; `mise tasks` lists them. None
+of this touches the self-hosted flows above.
+
+```bash
+mise install              # pinned go, golangci-lint, helm, kubeconform
+mise run docker:start     # compose.hosted.yml: Postgres, MinIO, victoria-metrics, mock-oidc
+mise run test:integration # every suite, against that stack
+mise run lint
+mise run k8s:validate     # helm template | kubeconform for charts/
+mise run docker:stop      # add -v to drop the Postgres volume
+```
+
+| Service | Host port | Notes |
+|---|---|---|
+| Postgres 18 | 15432 | `postgres`/`postgres`, database `notes` |
+| MinIO | 9000 (S3), 9001 (console) | `minio`/`miniominio`; buckets `notes-us-east`, `notes-eu-central`, `notes-ap-southeast` |
+| victoria-metrics | 8428 | OTLP at `/opentelemetry/v1/metrics` |
+| mock-oidc | 8092 | client `notes-dev` / `notes-dev-secret` |
+
+The mock OIDC issuer (`cmd/mock-oidc`) logs in any subject. In a browser,
+`/authorize` shows a sign-in form; scripts can call `/test/authorize` with the
+same query plus `sub=` (optionally `email=`, `name=`) to get a code with no UI.
+PKCE (S256) is mandatory. Go tests can run it in-process with
+`mockoidc.StartTestServer`.
+
+Token keys are Ed25519 PEM blocks with a `kid` header; `mise run keygen -kid
+<kid>` prints a new pair. `dev/hosted-keys/` holds **dev-only** pairs for the
+API and the three regions; never use them outside local development and tests.
+
 ## Image tags
 
 The released image is `futotech/notes-server:stable` for both `linux/amd64` and

@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+#MISE description="Statically validate the Helm charts"
+#MISE dir="{{config_root}}"
+set -euo pipefail
+
+mapfile -t CHARTS < <(find charts/apps charts/platform -mindepth 2 -maxdepth 2 -name Chart.yaml -exec dirname {} \; 2>/dev/null | sort)
+if [ ${#CHARTS[@]} -eq 0 ]; then
+  echo "no deployable charts found" >&2
+  exit 1
+fi
+
+echo "==> helm dependency build (notes-common consumers)"
+for c in "${CHARTS[@]}"; do
+  grep -q 'name: notes-common' "$c/Chart.yaml" || continue
+  (cd "$c" && helm dependency build >/dev/null)
+done
+
+echo "==> helm template + kubeconform"
+for c in "${CHARTS[@]}"; do
+  # NB: release name must not be YAML-boolean-ish ("y"/"on"/...): it lands in
+  # labels and kubeconform reads it back as a bool.
+  helm template notes "$c" -n notes \
+    | kubeconform -strict -ignore-missing-schemas -summary -
+  echo "    OK  $c"
+done
+
+echo "charts: ALL VALID"

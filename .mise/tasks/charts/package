@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+#MISE description="Package the deployable charts as <version>, pinned to image tag <image-tag>"
+#MISE dir="{{config_root}}"
+#USAGE arg "<version>" help="Chart version, e.g. 0.0.42 or 1.0.0"
+#USAGE arg "<image-tag>" help="Image tag the charts default to, e.g. 0.0.42 or v1.0.0"
+#USAGE arg "[out]" default="dist/charts"
+set -euo pipefail
+
+version="${usage_version:?}"
+image_tag="${usage_image_tag:?}"
+out="${usage_out:-dist/charts}"
+
+mkdir -p "$out"
+for c in charts/apps/*/ charts/platform/cnpg-cluster/; do
+  [ -f "$c/Chart.yaml" ] || continue
+  if grep -q 'name: notes-common' "$c/Chart.yaml"; then
+    (cd "$c" && helm dependency build >/dev/null)
+  fi
+  helm package "$c" --version "$version" --app-version "$image_tag" --destination "$out" >/dev/null
+done
+ls "$out"

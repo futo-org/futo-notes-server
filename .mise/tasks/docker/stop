@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+#MISE description="Stop the hosted dev stack (pass -v to also drop its Postgres volume)"
+#MISE dir="{{config_root}}"
+set -e
+
+docker compose -f compose.hosted.yml down --remove-orphans "$@"

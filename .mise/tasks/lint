@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+#MISE description="Lint Go code with golangci-lint"
+#MISE dir="{{config_root}}"
+set -e
+
+golangci-lint run ./... "$@"
