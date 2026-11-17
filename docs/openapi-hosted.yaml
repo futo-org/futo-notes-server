@@ -978,9 +978,15 @@ paths:
         - cookieAuth: []
       summary: Start a web checkout
       description: |
-        The web payment provider's checkout page for this account. Open it in
-        a browser; the provider tells the server when it completes, and
-        `GET /api/billing` then reports the subscription.
+        The checkout page for this account. Open it in the system browser;
+        it needs no dashboard session. With Stripe, the web provider, it is
+        `<origin>/billing/checkout/<token>`, a page of this server that
+        mounts Stripe's embedded checkout: the token names the account,
+        expires after 15 minutes, and opens one checkout. When the payment
+        completes, the page confirms it with Stripe and the account is
+        entitled at once; `GET /api/billing` then reports the subscription.
+        Ask for a new URL each time. Stripe knows the account by its OIDC
+        `sub`, never by email.
       responses:
         "200":
           $ref: "#/components/responses/BillingURL"
@@ -1011,9 +1017,11 @@ paths:
         - cookieAuth: []
       summary: Open the web subscription portal
       description: |
-        The web payment provider's self-service page, to cancel or change a
-        web subscription. A subscription bought in an app store is managed
-        in that store's own screen instead.
+        The web payment provider's self-service page, to cancel a web
+        subscription or change its card: with Stripe, a Customer Portal
+        session on `billing.stripe.com` that returns to the dashboard. A
+        subscription bought in an app store is managed in that store's own
+        screen instead.
       responses:
         "200":
           $ref: "#/components/responses/BillingURL"
@@ -1142,6 +1150,13 @@ paths:
         with `duplicate: true`. A notification older than what the server
         already knows of a subscription changes nothing, and one about an
         account that no longer exists is acknowledged and logged.
+
+        `web` is Stripe (`Stripe-Signature`, HMAC-SHA256, 5-minute
+        tolerance; the delivery id is the event id). The server handles
+        `customer.subscription.created`, `.updated` and `.deleted`, fetching
+        the subscription from Stripe rather than trusting the payload, and
+        finds the account by the `sub` in the subscription's metadata, or
+        else its customer's. Other event types are acknowledged and ignored.
       requestBody:
         required: true
         content:
@@ -2394,6 +2409,7 @@ components:
         | `store_subscription_owned_elsewhere` | 409 | The store subscription belongs to another account |
         | `invalid_purchase` | 400 | The store does not vouch for the submitted purchase |
         | `invalid_delivery` | 400 | A provider webhook's signature or payload is invalid |
+        | `checkout_link_expired` | 410 | An app's checkout link is expired, already used, or not ours (the checkout page's own call; not an API operation) |
         | `billing_unavailable` | 503 | No payment provider for this way of paying |
         | `payload_too_large` | 413 | The request body is over the operation's limit |
         | `method_not_allowed` | 405 | The route does not take this method |
@@ -2421,6 +2437,7 @@ components:
         - store_subscription_owned_elsewhere
         - invalid_purchase
         - invalid_delivery
+        - checkout_link_expired
         - billing_unavailable
         - payload_too_large
         - method_not_allowed
