@@ -58,6 +58,9 @@ const (
 	// codePaymentDeclined answers a payment on our checkout page that did
 	// not go through.
 	codePaymentDeclined = "payment_declined"
+	// codePaymentPending refuses a payment on our checkout page while
+	// another of the account's waits on 3-D Secure in another window.
+	codePaymentPending = "payment_pending"
 )
 
 // serverError logs an internal failure and answers with a hosted 500.

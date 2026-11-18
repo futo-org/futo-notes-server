@@ -66,6 +66,9 @@ const (
 	// metadataBillingCountry is the metadata key holding the billing
 	// country chosen on our page, on the subscriptions it creates.
 	metadataBillingCountry = "billing_country"
+	// metadataToken names, on a subscription our page created, the
+	// ConfirmationToken of the payment that created it.
+	metadataToken = "confirmation_token"
 )
 
 const (
@@ -683,6 +686,45 @@ func (s subscriptionPayment) intent() string {
 	return s.LatestInvoice.Payments.Data[0].Payment.PaymentIntent
 }
 
+// pendingFor is how long a payment on our page waiting on its buyer
+// (3-D Secure) holds off another for the same customer. One older than that
+// was abandoned, and is cancelled so a new one can go ahead.
+const pendingFor = 15 * time.Minute
+
+// noOtherPayment refuses a payment with token for customer while another
+// could still give it a second subscription: one that entitles already,
+// which the account may not show yet, or one of our page's waiting on its
+// buyer in another window. Waiting ones older than pendingFor are
+// cancelled. The subscription token itself made is no other payment: Pay
+// replays it.
+func (p *Provider) noOtherPayment(ctx context.Context, customer, token string) error {
+	var list struct {
+		Data []struct {
+			subscription
+			Created int64 `json:"created"`
+		} `json:"data"`
+	}
+	query := url.Values{"customer": {customer}, "status": {"all"}, "limit": {"100"}}
+	if err := p.call(ctx, http.MethodGet, "/subscriptions", query, "", &list); err != nil {
+		return err
+	}
+	for _, s := range list.Data {
+		switch {
+		case s.Metadata[metadataToken] == token:
+		case slices.Contains(entitling, s.Status):
+			return billing.ErrSubscribed
+		case s.Status == "incomplete" && s.Metadata[metadataBillingCountry] != "":
+			if time.Since(time.Unix(s.Created, 0)) < pendingFor {
+				return billing.ErrPaymentPending
+			}
+			if err := p.cancelNow(ctx, s.subscription); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // declined is the message for a payment that did not go through.
 const declined = "The payment did not go through. Try another card."
 
@@ -700,6 +742,9 @@ func (p *Provider) Pay(ctx context.Context, c billing.Customer, pay billing.Paym
 	}
 	customer, err := p.customer(ctx, c)
 	if err != nil {
+		return billing.PaymentResult{}, err
+	}
+	if err := p.noOtherPayment(ctx, customer, pay.ConfirmationToken); err != nil {
 		return billing.PaymentResult{}, err
 	}
 	var token struct {
@@ -735,7 +780,8 @@ func (p *Provider) Pay(ctx context.Context, c billing.Customer, pay billing.Paym
 		"payment_settings[payment_method_types][0]":     {"card"},
 		"metadata[" + metadataSub + "]":                 {c.Subject},
 		"metadata[" + metadataBillingCountry + "]":      {pay.BillingCountry},
-		"expand[]": {"latest_invoice.payments"},
+		"metadata[" + metadataToken + "]":               {pay.ConfirmationToken},
+		"expand[]":                                      {"latest_invoice.payments"},
 	}
 	var s subscriptionPayment
 	if err := p.idempotent(ctx, http.MethodPost, "/subscriptions", form, "pay-"+pay.ConfirmationToken, &s); err != nil {

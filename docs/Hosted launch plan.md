@@ -348,7 +348,10 @@ type StoreProvider interface {
       which runs `stripe.handleNextAction` and posts the subscription back
       (`FinishPayment`); a decline cancels the incomplete subscription and
       answers 402 `payment_declined`, leaving the form up. One account's
-      payment steps run one at a time (advisory lock). An app's pay token
+      payment steps run one at a time (advisory lock), and Pay first
+      refuses while the customer has a subscription that entitles at
+      Stripe or one of ours waiting on 3-D Secure (cancelled once 15
+      minutes old), so two tabs never make two subscriptions. An app's pay token
       is used only by the payment that goes through, so reloading the page
       or retrying after a decline no longer burns it. The check after
       payment stays, moved from the Checkout Session to the immutable record

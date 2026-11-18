@@ -104,7 +104,8 @@ func TestPayMatchEntitles(t *testing.T) {
 	want := map[string]string{
 		"items[0][price]": priceID, "items[0][quantity]": "1", "payment_behavior": "default_incomplete",
 		"payment_settings[save_default_payment_method]": "on_subscription", "payment_settings[payment_method_types][0]": "card",
-		"metadata[sub]": subject, "metadata[billing_country]": "US", "expand[]": "latest_invoice.payments",
+		"metadata[sub]": subject, "metadata[billing_country]": "US", "metadata[confirmation_token]": token,
+		"expand[]": "latest_invoice.payments",
 	}
 	for key, value := range want {
 		if form.Get(key) != value {
@@ -240,6 +241,57 @@ func TestPayThreeDSecure(t *testing.T) {
 		if _, err := p.FinishPayment(t.Context(), me, id); !errors.Is(err, billing.ErrCheckoutForeign) {
 			t.Errorf("FinishPayment of %q = %v", id, err)
 		}
+	}
+}
+
+// A second window cannot pay while the first waits on 3-D Secure, and a
+// payment abandoned there is cancelled once it is old enough, so two
+// windows never make two subscriptions.
+func TestPayRefusedWhileAnotherWaits(t *testing.T) {
+	f := newFakeStripe(t)
+	first, err := pay(t, f, "US", f.token("US", "requires_action"))
+	if err != nil || first.ActionSecret == "" {
+		t.Fatalf("first Pay = %+v, %v", first, err)
+	}
+	if _, err := pay(t, f, "US", f.token("US", "succeeded")); !errors.Is(err, billing.ErrPaymentPending) {
+		t.Fatalf("second Pay while the first waits = %v, want ErrPaymentPending", err)
+	}
+	if n := len(f.calls(http.MethodPost, "/v1/subscriptions")); n != 1 {
+		t.Fatalf("%d subscription creations, want 1", n)
+	}
+
+	// Abandoned: older than the wait, it gives way to a new payment.
+	f.mu.Lock()
+	f.subscriptions[first.SubscriptionID]["created"] = time.Now().Add(-time.Hour).Unix()
+	f.mu.Unlock()
+	second, err := pay(t, f, "US", f.token("US", "succeeded"))
+	if err != nil || second.Event.Status != billing.StatusActive || second.SubscriptionID == first.SubscriptionID {
+		t.Fatalf("Pay after the first was abandoned = %+v, %v", second, err)
+	}
+	if got := f.subscriptionStatus(first.SubscriptionID); got != "incomplete_expired" {
+		t.Fatalf("abandoned subscription is %s, want incomplete_expired", got)
+	}
+}
+
+// A subscription that already entitles at Stripe, which the account may not
+// show yet (the other window finished 3-D Secure but not its page), refuses
+// a new payment before anything is created.
+func TestPayRefusedWhenAlreadySubscribedAtStripe(t *testing.T) {
+	for _, status := range []string{"active", "trialing", "past_due"} {
+		t.Run(status, func(t *testing.T) {
+			f := newFakeStripe(t)
+			customer := f.addCustomer(subject, me.Email, time.Now().Unix())
+			existing := f.addSubscription(customer, subject, status, time.Now().Add(24*time.Hour).Unix(), nil)
+			if _, err := pay(t, f, "US", f.token("US", "succeeded")); !errors.Is(err, billing.ErrSubscribed) {
+				t.Fatalf("Pay = %v, want ErrSubscribed", err)
+			}
+			if n := len(f.calls(http.MethodPost, "/v1/subscriptions")); n != 0 {
+				t.Fatalf("%d subscription creations", n)
+			}
+			if got := f.subscriptionStatus(existing); got != status {
+				t.Fatalf("existing subscription is %s, want %s untouched", got, status)
+			}
+		})
 	}
 }
 

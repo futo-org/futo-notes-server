@@ -306,6 +306,11 @@ func writePayResult(w http.ResponseWriter, r *http.Request, result billing.Payme
 		httputil.WriteError(w, r, http.StatusUnprocessableEntity, codeBillingCountryMismatch, countryMismatchMessage(mismatch))
 	case errors.As(err, &declined):
 		httputil.WriteError(w, r, http.StatusPaymentRequired, codePaymentDeclined, declined.Message)
+	case errors.Is(err, billing.ErrSubscribed):
+		httputil.WriteError(w, r, http.StatusConflict, codeAlreadySubscribed, "You already have an active subscription. Nothing was charged.")
+	case errors.Is(err, billing.ErrPaymentPending):
+		httputil.WriteError(w, r, http.StatusConflict, codePaymentPending,
+			"A payment is waiting for your bank's confirmation in another window. Finish it there, or try again in 15 minutes. Nothing was charged.")
 	case errors.Is(err, billing.ErrCheckoutForeign):
 		badRequest(w, r, "That payment is unknown or belongs to another account.")
 	case err != nil:

@@ -232,7 +232,14 @@ How it works:
   A token belongs to one attempt, so a retried request returns the same
   subscription and payment. Steps for one account run one at a time across
   replicas (a Postgres advisory lock), and Pay is refused once the account
-  is entitled, so two tabs cannot both pay.
+  is entitled. Before creating anything, Pay also lists the customer's
+  subscriptions: one that already entitles at Stripe (another tab finished
+  3-D Secure but not its page yet) answers 409 `already_subscribed`, and
+  one of our page's still waiting on 3-D Secure answers 409
+  `payment_pending` for 15 minutes, after which it counts as abandoned and
+  is cancelled. So two tabs cannot both pay. A subscription records the
+  ConfirmationToken that created it (`metadata.confirmation_token`), so a
+  retry of that same payment replays instead.
 - **Outcomes.** Paid: the server reads the subscription (active as soon as
   the confirmation returns, in the sandbox) and entitles the account at
   once. 3-D Secure (`requires_action`): the server answers the

@@ -141,7 +141,7 @@ func (f *fakeStripe) addSubscription(customer, sub, status string, periodEnd int
 	}
 	s := map[string]any{
 		"id": f.id("sub"), "object": "subscription", "status": status, "cancel_at_period_end": false, "cancel_at": nil,
-		"livemode": false, "metadata": metadata, "customer": customer,
+		"livemode": false, "metadata": metadata, "customer": customer, "created": time.Now().Unix(),
 		"items": map[string]any{"object": "list", "data": []any{map[string]any{
 			"id": "si_1", "current_period_end": periodEnd, "current_period_start": periodEnd - 30*86400,
 			"price": map[string]any{"id": priceID, "product": productID},
@@ -437,7 +437,7 @@ func (f *fakeStripe) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		end := time.Now().Add(30 * 24 * time.Hour).Unix()
 		f.subscriptions[id] = map[string]any{
 			"id": id, "object": "subscription", "status": "incomplete", "cancel_at_period_end": false, "cancel_at": nil,
-			"livemode": false, "metadata": metadata, "customer": form.Get("customer"),
+			"livemode": false, "metadata": metadata, "customer": form.Get("customer"), "created": time.Now().Unix(),
 			"items": map[string]any{"object": "list", "data": []any{map[string]any{
 				"id": "si_1", "current_period_end": end, "current_period_start": end - 30*86400,
 				"price": map[string]any{"id": form.Get("items[0][price]"), "product": productID},
@@ -503,6 +503,15 @@ func (f *fakeStripe) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, f.withCustomer(s, expandCustomer))
+	case r.Method == http.MethodGet && path == "/subscriptions":
+		// status=all: every subscription of the customer, ended ones too.
+		var data []any
+		for _, s := range f.subscriptions {
+			if s["customer"] == r.URL.Query().Get("customer") {
+				data = append(data, f.subscriptionObject(s, nil))
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data, "has_more": false})
 	case strings.HasPrefix(path, "/subscriptions/"):
 		s, ok := f.subscriptions[strings.TrimPrefix(path, "/subscriptions/")]
 		if !ok {

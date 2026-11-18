@@ -174,7 +174,11 @@ type CustomCheckout interface {
 	// *CountryMismatchError (not Refunded). A declined card returns a
 	// *PaymentDeclinedError, the subscription it was for cancelled. A
 	// payment that needs the buyer (3-D Secure) returns its ActionSecret;
-	// FinishPayment settles it once the page has handled it.
+	// FinishPayment settles it once the page has handled it. While c has a
+	// subscription that entitles at the provider, Pay returns
+	// ErrSubscribed, and while another payment of c's on our page waits on
+	// the buyer, ErrPaymentPending: two windows never make two
+	// subscriptions.
 	Pay(ctx context.Context, c Customer, p Payment) (PaymentResult, error)
 	// FinishPayment settles the payment Pay started for subscriptionID,
 	// as Pay does. It returns ErrCheckoutForeign for another customer's
@@ -204,6 +208,15 @@ type PaymentResult struct {
 	// on hold while it clears. Zero while ActionSecret is set.
 	Event Event
 }
+
+// ErrSubscribed refuses a payment for a customer who already has a
+// subscription that entitles at the provider, which the account's
+// entitlement may not show yet.
+var ErrSubscribed = errors.New("billing: already subscribed at the provider")
+
+// ErrPaymentPending refuses a payment on our page while another of the
+// customer's waits on the buyer (3-D Secure), in another window.
+var ErrPaymentPending = errors.New("billing: another payment is waiting on the buyer")
 
 // CountryMismatchError reports a payment on our page whose billing address
 // is outside the billing country the buyer chose, which decided its route.
