@@ -5,6 +5,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -252,7 +253,8 @@ func TestLoadStripe(t *testing.T) {
 	}
 	s := cfg.WebBilling.Stripe
 	if cfg.WebBilling.Provider != config.WebProviderStripe || s == nil || s.SecretKey != "sk_live_abc" || s.PublishableKey != "pk_live_abc" ||
-		string(s.WebhookSecret) != "whsec_abc" || s.PriceID != "price_abc" || s.APIURL != "" || s.PublicURL != cfg.PublicURL {
+		string(s.WebhookSecret) != "whsec_abc" || s.PriceID != "price_abc" || s.APIURL != "" || s.PublicURL != cfg.PublicURL ||
+		s.SelfPaymentCountries != nil {
 		t.Fatalf("stripe config = %#v", cfg.WebBilling)
 	}
 	if len(cfg.WebBilling.CheckoutTokenKey) != 32 || bytes.Contains(cfg.WebBilling.CheckoutTokenKey, []byte("sk_live_abc")) {
@@ -267,6 +269,12 @@ func TestLoadStripe(t *testing.T) {
 	})
 	if cfg, err = config.Load(getenv(test)); err != nil || cfg.WebBilling.Stripe.APIURL != "http://127.0.0.1:12111" {
 		t.Fatalf("test-mode stripe config = %#v, %v", cfg.WebBilling, err)
+	}
+	// Self-payment countries: any case, spaces and repeats tolerated.
+	countries := maps.Clone(env)
+	countries["STRIPE_SELF_PAYMENT_COUNTRIES"] = " us, ca ,,US,xk "
+	if cfg, err = config.Load(getenv(countries)); err != nil || !slices.Equal(cfg.WebBilling.Stripe.SelfPaymentCountries, []string{"US", "CA", "XK"}) {
+		t.Fatalf("self-payment countries = %#v, %v", cfg.WebBilling.Stripe, err)
 	}
 	restricted := maps.Clone(env)
 	restricted["STRIPE_SECRET_KEY"] = "rk_live_abc"
@@ -288,6 +296,8 @@ func TestLoadStripe(t *testing.T) {
 		"no price":                    {"STRIPE_PRICE_ID": ""},
 		"product as price":            {"STRIPE_PRICE_ID": "prod_abc"},
 		"bad API URL":                 {"STRIPE_API_URL": "ftp://stripe"},
+		"unknown country":             {"STRIPE_SELF_PAYMENT_COUNTRIES": "US,UK"},
+		"alpha-3 country":             {"STRIPE_SELF_PAYMENT_COUNTRIES": "USA"},
 	} {
 		bad := maps.Clone(env)
 		maps.Copy(bad, change)

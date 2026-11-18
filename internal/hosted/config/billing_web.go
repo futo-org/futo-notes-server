@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 
 	"futo-notes-server/internal/hosted/billing/stripe"
+	"futo-notes-server/internal/hosted/country"
 )
 
 // The web payment providers BILLING_WEB_PROVIDER can name.
@@ -105,6 +107,18 @@ func loadStripe(getenv Getenv, devUI bool, publicURL string) (stripe.Config, err
 		return stripe.Config{}, errors.New("STRIPE_WEBHOOK_SECRET must be the webhook endpoint's signing secret (whsec_...)")
 	case !strings.HasPrefix(cfg.PriceID, "price_"):
 		return stripe.Config{}, errors.New("STRIPE_PRICE_ID must be the plan's price id (price_...)")
+	}
+	for item := range strings.SplitSeq(getenv("STRIPE_SELF_PAYMENT_COUNTRIES"), ",") {
+		if strings.TrimSpace(item) == "" {
+			continue
+		}
+		code, ok := country.Parse(item)
+		if !ok {
+			return stripe.Config{}, fmt.Errorf("STRIPE_SELF_PAYMENT_COUNTRIES: %q is not an ISO 3166-1 alpha-2 country code", strings.TrimSpace(item))
+		}
+		if !slices.Contains(cfg.SelfPaymentCountries, code) {
+			cfg.SelfPaymentCountries = append(cfg.SelfPaymentCountries, code)
+		}
 	}
 	if cfg.APIURL != "" {
 		if u, err := url.Parse(cfg.APIURL); err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {

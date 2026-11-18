@@ -400,3 +400,99 @@ func TestAPIErrorsAndKey(t *testing.T) {
 		t.Fatalf("Refresh with a bad key = %v", err)
 	}
 }
+
+func TestRoute(t *testing.T) {
+	p := stripe.New(stripe.Config{SecretKey: secretKey, PriceID: priceID, SelfPaymentCountries: []string{"US", "CA", "RU"}})
+	for country, want := range map[string]billing.CheckoutRoute{
+		"US": billing.RouteSelf, "CA": billing.RouteSelf,
+		// A self-payment country is ours to sell to even where Managed
+		// Payments refuses it.
+		"RU": billing.RouteSelf,
+		"GB": billing.RouteMerchantOfRecord, "DE": billing.RouteMerchantOfRecord, "JP": billing.RouteMerchantOfRecord,
+		"BR": billing.RouteMerchantOfRecord,
+		"CN": billing.RouteUnavailable, "CU": billing.RouteUnavailable, "IR": billing.RouteUnavailable,
+		"XK": billing.RouteUnavailable, "KP": billing.RouteUnavailable, "SY": billing.RouteUnavailable,
+		"AC": billing.RouteUnavailable, "TA": billing.RouteUnavailable,
+	} {
+		if got := p.Route(country); got != want {
+			t.Errorf("Route(%s) = %v, want %v", country, got, want)
+		}
+	}
+	// With no self-payment countries, everyone Stripe sells to goes to
+	// Stripe's page.
+	none := stripe.New(stripe.Config{SecretKey: secretKey, PriceID: priceID})
+	if none.Route("US") != billing.RouteMerchantOfRecord || none.Route("RU") != billing.RouteUnavailable {
+		t.Errorf("Route without self-payment countries: US %v, RU %v", none.Route("US"), none.Route("RU"))
+	}
+}
+
+func TestMerchantCheckoutParameters(t *testing.T) {
+	f := newFakeStripe(t)
+	p := f.provider()
+	successURL := publicURL + "/dashboard/billing/return?session_id={CHECKOUT_SESSION_ID}"
+	cancelURL := publicURL + "/dashboard/billing/subscribe"
+	target, err := p.StartMerchantCheckout(t.Context(), billing.Customer{UserID: "user-1", Subject: subject, Email: "a@example.test"}, successURL, cancelURL)
+	if err != nil || !strings.HasPrefix(target, "https://checkout.stripe.com/c/pay/cs_test") {
+		t.Fatalf("StartMerchantCheckout = %q, %v", target, err)
+	}
+	form := f.calls(http.MethodPost, "/v1/checkout/sessions")[0].Form
+	// Stripe's hosted page as merchant of record, for the account's own
+	// customer and sub, and nothing Managed Payments forbids.
+	want := map[string]string{
+		"mode": "subscription", "ui_mode": "hosted_page", "managed_payments[enabled]": "true",
+		"line_items[0][price]": priceID, "line_items[0][quantity]": "1",
+		"client_reference_id": subject, "metadata[sub]": subject, "subscription_data[metadata][sub]": subject,
+		"success_url": successURL, "cancel_url": cancelURL,
+	}
+	for key, value := range want {
+		if got := form.Get(key); got != value {
+			t.Errorf("merchant checkout %s = %q, want %q", key, got, value)
+		}
+	}
+	for key := range form {
+		if _, ok := want[key]; !ok && key != "customer" {
+			t.Errorf("merchant checkout sends %s=%q", key, form.Get(key))
+		}
+	}
+	forbidden := []string{
+		"adaptive_pricing", "automatic_tax", "tax_id_collection", "subscription_data[default_tax_rates]",
+		"payment_method_configuration", "payment_method_types", "allowed_payment_method_types", "customer_update",
+		"shipping_address_collection", "shipping_options", "subscription_data[invoice_settings]", "invoice_creation",
+		"wallet_options", "return_url",
+	}
+	for key := range form {
+		for _, prefix := range forbidden {
+			if strings.HasPrefix(key, prefix) {
+				t.Errorf("merchant checkout sends %s, which Managed Payments forbids or the hosted page ignores", key)
+			}
+		}
+	}
+	if !strings.HasPrefix(form.Get("customer"), "cus_") {
+		t.Errorf("merchant checkout customer = %q", form.Get("customer"))
+	}
+
+	// The same customer as our own page's checkout, found by sub, and
+	// completed the same way.
+	if _, err := p.StartCheckout(t.Context(), billing.Customer{Subject: subject}, publicURL+"/return"); err != nil {
+		t.Fatal(err)
+	}
+	sessions := f.calls(http.MethodPost, "/v1/checkout/sessions")
+	if sessions[1].Form.Get("customer") != form.Get("customer") {
+		t.Errorf("the two checkouts used customers %q and %q", form.Get("customer"), sessions[1].Form.Get("customer"))
+	}
+	id := strings.TrimPrefix(target, "https://checkout.stripe.com/c/pay/")
+	if _, err := p.CompleteCheckout(t.Context(), billing.Customer{Subject: subject}, id); !errors.Is(err, billing.ErrCheckoutIncomplete) {
+		t.Fatalf("an open merchant checkout = %v", err)
+	}
+	subID := f.completeSession(id, time.Now().Add(30*24*time.Hour).Unix())
+	if ev, err := p.CompleteCheckout(t.Context(), billing.Customer{Subject: subject}, id); err != nil || ev.ExternalID != subID || ev.Subject != subject {
+		t.Fatalf("CompleteCheckout of a merchant checkout = %+v, %v", ev, err)
+	}
+	if _, err := p.CompleteCheckout(t.Context(), billing.Customer{Subject: "another-sub"}, id); !errors.Is(err, billing.ErrCheckoutForeign) {
+		t.Fatalf("another account's merchant checkout = %v", err)
+	}
+
+	if _, err := p.StartMerchantCheckout(t.Context(), billing.Customer{Email: "x@example.test"}, successURL, cancelURL); err == nil {
+		t.Fatal("a customer without a sub was accepted")
+	}
+}

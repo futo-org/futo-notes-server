@@ -115,11 +115,39 @@ type WebProvider interface {
 	PortalURL(ctx context.Context, c Customer) (string, error)
 }
 
+// CheckoutRoute is how a buyer pays on the web, decided by their billing
+// country.
+type CheckoutRoute int
+
+// The checkout routes.
+const (
+	// RouteUnavailable: the web takes no payment from this country.
+	RouteUnavailable CheckoutRoute = iota
+	// RouteSelf: our own checkout page (StartCheckout), where FUTO is the
+	// merchant of record.
+	RouteSelf
+	// RouteMerchantOfRecord: the provider's own checkout page
+	// (StartMerchantCheckout), where the provider is the merchant of
+	// record and handles the buyer's taxes.
+	RouteMerchantOfRecord
+)
+
 // CustomCheckout is a web provider whose checkout is a page of ours: the
 // provider's own fields collect the card inside it, and our page confirms
-// the payment. CheckoutURL is then unused.
+// the payment. For buyers in countries where it sells as merchant of
+// record, the browser is sent to its own checkout page instead.
+// CheckoutURL is unused.
 type CustomCheckout interface {
 	WebProvider
+	// Route is how a buyer whose billing country is country, an ISO
+	// 3166-1 alpha-2 code, pays.
+	Route(country string) CheckoutRoute
+	// StartMerchantCheckout opens a checkout on the provider's own page,
+	// where it is the merchant of record, for c, and returns the URL to
+	// send the browser to. Once paid, the browser returns to successURL,
+	// with the checkout's id in place of {CHECKOUT_SESSION_ID}; abandoned,
+	// to cancelURL. CompleteCheckout confirms it like any other.
+	StartMerchantCheckout(ctx context.Context, c Customer, successURL, cancelURL string) (string, error)
 	// PublishableKey is the browser-side key the page mounts checkout with.
 	PublishableKey() string
 	// Plan is the subscription checkout sells, as the provider prices it.
