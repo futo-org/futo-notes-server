@@ -70,6 +70,7 @@ plain-http cookies). Every prod release sets the following.
 | `postgresClusterName` | `notes-db` |
 | `stripe.priceId` | the $5/month plan's Stripe price id; turns Stripe on (see Billing: web provider) |
 | `stripe.publishableKey` | `pk_live_...` in prod, `pk_test_...` in staging |
+| `stripe.selfPaymentCountries` | renders `STRIPE_SELF_PAYMENT_COUNTRIES`: the billing countries that pay on our own checkout page, e.g. `[US]`; `[]` (the chart default) sends every country to Stripe Managed Payments (see Billing: web provider) |
 | `secretData` | `null` |
 | `env` | replaces the whole list: `API_PORT=3005`, `LOG_LEVEL=info`, `OTLP_METRICS_ENDPOINT`, `OTLP_METRICS_URL_PATH`. Drop the dev entries `COOKIE_SECURE=false` and `DRAIN_DELAY_MS=1000`: the defaults are a `Secure` cookie and 15 s. Never set `DEV_UI` (it serves `/dev`, which runs storage jobs on demand). |
 
@@ -109,13 +110,15 @@ subscription answer `402 subscription_required`, and its storage tokens are
 read-only (`blobs.read`). With no provider, billing is off and nothing is
 gated. The App Store and Play providers have their own settings (below).
 
-The web provider is **Stripe**, selling one plan at $5/month.
+The web provider is **Stripe**, selling one plan at $5/month (plus tax
+where Stripe sells it as merchant of record).
 
 | Variable | Where | What |
 |---|---|---|
 | `BILLING_WEB_PROVIDER` | rendered by the chart | `stripe` when `stripe.priceId` is set. Empty (the default) for none. `mock` is the dev and test-stack mock, whose checkout and portal are `/dev/billing` pages; the API refuses to start with it unless `DEV_UI=true`, so it never runs in production. |
 | `STRIPE_PRICE_ID` | `stripe.priceId` | The plan's price (`price_...`). Required with `stripe`. |
 | `STRIPE_PUBLISHABLE_KEY` | `stripe.publishableKey` | Mounts the checkout's card fields (Stripe.js) in the browser; not secret. Must be the same mode (live or test) as the secret key. Required with `stripe`. |
+| `STRIPE_SELF_PAYMENT_COUNTRIES` | `stripe.selfPaymentCountries` | Comma-separated ISO 3166-1 alpha-2 billing countries, any case (`US,CA`), that pay on our own checkout page with FUTO as merchant of record. Empty (the default): every country pays through Stripe Managed Payments. An unknown code stops the API from starting. |
 | `STRIPE_SECRET_KEY` | Secret | **Secret.** See Secrets. Required with `stripe`. |
 | `STRIPE_WEBHOOK_SECRET` | Secret | **Secret.** See Secrets. Required with `stripe`. |
 | `STRIPE_API_URL` | tests only | Replaces `https://api.stripe.com`. Never in a chart. |
@@ -130,7 +133,35 @@ How it works:
   refreshes find the account from the subscription's `metadata.sub`, or
   else its Customer's. Nothing is ever matched by email; the email is only
   copied onto the Customer for receipts.
-- **Checkout is our own page, never a redirect.** The server opens a
+- **Checkout starts with the billing country.** Subscribe on the dashboard,
+  and the app's checkout link, first show a country list (English names,
+  ISO 3166-1 alpha-2 codes plus Kosovo, Ascension Island and Tristan da
+  Cunha) prefilled from the browser's `Accept-Language` (`en-GB` is the
+  United Kingdom; nothing else, no IP lookup) and a Checkout button. The
+  server checks the posted country again and routes it:
+  - in `STRIPE_SELF_PAYMENT_COUNTRIES`: **our own page** (below), FUTO
+    the merchant of record;
+  - China, Cuba, Iran, Kosovo, North Korea, Russia, Syria, Ascension
+    Island and Tristan da Cunha, which Managed Payments refuses (unless
+    they are self-payment countries): "Paying on the web isn't available
+    in your country yet.", and no Checkout;
+  - every other country: **Stripe Managed Payments**, Stripe the merchant
+    of record. The server opens a Checkout Session with
+    `managed_payments[enabled]=true`, `mode=subscription`,
+    `ui_mode=hosted_page`, the same price, the account's Customer and the
+    same `client_reference_id` and `metadata.sub`, and redirects the
+    browser to Stripe's hosted page. Stripe adds the tax due on top of the
+    $5 price, may show it in the buyer's currency (Adaptive Pricing is
+    always on there), and picks the payment methods. Its success URL is
+    the same return as our page's, which confirms the session at once;
+    its cancel URL is the country step (the dashboard's, or the app link's
+    "No payment was taken" page). The session sends none of the
+    parameters Managed Payments forbids (`adaptive_pricing`,
+    `automatic_tax`, `tax_id_collection`, payment method types or
+    configuration, `customer_update`, shipping, invoice settings). For
+    these subscriptions Stripe does not let the API change
+    `default_payment_method`; the server never does.
+- **On our own page,** the server opens a
   Checkout Session with `ui_mode=elements`; our page shows the plan (its
   amount and period read from the price), the account's email, Stripe's
   Payment Element for the card (in Stripe's frames, so card data never
@@ -141,9 +172,13 @@ How it works:
   dark scheme as it changes. The dashboard's Subscribe opens it inside the
   overview. The apps' `POST /api/billing/checkout` answers a one-time link,
   `<publicUrl>/billing/checkout/<token>` (HMAC-signed, names the account,
-  15 minutes, opens one checkout), to the same page without a dashboard
-  session. The token key is derived from `STRIPE_SECRET_KEY`, so rotating
-  that key also voids outstanding links.
+  15 minutes, opens one checkout), to the country step without a dashboard
+  session. Opening or reloading it uses nothing; posting Checkout uses it,
+  so a link preview never burns it. A self-payment country then gets a
+  second one-time token for that country, `<publicUrl>/billing/checkout/<pay token>`,
+  our checkout page; any other is sent to Stripe. The token key is derived
+  from `STRIPE_SECRET_KEY`, so rotating that key also voids outstanding
+  links.
 - **Everything the checkout must not offer is off per session, in code.**
   Each Checkout Session sets `adaptive_pricing[enabled]=false` (the
   customer pays the price's own USD amount, never a converted one),
@@ -157,15 +192,17 @@ How it works:
   subscription at once. Every later change (renewal, failed payment,
   cancellation, deletion) arrives by webhook.
 - **The pages that host checkout** (the overview while unsubscribed, its
-  subscribe view, and `/billing/checkout/<token>`) load Stripe.js from
+  subscribe view, and our page under a pay token) load Stripe.js from
   `js.stripe.com`, which Stripe forbids self-hosting, and are served a
   Content-Security-Policy widened by exactly what Stripe documents for
   Stripe.js ([security guide](https://docs.stripe.com/security/guide#content-security-policy)):
   `script-src` `js.stripe.com`, `*.js.stripe.com`; `frame-src` the same
   plus `hooks.stripe.com` (3-D Secure); `connect-src` `api.stripe.com`.
   Link, wallets and the Address Element are off, so nothing else is
-  allowed. Every other page, including the checkout's return and cancel
-  pages, keeps the strict policy.
+  allowed. Every other page, including the app link's country step and
+  the checkout's return and cancel pages, keeps the strict policy. The
+  redirects to Stripe's hosted page are htmx `HX-Redirect`s (full page
+  loads), which the policy's `form-action 'self'` does not govern.
 - **The portal** (Manage subscription) is a Stripe Customer Portal session
   that returns to `/dashboard`.
 
@@ -193,10 +230,15 @@ paths). Each delivery's id is kept 30 days to drop retries.
 Do this once per account (live for prod, the sandbox for staging):
 
 1. **Product and price.** A product "FUTO Notes Sync" with one recurring
-   price, $5.00 USD per month. Put the price id in `stripe.priceId`. A dev
-   copy, "FUTO Notes Sync (dev)" with lookup key
-   `futo-notes-sync-dev-monthly`, exists in the sandbox; the sandbox test
-   reuses it.
+   price, $5.00 USD per month. Put the price id in `stripe.priceId`. Give
+   the product the tax code **`txcd_10103000`** (Software as a service,
+   personal use), which Managed Payments requires to be one of its
+   eligible codes: `stripe products update <prod_id> --tax-code txcd_10103000`.
+   Leave the price's tax behavior exclusive (or unspecified, which Managed
+   Payments treats as exclusive): the $5 is before tax, and Stripe adds it.
+   A dev copy, "FUTO Notes Sync (dev)" with lookup key
+   `futo-notes-sync-dev-monthly`, exists in the sandbox with that tax code;
+   the sandbox tests reuse it.
 2. **Webhook endpoint.** Developers, Webhooks, Add endpoint:
    `https://notes.futo.cloud/api/billing/webhooks/web` (staging:
    `https://notes-staging.apps.futo.network/api/billing/webhooks/web`),
@@ -209,11 +251,19 @@ Do this once per account (live for prod, the sandbox for staging):
    subscriptions (at the end of the period) and updating payment methods;
    do **not** allow switching plans or changing quantities. Save it, which
    also creates the default configuration the API's portal sessions use.
-4. **Checkout.** Nothing to set: the currency, payment methods and look are
-   all set per session and on our page (see above), whatever the account's
-   Adaptive Pricing, payment method and branding settings say.
-5. **Tax.** Stripe Tax is out of scope for now: no tax is calculated or
-   collected.
+4. **Managed Payments.** Activate it once under Settings, Managed
+   Payments (the sandbox's already is). Without it, every checkout outside
+   the self-payment countries fails. Nothing else is set there: the
+   server enables it per Checkout Session.
+5. **Checkout.** Nothing to set for our page: the currency, payment
+   methods and look are all set per session and on our page (see above),
+   whatever the account's Adaptive Pricing, payment method and branding
+   settings say. Stripe's hosted page for Managed Payments follows the
+   account's branding settings.
+6. **Tax.** Under Managed Payments Stripe calculates, collects and remits
+   the tax as merchant of record. On our own page (the self-payment
+   countries) no tax is calculated or collected; Stripe Tax is out of
+   scope for it.
 
 ### Local development with the Stripe CLI
 
@@ -518,6 +568,7 @@ track (bookkeeping table `hosted_migrations`). The chart runs it as a Helm
 | API pods | `resendApiUrl` (HTTPS, `POST /emails`) | lapse and purge emails, when `RESEND_API_KEY` is set |
 | API pods | `api.stripe.com` (HTTPS) | Stripe: customers, checkout and portal sessions, subscriptions |
 | browsers | `js.stripe.com`, `*.js.stripe.com`, `api.stripe.com`, `hooks.stripe.com` | Stripe.js and the checkout's card fields, on the pages that host them |
+| browsers | `checkout.stripe.com` | Stripe's hosted Checkout, where buyers outside the self-payment countries pay (Managed Payments) |
 | payment providers | API `publicUrl`, path `/api/billing/webhooks/*` | subscription notifications; authenticated by the provider's signature, not a session. Stripe posts to `/api/billing/webhooks/web` from [its webhook IPs](https://docs.stripe.com/ips) |
 | API pods | `notes-db-rw` | Postgres, including `LISTEN/NOTIFY` for SSE across replicas |
 | storage pods | the region's S3 | blob bytes |
