@@ -89,9 +89,10 @@ info:
     `/dev/billing/*` triggers and its `/dev/signup` and `/dev/storekit` statuses, and the mock web payment provider's checkout
     and portal pages under `/dev/billing`. With Stripe as the web provider,
     the dashboard asks for the billing country in place, then opens its
-    checkout (our page, with Stripe's card fields) or sends the browser to
-    Stripe's, and `/billing/checkout/{token}` is the page an app's checkout
-    link opens.
+    checkout (our page, with Stripe's card fields, whose Pay posts to
+    `/dashboard/billing/pay`) or sends the browser to Stripe's, and
+    `/billing/checkout/{token}` is the page an app's checkout link opens
+    (its card fields use `.../session` and `.../pay`).
     Those are
     pages and test tooling, not API: clients must not
     depend on them, so they are listed in `x-internal-routes` rather than
@@ -114,6 +115,7 @@ x-internal-routes:
   - GET /billing/checkout/{token}
   - POST /billing/checkout/{token}
   - POST /billing/checkout/{token}/session
+  - POST /billing/checkout/{token}/pay
   - GET /dev
   - GET /dev/signup
   - GET /dev/storekit
@@ -125,6 +127,7 @@ x-internal-routes:
   - GET /dev/billing/checkout
   - GET /dev/billing/portal
   - POST /dashboard/billing/checkout
+  - POST /dashboard/billing/pay
   - POST /dashboard/billing/portal
   - POST /dashboard/billing/subscribe
   - POST /dev/billing/checkout
@@ -1002,20 +1005,23 @@ paths:
         The checkout page for this account. Open it in the system browser;
         it needs no dashboard session. With Stripe, the web provider, it is
         `<origin>/billing/checkout/<token>`, this server's page: the token
-        names the account, expires after 15 minutes, and opens one checkout.
+        names the account, expires after 15 minutes, and pays once.
         The page asks for the billing country first, then takes the payment
         on this server's checkout page, whose card fields are Stripe's
         Payment Element, or on Stripe's own checkout page, where Stripe is
         the merchant of record; a few countries cannot pay on the web. On
         this server's page the card's billing address must be in the
-        country chosen: a payment billed elsewhere is cancelled and
-        refunded, never entitles the account, and the page says to start
-        again from the app. The
-        link is used when the country is submitted, not when the page is
-        opened. When the payment completes, the server confirms it with
-        Stripe and the account is entitled at once; `GET /api/billing` then
-        reports the subscription. Ask for a new URL each time. Stripe knows
-        the account by its OIDC `sub`, never by email.
+        country chosen: the server checks it before charging anything and
+        refuses a card billed elsewhere, which the page says, leaving the
+        buyer to correct the card form. The card fields may also offer a
+        card saved on an earlier purchase, checked the same way. A declined
+        card, or a reload, leaves the page usable until a payment goes
+        through. Submitting the country uses the link; the page that opens
+        on our checkout is used by the payment that goes through, not by
+        opening it. Once a payment goes through, the account is entitled at
+        once; `GET /api/billing` then reports the subscription. Ask for a
+        new URL each time. Stripe knows the account by its OIDC `sub`, never
+        by email.
       responses:
         "200":
           $ref: "#/components/responses/BillingURL"
@@ -2443,6 +2449,8 @@ components:
         | `invalid_purchase` | 400 | The store does not vouch for the submitted purchase |
         | `invalid_delivery` | 400 | A provider webhook's signature or payload is invalid |
         | `checkout_link_expired` | 410 | An app's checkout link is expired, already used, or not ours (the checkout page's own call; not an API operation) |
+        | `billing_country_mismatch` | 422 | The card's billing address is outside the billing country chosen; nothing was charged, or what was is refunded (the checkout page's own call; not an API operation) |
+        | `payment_declined` | 402 | The card was declined or failed 3-D Secure; nothing was charged (the checkout page's own call; not an API operation) |
         | `billing_unavailable` | 503 | No payment provider for this way of paying |
         | `payload_too_large` | 413 | The request body is over the operation's limit |
         | `method_not_allowed` | 405 | The route does not take this method |
@@ -2469,6 +2477,8 @@ components:
         - invalid_purchase
         - invalid_delivery
         - checkout_link_expired
+        - billing_country_mismatch
+        - payment_declined
         - billing_unavailable
         - payload_too_large
         - method_not_allowed

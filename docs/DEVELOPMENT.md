@@ -256,18 +256,32 @@ country first, prefilled from the browser's language: a country in
 Stripe's hosted Managed Payments page (Managed Payments is activated in
 the sandbox), and Russia, China and the other refused countries say web
 payment isn't available. `/dev` links the dashboard's step with a country
-chosen. Pay with `4242 4242 4242 4242`,
-any future expiry and any CVC (on Stripe's page Link may ask for a code:
-the test code is `000000`). On our page the card form's Country starts at the
-country chosen; pick another and Subscribe is held, with a message naming
-the chosen one. A payment billed elsewhere anyway (enable the button from
-the console) is cancelled and refunded on return, or by the first webhook,
-and the account is not entitled. The account is entitled as soon as the
-checkout completes, before any webhook; `stripe listen` then shows
-`customer.subscription.created` arriving with `[200]`. To exercise later
-changes, use Manage subscription (the Customer Portal) to cancel at period
-end, or the sandbox dashboard to cancel at once; each arrives as
-`customer.subscription.updated` or `.deleted`.
+chosen. Pay with `4242 4242 4242 4242`, any future expiry and any CVC
+(on Stripe's page Link may ask for a code: the test code is `000000`).
+On our page:
+
+- The card form's Country starts at the country chosen; pick another and
+  Subscribe is held, with a message naming the chosen one. Forcing the
+  button from the console posts a ConfirmationToken the server refuses
+  before charging ("Nothing was charged"): no subscription or payment
+  appears in the sandbox.
+- `4000 0000 0000 0002` is declined: the message shows and the form stays
+  up for another card, on the same link.
+- `4000 0027 6000 3184` asks for 3-D Secure: complete (or fail) Stripe's
+  test challenge, and the server finishes the payment.
+- Tick "Save payment details for future purchases" to save the card. Once
+  that subscription is over (cancel it in the sandbox dashboard, and let
+  the webhook arrive), the next checkout offers it, held and refused like
+  a typed card when its billing country is not the one chosen.
+
+The account is entitled as soon as the payment goes through, before any
+webhook; `stripe listen` then shows `customer.subscription.created`
+arriving with `[200]`. An app's pay page is used only by the payment that
+goes through, so it can be reloaded, and tried again after a decline,
+until then. To exercise later changes, use Manage subscription (the
+Customer Portal) to cancel at period end, or the sandbox dashboard to
+cancel at once; each arrives as `customer.subscription.updated` or
+`.deleted`.
 
 The provider's tests use an in-process fake of Stripe. Two tests,
 `TestSandbox` and `TestSandboxManagedPayments` (which opens a Managed
@@ -280,8 +294,12 @@ STRIPE_TEST_PUBLISHABLE_KEY_FILE=~/.config/futo-notes/stripe-sandbox.publishable
   go test -run TestSandbox -v ./internal/hosted/billing/stripe/
 ```
 
-They create customers, a subscription and sessions under a fresh test `sub`
-and delete or expire them when done.
+They create customers, subscriptions and sessions under a fresh test `sub`
+and delete or expire them when done. `TestSandbox` pays through `Pay` with
+test ConfirmationTokens (`POST /v1/test_helpers/confirmation_tokens`):
+refused for another billing country with nothing created, declined, 3-D
+Secure pending, and paid; and checks that a subscription charged in
+another country than the one it records is cancelled and refunded.
 
 ### App Store purchases from Xcode
 

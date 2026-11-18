@@ -15,7 +15,7 @@ Status:
 | S4 | E | Done, in the same MR: the sender, templates, stamps and dev stack. Billing (S5) calls it. |
 | S5 | C | Done, in the MR stacked on S3/S4 (`feat/hosted-billing`): the model, gating, endpoints, webhooks, the mock web provider, the lapse and purge jobs, the emails, the dashboard, `/dev`, and the App Store and Play providers. |
 | S7 | C2 (web) | Done, stacked on S5: the Stripe web provider, our checkout page, matching by OIDC `sub` |
-| S11 | C2 (web) | Done, stacked on the dashboard redesign (`feat/hosted-billing-country`): web checkout asks for the billing country and routes by it, with Stripe Managed Payments outside the self-payment countries |
+| S11 | C2 (web) | Done, stacked on the dashboard redesign (`feat/hosted-billing-country`): web checkout asks for the billing country and routes by it, with Stripe Managed Payments outside the self-payment countries; our page refuses another billing country before charging (`feat/hosted-billing-country-veto`) |
 
 ## Decisions (2026-11-17)
 
@@ -26,7 +26,7 @@ Status:
 | Hostnames | Prod `https://notes.futo.cloud`, staging `https://notes-staging.apps.futo.network`. |
 | Payment providers | **Pluggable.** The web provider is **Stripe**. App Store and Play are providers behind the same interface. |
 | Web customer matching | Each FUTO account is a Stripe Customer carrying `metadata.sub`, its OIDC `sub`; checkouts and subscriptions carry the same `sub`. **Never matched by email.** |
-| Web checkout | **Routed by billing country** (2026-11-17), asked first and prefilled from the browser's language. Countries in `STRIPE_SELF_PAYMENT_COUNTRIES` pay on **our own page** (Checkout Sessions with Stripe's Payment Element for the card; USD, cards only), with FUTO as merchant of record. **Every other country** goes to **Stripe Managed Payments** (Stripe as merchant of record) by a **redirect** to Stripe's hosted Checkout. Countries Managed Payments refuses (China, Cuba, Iran, Kosovo, North Korea, Russia, Syria, Ascension Island, Tristan da Cunha) that are not self-payment countries are told paying on the web isn't available yet. Other providers (Polar) may take routes later. |
+| Web checkout | **Routed by billing country** (2026-11-17), asked first and prefilled from the browser's language. Countries in `STRIPE_SELF_PAYMENT_COUNTRIES` pay on **our own page** (Stripe's Payment Element for the card, paid by the server after it checks the billing country; USD, cards only), with FUTO as merchant of record. **Every other country** goes to **Stripe Managed Payments** (Stripe as merchant of record) by a **redirect** to Stripe's hosted Checkout. Countries Managed Payments refuses (China, Cuba, Iran, Kosovo, North Korea, Russia, Syria, Ascension Island, Tristan da Cunha) that are not self-payment countries are told paying on the web isn't available yet. Other providers (Polar) may take routes later. |
 | Store rails | Web, App Store and Play subscriptions **all ship at launch**. |
 | Price | One flat plan: **$5/month** on the web (plus tax under Managed Payments, which adds it on top), **$5.75/month** in the App Store and Play. |
 | Lapse | The account turns **read-only** (writes get 402) and is **purged 90 days** after it lapses. |
@@ -331,6 +331,31 @@ type StoreProvider interface {
       `CompleteCheckout` returns `*billing.CountryMismatchError`, which the
       return page explains. Details: `docs/Hosted deployment.md`, "Billing:
       web provider".
+    - The server vetoes another billing country before any charge
+      (`feat/hosted-billing-country-veto`): our page no longer uses a
+      Checkout Session. Its Payment Element is made without an intent (mode
+      subscription, the price's amount and currency) and offers the
+      account's saved cards through a CustomerSession (save and redisplay
+      on, remove off). Subscribe posts a ConfirmationToken to the server;
+      `CustomCheckout.Pay` reads it and refuses one whose
+      `payment_method_preview.billing_details.address.country` is not the
+      chosen country (422 `billing_country_mismatch`, nothing created),
+      never looking at the card's issuing country; otherwise it creates the
+      subscription (`default_incomplete`, `metadata.sub` and
+      `billing_country`, idempotent per token) and confirms its first
+      payment (`latest_invoice.payments`' PaymentIntent) with the token.
+      3-D Secure returns the PaymentIntent's client secret to the page,
+      which runs `stripe.handleNextAction` and posts the subscription back
+      (`FinishPayment`); a decline cancels the incomplete subscription and
+      answers 402 `payment_declined`, leaving the form up. One account's
+      payment steps run one at a time (advisory lock). An app's pay token
+      is used only by the payment that goes through, so reloading the page
+      or retrying after a decline no longer burns it. The check after
+      payment stays, moved from the Checkout Session to the immutable record
+      of what was billed: the charge of the first payment
+      (`billing_details.address.country`), on settlement, every webhook and
+      every refresh, cancelling and refunding a mismatch as before.
+      `StartCheckout` and the Checkout Session lookups are gone.
 
 ### C3. Endpoints
 

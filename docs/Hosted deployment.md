@@ -87,7 +87,7 @@ keys are committed.
 | | `API_SIGNING_KEY` | One Ed25519 private key PEM (with `kid`): signs storage access and admin tokens. |
 | | `STORAGE_REFRESH_ROTATION_KEY` | 32 random bytes, base64 (`openssl rand -base64 32`): derives each storage refresh token's successor, `base64url(HMAC-SHA256(key, token))`, so an exchange whose response was lost can be repeated. The API refuses to start without it. |
 | | `RESEND_API_KEY` | A Resend API key with sending access for the `emailFromAddress` domain. Without it the API logs and skips every email (the lapse and purge notices), and starts anyway. |
-| | `STRIPE_SECRET_KEY` | With Stripe: the secret key (`sk_live_...`), or a restricted key (`rk_...`) with write access to Customers, Checkout Sessions, Subscriptions, Refunds and Customer Portal sessions, and read access to Invoices. Staging uses the sandbox's `sk_test_...`. The API refuses a live key while `DEV_UI` is on. |
+| | `STRIPE_SECRET_KEY` | With Stripe: the secret key (`sk_live_...`), or a restricted key (`rk_...`) with write access to Customers, Customer Sessions, Checkout Sessions (Stripe's page), Subscriptions, PaymentIntents (confirm), Refunds and Customer Portal sessions, and read access to ConfirmationTokens, Invoices, Charges (a PaymentIntent's `latest_charge`) and Prices. These are the API resources the server calls; the names the Dashboard's key editor gives ConfirmationTokens and Customer Sessions are unverified. Staging uses the sandbox's `sk_test_...`. The API refuses a live key while `DEV_UI` is on. |
 | | `STRIPE_WEBHOOK_SECRET` | With Stripe: the webhook endpoint's signing secret (`whsec_...`). |
 | `notes-storage-<region>` | `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | Credentials for the region's bucket: get, put, list and delete objects. |
 | | `API_PUBLIC_KEYS` | The public half of the API signing key, one PEM block per `kid` (several during rotation). Same value in every region. |
@@ -128,8 +128,9 @@ How it works:
 
 - **Accounts are Stripe Customers keyed by OIDC `sub`.** The first checkout
   finds the account's Customer by `metadata.sub` (Stripe's customer search)
-  or creates one. Every Checkout Session carries `client_reference_id` and
-  `subscription_data.metadata.sub` set to the `sub`, and webhooks and
+  or creates one. Every Checkout Session on Stripe's page carries
+  `client_reference_id` and `subscription_data.metadata.sub` set to the
+  `sub`, every subscription our page creates `metadata.sub`, and webhooks and
   refreshes find the account from the subscription's `metadata.sub`, or
   else its Customer's. Nothing is ever matched by email; the email is only
   copied onto the Customer for receipts.
@@ -161,72 +162,126 @@ How it works:
     configuration, `customer_update`, shipping, invoice settings). For
     these subscriptions Stripe does not let the API change
     `default_payment_method`; the server never does.
-- **On our own page,** the server opens a
-  Checkout Session with `ui_mode=elements`; our page shows the plan (its
-  amount and period read from the price), the account's email, Stripe's
-  Payment Element for the card (in Stripe's frames, so card data never
-  touches our pages: PCI SAQ A), and our own Subscribe button, which
-  confirms the session with Stripe.js (`initCheckoutElementsSdk`). The
-  Payment Element is styled through Stripe's Appearance API from the
-  dashboard's colour tokens and Barlow, and follows the system's light or
-  dark scheme as it changes. The dashboard's Subscribe opens it inside the
-  overview. The apps' `POST /api/billing/checkout` answers a one-time link,
+- **On our own page,** no Checkout Session exists. The page shows the
+  plan (its amount and period read from the price), the account's email,
+  Stripe's Payment Element for the card (in Stripe's frames, so card data
+  never touches our pages: PCI SAQ A), and our own Subscribe button. The
+  Payment Element is made without an intent (Stripe.js
+  `elements({mode: "subscription", amount, currency, allowedPaymentMethodTypes: ["card"], paymentMethodCreation: "manual", customerSessionClientSecret})`,
+  amount and currency the price's), styled through Stripe's Appearance API
+  from the dashboard's colour tokens and Barlow, and follows the system's
+  light or dark scheme as it changes. Subscribe turns the form into a
+  ConfirmationToken (`stripe.createConfirmationToken`) and posts its id to
+  the server, which pays (below): Stripe's "finalize payments on the
+  server" flow for subscriptions
+  ([guide](https://docs.stripe.com/payments/finalize-payments-on-the-server?type=subscription)).
+  The dashboard's Subscribe opens it inside the overview. The apps'
+  `POST /api/billing/checkout` answers a one-time link,
   `<publicUrl>/billing/checkout/<token>` (HMAC-signed, names the account,
-  15 minutes, opens one checkout), to the country step without a dashboard
-  session. Opening or reloading it uses nothing; posting Checkout uses it,
-  so a link preview never burns it. A self-payment country then gets a
-  second one-time token for that country, `<publicUrl>/billing/checkout/<pay token>`,
-  our checkout page; any other is sent to Stripe. The token key is derived
-  from `STRIPE_SECRET_KEY`, so rotating that key also voids outstanding
-  links.
-- **Our page is bound to the billing country chosen.** The country decides
-  the route (and who the merchant of record is), but Stripe's card form
-  has its own Country field, defaulted from the visitor's IP. So the
-  Checkout Session and its subscription record the chosen country
-  (`metadata.billing_country`, and `subscription_data.metadata.billing_country`).
-  The page starts the card form's Country at it (Stripe.js
-  `initCheckoutElementsSdk({defaultValues: {billingAddress: {address: {country}}}})`)
-  and holds Subscribe, with a message naming it, while the Payment
-  Element's `change` events report another `value.billingDetails.address.country`
-  (seen at the pinned version; Stripe's reference does not document that
-  field, so without it the page lets Subscribe through and the server
-  alone refuses).
-  The server enforces it: wherever a subscription carrying
-  `billing_country` could entitle the account (the return page's
-  confirmation, every `customer.subscription.*` webhook, and
-  reconciliation's refresh), it reads the Checkout Session that created it
-  (`GET /v1/checkout/sessions?subscription=`) and compares
-  `customer_details.address.country`, the card form's billing country as
-  recorded when the session completed, with the chosen one. On a mismatch,
-  or no country, it cancels the subscription at once
-  (`DELETE /v1/subscriptions/{id}`, idempotency key `refuse-<sub id>`) and
-  refunds every paid invoice's payment (`POST /v1/refunds` per payment
-  intent, key `refund-<pi id>`, `metadata.reason=billing_country_mismatch`;
-  "already refunded" counts as done), and never records an entitlement
-  for it: the webhook is acknowledged with nothing to apply, so the account
-  is not marked lapsed. The return page says which country the card was
-  billed in and that the payment was refunded, and shows the country step
-  again (the dashboard, with the card's country chosen) or tells the app's
-  user to start again from the app (the pay token was used when the
-  session opened). A subscription that would entitle before its session
-  has completed is a webhook error, which Stripe retries, never an
-  entitlement. Sessions on Stripe's Managed Payments page carry no
-  `billing_country` and are not checked. The session's address is used
-  rather than the payment method's (which matched it in the sandbox)
-  because it cannot change later: a card replaced in the Customer Portal
-  never refuses a subscription already accepted.
-- **Everything the checkout must not offer is off per session, in code.**
-  Each Checkout Session sets `adaptive_pricing[enabled]=false` (the
-  customer pays the price's own USD amount, never a converted one),
-  `allowed_payment_method_types[]=card` and
-  `wallet_options[link][display]=never`; the page also hides Apple Pay,
-  Google Pay and Link in the Payment Element. None of it depends on the
-  Stripe account's dashboard settings.
-- **Entitlement does not wait for the webhook.** When the checkout
-  completes, the page asks the server to confirm it: the server fetches the
-  Checkout Session, checks it is the caller's (`sub`), and applies its
-  subscription at once. Every later change (renewal, failed payment,
-  cancellation, deletion) arrives by webhook.
+  15 minutes), to the country step without a dashboard session. Opening or
+  reloading it uses nothing; posting Checkout uses it, so a link preview
+  never burns it. A self-payment country then gets a pay token for that
+  country, `<publicUrl>/billing/checkout/<pay token>`, our checkout page;
+  any other is sent to Stripe. The pay token is used only by the payment
+  that goes through: reloading the page, a refused card, a decline or a
+  failed 3-D Secure leave it usable until it expires. The token key is
+  derived from `STRIPE_SECRET_KEY`, so rotating that key also voids
+  outstanding links.
+- **Saved cards.** The page's session (`POST .../session`, the dashboard's
+  `POST /dashboard/billing/checkout?country=`) is a CustomerSession for
+  the account's Customer (found or created by `metadata.sub`, never
+  otherwise) with `components[payment_element][enabled]`, and its
+  `payment_method_save` (with `payment_method_save_usage=off_session`) and
+  `payment_method_redisplay` features enabled. The Payment Element then
+  offers "Save payment details for future purchases"; a card saved with
+  it has `allow_redisplay=always`, and later checkouts list it (the
+  redisplay filter's default is `always`; a card paid with the box
+  unticked is `limited` and never shown). `payment_method_remove` stays
+  off: a removed card would come off the subscription it pays.
+- **The server refuses another billing country before charging.** The
+  country decides the route (and who the merchant of record is), but
+  Stripe's card form has its own Country field, defaulted from the
+  visitor's IP. The page starts it at the chosen country (Payment Element
+  `defaultValues.billingDetails.address.country`) and holds Subscribe,
+  with a message naming it, while the Payment Element's `change` events
+  report another country: a new card's
+  `value.billingDetails.address.country` (as seen at the pinned version;
+  Stripe's reference shows `billingDetails.country`, which the page also
+  reads) or a saved card's `value.payment_method.billing_details.address.country`.
+  The server enforces it on every Pay (`POST /dashboard/billing/pay?country=`
+  or `POST /billing/checkout/<pay token>/pay`, `{"confirmation_token"}`):
+  it reads the token (`GET /v1/confirmation_tokens/{id}`) and compares
+  `payment_method_preview.billing_details.address.country`, what the form
+  (or the saved card) will be charged with, to the chosen country. Only
+  that billing country counts, never the card's issuing country
+  (`payment_method_preview.card.country`). Another country, or none,
+  answers 422 `billing_country_mismatch` ("Nothing was charged") and
+  creates nothing. Otherwise it creates the subscription
+  (`POST /v1/subscriptions`: the Customer, the price,
+  `payment_behavior=default_incomplete`,
+  `payment_settings[save_default_payment_method]=on_subscription`,
+  `payment_settings[payment_method_types][]=card`, `metadata.sub`,
+  `metadata.billing_country`, `expand[]=latest_invoice.payments`;
+  idempotency key `pay-<ctoken id>`) and confirms its first invoice's
+  payment with the token (`POST /v1/payment_intents/{id}/confirm`,
+  `confirmation_token`, key `confirm-<ctoken id>`). At this API version
+  invoices no longer carry `payment_intent`; the PaymentIntent is
+  `latest_invoice.payments.data[0].payment.payment_intent`, the default
+  InvoicePayment Stripe creates when the invoice is finalized
+  ([changelog](https://docs.stripe.com/changelog/basil/2025-03-31/add-support-for-multiple-partial-payments-on-invoices)).
+  A token belongs to one attempt, so a retried request returns the same
+  subscription and payment. Steps for one account run one at a time across
+  replicas (a Postgres advisory lock), and Pay is refused once the account
+  is entitled, so two tabs cannot both pay.
+- **Outcomes.** Paid: the server reads the subscription (active as soon as
+  the confirmation returns, in the sandbox) and entitles the account at
+  once. 3-D Secure (`requires_action`): the server answers the
+  PaymentIntent's client secret and the subscription; the page runs
+  `stripe.handleNextAction` and posts `{"subscription"}` back, and the
+  server settles it from the PaymentIntent's status. Declined (a `card_error`
+  on confirm, or `requires_payment_method` after 3-D Secure): 402
+  `payment_declined` with Stripe's message, the incomplete subscription
+  cancelled at once (`DELETE /v1/subscriptions/{id}`, which leaves an
+  unpaid one `incomplete_expired`), and the form stays up for another card.
+- **The billed country is checked again after payment.** Wherever a
+  subscription carrying `billing_country` could entitle the account (the
+  payment's settlement and its result page, every `customer.subscription.*`
+  webhook, and reconciliation's refresh), the server reads the record of
+  what was billed: the charge of the subscription's first payment (its
+  `billing_reason=subscription_create` paid invoice, from
+  `GET /v1/invoices?subscription=&status=paid&expand[]=data.payments`,
+  then `GET /v1/payment_intents/{id}?expand[]=latest_charge`) and its
+  `billing_details.address.country`, which Stripe documents as the payment
+  method's billing details "at the time of the transaction"
+  ([Charge](https://docs.stripe.com/api/charges/object)), so a card later
+  replaced in the Customer Portal never refuses a subscription already
+  accepted. On a mismatch, or no country, it cancels the subscription at
+  once and refunds every paid invoice's payment (`POST /v1/refunds` per
+  payment intent, key `refund-<pi id>`,
+  `metadata.reason=billing_country_mismatch`; "already refunded" counts as
+  done), and never records an entitlement for it: the webhook is
+  acknowledged with nothing to apply, so the account is not marked lapsed,
+  and the page says which country the card was billed in and that the
+  payment was refunded. An entitling subscription whose first charge is
+  not there yet is a webhook error, which Stripe retries, never an
+  entitlement; one still waiting for 3-D Secure is `incomplete` and
+  entitles nothing. The check before payment makes this unreachable from
+  our page; it guards against anything else that creates such a
+  subscription. Subscriptions from Stripe's Managed Payments page carry no
+  `billing_country` and are not checked.
+- **Everything the checkout must not offer is off per request, in code.**
+  Our page charges the price's own USD amount (no Checkout Session, so no
+  Adaptive Pricing), by card alone (`allowedPaymentMethodTypes` on the
+  page, `payment_settings[payment_method_types][]=card` on the
+  subscription); the page also hides Apple Pay, Google Pay and Link in the
+  Payment Element. None of it depends on the Stripe account's dashboard
+  settings.
+- **Entitlement does not wait for the webhook.** A payment that goes
+  through on our page is applied when the server settles it; one on
+  Stripe's page when its return page fetches the Checkout Session, checks
+  it is the caller's (`sub`), and applies its subscription. Every later
+  change (renewal, failed payment, cancellation, deletion) arrives by
+  webhook.
 - **The pages that host checkout** (the overview while unsubscribed, its
   subscribe view, and our page under a pay token) load Stripe.js from
   `js.stripe.com`, which Stripe forbids self-hosting, and are served a
@@ -292,9 +347,9 @@ Do this once per account (live for prod, the sandbox for staging):
    the self-payment countries fails. Nothing else is set there: the
    server enables it per Checkout Session.
 5. **Checkout.** Nothing to set for our page: the currency, payment
-   methods and look are all set per session and on our page (see above),
-   whatever the account's Adaptive Pricing, payment method and branding
-   settings say. Stripe's hosted page for Managed Payments follows the
+   methods, saved cards and look are all set per request and on our page
+   (see above), whatever the account's Adaptive Pricing, payment method,
+   Radar and branding settings say. Stripe's hosted page for Managed Payments follows the
    account's branding settings.
 6. **Tax.** Under Managed Payments Stripe calculates, collects and remits
    the tax as merchant of record. On our own page (the self-payment
