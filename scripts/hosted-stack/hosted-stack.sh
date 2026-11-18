@@ -46,18 +46,15 @@ region_names=("US East" "EU Central" "Asia Pacific Southeast")
 
 # Postgres and MinIO publish their ports on loopback. Under Docker-in-Docker
 # (DOCKER_HOST=tcp://docker:2376 in GitLab CI) the published ports are on the
-# Docker host instead, so they must listen beyond it. HOSTED_STACK_CONTAINER_HOST
-# publishes them on that address and reaches them there: a CI job that runs
-# beside its own containers on the host's Docker gives its bridge gateway.
+# Docker host instead, so they must listen beyond it.
 container_host=127.0.0.1
 export HOSTED_STACK_BIND=127.0.0.1
-if [[ -n ${HOSTED_STACK_CONTAINER_HOST:-} ]]; then
-  container_host=$HOSTED_STACK_CONTAINER_HOST
-  HOSTED_STACK_BIND=$HOSTED_STACK_CONTAINER_HOST
-elif [[ ${DOCKER_HOST:-} =~ ^tcp://([^:/]+) ]]; then
+if [[ ${DOCKER_HOST:-} =~ ^tcp://([^:/]+) ]]; then
   container_host=${BASH_REMATCH[1]}
   HOSTED_STACK_BIND=0.0.0.0
 fi
+postgres_addr=$container_host:$HOSTED_STACK_POSTGRES_PORT
+minio_addr=$container_host:$HOSTED_STACK_MINIO_PORT
 
 log() { echo "hosted-stack: $*" >&2; }
 die() {
@@ -67,6 +64,22 @@ die() {
 
 compose() {
   docker compose -f "$here/compose.yml" "$@" >&2
+}
+
+# HOSTED_STACK_JOIN_CONTAINER is the id of a container this launcher runs in,
+# on the same Docker daemon as the stack: a CI job given the host's Docker
+# socket. The host's firewall may drop traffic from the job's network to ports
+# published on another, so the job joins the stack's network instead and
+# reaches Postgres and MinIO there, on their own ports.
+join_stack_network() {
+  local postgres minio network
+  postgres=$(docker compose -f "$here/compose.yml" ps -q postgres)
+  minio=$(docker compose -f "$here/compose.yml" ps -q minio)
+  network=$(docker inspect -f '{{range $name, $_ := .NetworkSettings.Networks}}{{$name}}{{end}}' "$postgres")
+  echo "$network" >"$state/network"
+  docker network connect "$network" "$HOSTED_STACK_JOIN_CONTAINER"
+  postgres_addr=$(docker inspect -f "{{(index .NetworkSettings.Networks \"$network\").IPAddress}}" "$postgres"):5432
+  minio_addr=$(docker inspect -f "{{(index .NetworkSettings.Networks \"$network\").IPAddress}}" "$minio"):9000
 }
 
 absolute() {
@@ -141,9 +154,12 @@ pem_json() {
 
 down() {
   stop_services
+  if [[ -f $state/network ]]; then
+    docker network disconnect -f "$(cat "$state/network")" "$HOSTED_STACK_JOIN_CONTAINER" || true
+  fi
   compose down --volumes --remove-orphans || true
   rm -rf "$state/pids" "$state/logs"
-  rm -f "$state/env" "$state/regions.json"
+  rm -f "$state/env" "$state/regions.json" "$state/network"
   rmdir "$state" 2>/dev/null || true
   log "down"
 }
@@ -176,6 +192,9 @@ up() {
   log "starting Postgres and MinIO"
   compose up -d --wait postgres minio
   compose run --rm minio-init
+  if [[ -n ${HOSTED_STACK_JOIN_CONTAINER:-} ]]; then
+    join_stack_network
+  fi
 
   local api_url=http://127.0.0.1:$api_port
   local issuer=http://127.0.0.1:$oidc_port
@@ -198,7 +217,7 @@ up() {
     start "storage-$region" "$storage_bin" \
       REGION_ID="$region" \
       STORAGE_PORT=$((storage_port + i)) \
-      S3_ENDPOINT="http://$container_host:$HOSTED_STACK_MINIO_PORT" \
+      S3_ENDPOINT="http://$minio_addr" \
       S3_BUCKET="notes-$region" \
       S3_ACCESS_KEY_ID=minio \
       S3_SECRET_ACCESS_KEY=miniominio \
@@ -217,8 +236,8 @@ up() {
   local api_env=(
     API_PORT="$api_port"
     PUBLIC_URL="$api_url"
-    POSTGRES_HOST="$container_host"
-    POSTGRES_PORT="$HOSTED_STACK_POSTGRES_PORT"
+    POSTGRES_HOST="${postgres_addr%:*}"
+    POSTGRES_PORT="${postgres_addr##*:}"
     POSTGRES_DATABASE=notes
     POSTGRES_USERNAME=postgres
     POSTGRES_PASSWORD=postgres

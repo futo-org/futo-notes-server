@@ -93,9 +93,10 @@ artifacts, and `publish:binaries` waits for it. The bundle's sources are
 time.
 
 `test:hosted-stack` runs the stack in the job's Docker-in-Docker service where
-the runner provides one. One runner mounts the host's Docker socket into every
+the runner provides one. Some runners mount the host's Docker socket into every
 container instead, which stops Docker-in-Docker from starting. There the job
 starts its containers on the shared host daemon with a Compose project and
 ports derived from the job ID, so concurrent pipelines don't collide, and
-publishes them on the job's bridge gateway (`HOSTED_STACK_CONTAINER_HOST`),
-where the job reaches them.
+passes its own container id as `HOSTED_STACK_JOIN_CONTAINER`: the launcher
+connects the job to the stack's network and reaches Postgres and MinIO there,
+since the host's firewall drops traffic to ports published on another network.
