@@ -398,6 +398,7 @@ The keys come from the `notes-api` Secret.
 | `APPLE_PRIVATE_KEY` | Secret | **Secret.** The In-App Purchase key's `.p8` file, as is (PKCS #8 PEM, P-256). |
 | `APPLE_SUBSCRIPTION_PRODUCT_IDS` | `appStore.subscriptionProductIds` | The auto-renewable subscription product ids that entitle, comma-separated. |
 | `APPLE_ACCEPT_SANDBOX` | `appStore.acceptSandbox` | Optional. `true` in prod and staging (the chart default): App Review and TestFlight purchases are sandbox transactions in the release build. The API's own default is `false`. Sandbox rows are stored with `environment = sandbox`. |
+| `APPLE_STOREKIT_XCODE` | none | Never set outside development: it accepts unsigned Xcode StoreKit testing purchases, and the API refuses it unless `DEV_UI=true` (docs/DEVELOPMENT.md). |
 | `PLAY_PACKAGE_NAME` | `play.packageName` | `tech.futo.notes` |
 | `PLAY_SERVICE_ACCOUNT_JSON` | Secret | **Secret.** The Play API service account's JSON key file. |
 | `PLAY_SUBSCRIPTION_PRODUCT_IDS` | `play.subscriptionProductIds` | The subscription product ids that entitle, comma-separated. |

@@ -155,6 +155,7 @@ third note</textarea></div>
       grant adds a 30-day web one; lapse reports them expired; expire lets their paid period end with no news; refund revokes them.
       Then run the lapse job to record the lapse, and move it back 83 days (warning) or 90 (purge); emails land in
       <a href="http://localhost:8025">Mailpit</a>.</p>
+    <p>Xcode StoreKit testing: <span id="storekit">checking…</span></p>
     <div class="row">
       <button data-get="/api/billing">Billing state</button>
       <button id="checkout-open">Open checkout</button>
@@ -267,6 +268,14 @@ async function loadSignup() {
     : (await res.json()).restricted
       ? "restricted by ALLOWED_EMAIL_DOMAINS: a new account needs a verified email at a listed domain (tick \"Email not verified\" on the mock sign-in form to try a refusal); existing users always sign in"
       : "open to everyone (ALLOWED_EMAIL_DOMAINS is empty)";
+}
+async function loadStoreKit() {
+  const res = await fetch("/dev/storekit");
+  if (!res.ok) { $("storekit").textContent = "unknown (" + res.status + ")"; return; }
+  const sk = await res.json();
+  $("storekit").textContent = sk.xcode
+    ? "on (APPLE_STOREKIT_XCODE): an iOS simulator purchase made with the app's StoreKit configuration, from bundle " + sk.bundle_id + ", entitles the account it was bought under; its signature is not checked and Apple is not asked"
+    : "off: set APPLE_STOREKIT_XCODE=true (docs/DEVELOPMENT.md) to accept the iOS app's Xcode StoreKit purchases";
 }
 async function loadRegions() {
   const res = await fetch("/api/regions");
@@ -418,6 +427,7 @@ $("batch-retry").onclick = () => lastClaim ? claimBatch() : show(400, "claim a b
 $("list").onclick = () => call("GET", "/api/collections/" + $("collection").value + "/objects");
 loadRegions();
 loadSignup();
+loadStoreKit();
 finishAppLogin().then(refreshWho);
 </script>
 </body>

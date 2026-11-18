@@ -289,10 +289,11 @@ type Ref struct {
 // Stale returns the subscriptions reconciliation refreshes: those still
 // live (active, grace or on hold) that end within soon, or that have had no
 // news for longer than quiet. Expired and revoked rows are final, and a
-// provider reports a resubscription itself.
+// provider reports a resubscription itself. Xcode StoreKit testing rows
+// have no provider to ask.
 func (s *Store) Stale(ctx context.Context, soon, quiet time.Duration) ([]Ref, error) {
 	rows, err := s.database.QueryContext(ctx, `SELECT source, external_id FROM entitlements e
-		WHERE e.status IN ('active', 'grace', 'on_hold')
+		WHERE e.status IN ('active', 'grace', 'on_hold') AND e.environment <> 'xcode'
 			AND (greatest(e.expires_at, e.grace_until) < now() + make_interval(secs => $1)
 				OR e.updated_at < now() - make_interval(secs => $2))
 		ORDER BY e.updated_at`, soon.Seconds(), quiet.Seconds())

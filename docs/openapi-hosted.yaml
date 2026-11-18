@@ -86,7 +86,7 @@ info:
     cookie and CSRF tokens; every state-changing page calls the same service
     code as the JSON operation it matches) and, when `DEV_UI` is set, a
     manual test page at `/dev` with its `/dev/jobs/*`, `/dev/email/*` and
-    `/dev/billing/*` triggers and its `/dev/signup` status, and the mock web payment provider's checkout
+    `/dev/billing/*` triggers and its `/dev/signup` and `/dev/storekit` statuses, and the mock web payment provider's checkout
     and portal pages under `/dev/billing`. With Stripe as the web provider,
     the dashboard asks for the billing country in place, then opens its
     checkout (our page, with Stripe's card fields) or sends the browser to
@@ -116,6 +116,7 @@ x-internal-routes:
   - POST /billing/checkout/{token}/session
   - GET /dev
   - GET /dev/signup
+  - GET /dev/storekit
   - POST /dashboard/delete
   - POST /dashboard/devices/{id}/revoke
   - POST /dashboard/region
