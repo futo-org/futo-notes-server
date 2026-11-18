@@ -52,6 +52,12 @@ const (
 	// codeCheckoutLinkExpired answers an app's checkout link that is
 	// forged, expired or already used.
 	codeCheckoutLinkExpired = "checkout_link_expired"
+	// codeBillingCountryMismatch refuses a payment on our checkout page
+	// whose billing address is outside the billing country chosen.
+	codeBillingCountryMismatch = "billing_country_mismatch"
+	// codePaymentDeclined answers a payment on our checkout page that did
+	// not go through.
+	codePaymentDeclined = "payment_declined"
 )
 
 // serverError logs an internal failure and answers with a hosted 500.

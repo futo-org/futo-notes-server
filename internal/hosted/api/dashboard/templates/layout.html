@@ -116,7 +116,7 @@
 {{- end}}
 
 {{define "checkout-panel" -}}
-<div class="checkout" data-checkout data-publishable-key="{{.PublishableKey}}" data-session-url="{{.SessionURL}}" data-page-url="{{.PageURL}}" data-country="{{.Country}}">
+<div class="checkout" data-checkout data-publishable-key="{{.PublishableKey}}" data-session-url="{{.SessionURL}}" data-pay-url="{{.PayURL}}" data-page-url="{{.PageURL}}" data-country="{{.Country}}" data-amount="{{.Amount}}" data-currency="{{.Currency}}">
 <div class="plan">
 <div class="plan-head">
 <h3 class="plan-name">FUTO Notes Sync</h3>
