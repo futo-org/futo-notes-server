@@ -83,8 +83,8 @@ compose() {
 # reaches Postgres and MinIO there, on their own ports.
 join_stack_network() {
   local postgres minio network
-  postgres=$(docker compose -f "$here/compose.yml" ps -q postgres)
-  minio=$(docker compose -f "$here/compose.yml" ps -q minio)
+  postgres=$(docker compose -p "$project" -f "$here/compose.yml" ps -q postgres)
+  minio=$(docker compose -p "$project" -f "$here/compose.yml" ps -q minio)
   network=$(docker inspect -f '{{range $name, $_ := .NetworkSettings.Networks}}{{$name}}{{end}}' "$postgres")
   echo "$network" >"$state/network"
   docker network connect "$network" "$HOSTED_STACK_JOIN_CONTAINER"
