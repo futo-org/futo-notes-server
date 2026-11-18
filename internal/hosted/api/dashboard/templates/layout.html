@@ -106,7 +106,7 @@
 {{- end}}
 </select>
 </div>
-<p class="hint field-hint" data-route-note="merchant"{{if ne .Route "merchant"}} hidden{{end}}>Stripe sells the subscription in your country and adds any sales tax or VAT due there. You can pay in your currency.</p>
+<p class="hint field-hint" data-route-note="merchant"{{if ne .Route "merchant"}} hidden{{end}}>Sold through Link, by Stripe, which adds any sales tax or VAT due in your country. You can pay in your currency.</p>
 </div>
 {{with .Error}}<p class="alert" role="alert">{{.}}</p>{{end}}
 <p class="notice" role="status" data-route-note="unavailable"{{if ne .Route "unavailable"}} hidden{{end}}>Paying on the web isn't available in your country yet.</p>

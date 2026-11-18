@@ -730,7 +730,7 @@ func TestDashboardCountryRoutes(t *testing.T) {
 	// Choosing a country by URL shows it chosen, and opens nothing.
 	expectContains(t, browser.expect(http.MethodGet, "/dashboard/billing/subscribe?country=DE", nil, http.StatusOK),
 		`<option value="DE" data-route="merchant" selected>Germany</option>`, `data-route-note="merchant"> plus tax</span>`,
-		"adds any sales tax or VAT")
+		"adds any sales tax or VAT due in your country")
 	unavailable := browser.expect(http.MethodGet, "/dashboard/billing/subscribe?country=RU", nil, http.StatusOK)
 	expectContains(t, unavailable, `<option value="RU" data-route="unavailable" selected>Russia</option>`,
 		"Paying on the web isn't available in your country yet.", "data-country-submit hidden")
