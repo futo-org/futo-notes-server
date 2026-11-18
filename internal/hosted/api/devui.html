@@ -149,6 +149,9 @@ third note</textarea></div>
       "Dashboard country step" links the dashboard's, with a country chosen (a self-payment country opens our panel at once);
       pay with card 4242 4242 4242 4242, any future date and CVC (4000 0000 0000 0002 is declined, 4000 0025 0000 3155 asks for
       3-D Secure; on Stripe's page, Link's test passcode is 000000).
+      Our page binds the checkout to the country chosen: the card form's Country starts there, and Subscribe is held, naming it,
+      while the form names another (pick Canada after "… United States"). A payment billed elsewhere anyway (force the button from
+      the console) is cancelled and refunded, never entitles, and the return page says why.
       The account is entitled as soon as the checkout completes, by either route; <code>stripe listen</code> forwards later changes.
       Without a subscription, writes answer 402 and storage
       tokens are read-only (exchange again after subscribing). Synthetic events act on the signed-in user's subscriptions directly:

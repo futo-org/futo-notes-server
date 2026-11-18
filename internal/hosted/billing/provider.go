@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 )
@@ -156,14 +157,19 @@ type CustomCheckout interface {
 	PublishableKey() string
 	// Plan is the subscription checkout sells, as the provider prices it.
 	Plan(ctx context.Context) (Plan, error)
-	// StartCheckout opens a checkout for c that, once paid, returns the
-	// browser to returnURL. The client secret mounts it in the browser and
-	// must not be logged.
-	StartCheckout(ctx context.Context, c Customer, returnURL string) (Checkout, error)
+	// StartCheckout opens a checkout for c, who chose billingCountry, a
+	// self-payment country, that, once paid, returns the browser to
+	// returnURL. The client secret mounts it in the browser and must not be
+	// logged. A subscription it creates whose payment's billing address is
+	// in another country never entitles: the provider cancels and refunds
+	// it, Verify reports nothing about it, and CompleteCheckout returns a
+	// *CountryMismatchError.
+	StartCheckout(ctx context.Context, c Customer, billingCountry, returnURL string) (Checkout, error)
 	// CompleteCheckout returns the subscription a completed checkout
 	// created, so entitlement need not wait for the webhook. It returns
-	// ErrCheckoutForeign for a checkout opened for another customer, and
-	// ErrCheckoutIncomplete for one not yet paid.
+	// ErrCheckoutForeign for a checkout opened for another customer,
+	// ErrCheckoutIncomplete for one not yet paid, and a
+	// *CountryMismatchError for one refused for its billing country.
 	CompleteCheckout(ctx context.Context, c Customer, checkoutID string) (Event, error)
 }
 
@@ -171,6 +177,21 @@ type CustomCheckout interface {
 type Checkout struct {
 	ID           string
 	ClientSecret string
+}
+
+// CountryMismatchError reports a checkout on our page paid with a billing
+// address outside the billing country the buyer chose, which decided that
+// checkout's route. The provider has refused it: the subscription is
+// cancelled and what it charged refunded.
+type CountryMismatchError struct {
+	// Chosen is the billing country the buyer chose; Billed is the
+	// payment's, "" when the provider recorded none. Both are ISO 3166-1
+	// alpha-2 codes.
+	Chosen, Billed string
+}
+
+func (e *CountryMismatchError) Error() string {
+	return fmt.Sprintf("checkout paid with a billing address in %q, not the chosen %q", e.Billed, e.Chosen)
 }
 
 // Plan is a recurring price: Amount in Currency's minor units, charged

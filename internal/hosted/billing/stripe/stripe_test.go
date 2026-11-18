@@ -192,7 +192,7 @@ func TestCustomerFoundOrCreatedBySub(t *testing.T) {
 	// Another account's customer with the same email is never matched.
 	stranger := f.addCustomer("someone-else", "shared@example.test", 1)
 
-	if _, err := p.StartCheckout(t.Context(), billing.Customer{Subject: subject, Email: "shared@example.test"}, publicURL+"/return"); err != nil {
+	if _, err := p.StartCheckout(t.Context(), billing.Customer{Subject: subject, Email: "shared@example.test"}, "US", publicURL+"/return"); err != nil {
 		t.Fatal(err)
 	}
 	created := f.calls(http.MethodPost, "/v1/customers")
@@ -209,7 +209,7 @@ func TestCustomerFoundOrCreatedBySub(t *testing.T) {
 	}
 
 	// The next checkout finds it by sub; an unchanged email is not sent again.
-	if _, err := p.StartCheckout(t.Context(), billing.Customer{Subject: subject, Email: "shared@example.test"}, publicURL+"/return"); err != nil {
+	if _, err := p.StartCheckout(t.Context(), billing.Customer{Subject: subject, Email: "shared@example.test"}, "US", publicURL+"/return"); err != nil {
 		t.Fatal(err)
 	}
 	if n := len(f.calls(http.MethodPost, "/v1/customers")); n != 1 {
@@ -232,13 +232,13 @@ func TestCustomerFoundOrCreatedBySub(t *testing.T) {
 	// oldest wins. A sub with a quote is quoted, not injected.
 	older := f.addCustomer("o'brien\\x", "", 5)
 	f.addCustomer("o'brien\\x", "", 9)
-	if _, err := p.StartCheckout(t.Context(), billing.Customer{Subject: "o'brien\\x"}, publicURL+"/return"); err != nil {
+	if _, err := p.StartCheckout(t.Context(), billing.Customer{Subject: "o'brien\\x"}, "US", publicURL+"/return"); err != nil {
 		t.Fatal(err)
 	}
 	if got := f.calls(http.MethodPost, "/v1/checkout/sessions")[2].Form.Get("customer"); got != older {
 		t.Fatalf("checkout used %s, want the oldest %s", got, older)
 	}
-	if _, err := p.StartCheckout(t.Context(), billing.Customer{Email: "x@example.test"}, publicURL+"/return"); err == nil {
+	if _, err := p.StartCheckout(t.Context(), billing.Customer{Email: "x@example.test"}, "US", publicURL+"/return"); err == nil {
 		t.Fatal("a customer without a sub was accepted")
 	}
 }
@@ -247,7 +247,7 @@ func TestCheckoutParameters(t *testing.T) {
 	f := newFakeStripe(t)
 	p := f.provider()
 	returnURL := publicURL + "/dashboard/billing/return?session_id={CHECKOUT_SESSION_ID}"
-	checkout, err := p.StartCheckout(t.Context(), billing.Customer{UserID: "user-1", Subject: subject, Email: "a@example.test"}, returnURL)
+	checkout, err := p.StartCheckout(t.Context(), billing.Customer{UserID: "user-1", Subject: subject, Email: "a@example.test"}, "US", returnURL)
 	if err != nil || !strings.HasPrefix(checkout.ID, "cs_test") || !strings.Contains(checkout.ClientSecret, "_secret_") {
 		t.Fatalf("StartCheckout = %+v, %v", checkout, err)
 	}
@@ -260,6 +260,8 @@ func TestCheckoutParameters(t *testing.T) {
 		"client_reference_id": subject, "metadata[sub]": subject, "subscription_data[metadata][sub]": subject,
 		"return_url": returnURL, "adaptive_pricing[enabled]": "false", "allowed_payment_method_types[0]": "card",
 		"wallet_options[link][display]": "never",
+		// The country chosen, which the card's billing address must match.
+		"metadata[billing_country]": "US", "subscription_data[metadata][billing_country]": "US",
 	}
 	for key, value := range want {
 		if got := form.Get(key); got != value {
@@ -306,7 +308,7 @@ func TestCompleteCheckout(t *testing.T) {
 	f := newFakeStripe(t)
 	p := f.provider()
 	me := billing.Customer{Subject: subject}
-	checkout, err := p.StartCheckout(t.Context(), me, publicURL+"/return")
+	checkout, err := p.StartCheckout(t.Context(), me, "US", publicURL+"/return")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -314,7 +316,7 @@ func TestCompleteCheckout(t *testing.T) {
 		t.Fatalf("an open session = %v, want ErrCheckoutIncomplete", err)
 	}
 	periodEnd := time.Now().Add(30 * 24 * time.Hour).Truncate(time.Second)
-	subID := f.completeSession(checkout.ID, periodEnd.Unix())
+	subID := f.completeSession(checkout.ID, "US", periodEnd.Unix())
 
 	someoneElse := billing.Customer{Subject: "another-sub"}
 	for name, id := range map[string]string{"another's": checkout.ID, "unknown": "cs_test_missing", "not a session": "sub_1"} {
@@ -473,7 +475,7 @@ func TestMerchantCheckoutParameters(t *testing.T) {
 
 	// The same customer as our own page's checkout, found by sub, and
 	// completed the same way.
-	if _, err := p.StartCheckout(t.Context(), billing.Customer{Subject: subject}, publicURL+"/return"); err != nil {
+	if _, err := p.StartCheckout(t.Context(), billing.Customer{Subject: subject}, "US", publicURL+"/return"); err != nil {
 		t.Fatal(err)
 	}
 	sessions := f.calls(http.MethodPost, "/v1/checkout/sessions")
@@ -484,7 +486,7 @@ func TestMerchantCheckoutParameters(t *testing.T) {
 	if _, err := p.CompleteCheckout(t.Context(), billing.Customer{Subject: subject}, id); !errors.Is(err, billing.ErrCheckoutIncomplete) {
 		t.Fatalf("an open merchant checkout = %v", err)
 	}
-	subID := f.completeSession(id, time.Now().Add(30*24*time.Hour).Unix())
+	subID := f.completeSession(id, "CA", time.Now().Add(30*24*time.Hour).Unix())
 	if ev, err := p.CompleteCheckout(t.Context(), billing.Customer{Subject: subject}, id); err != nil || ev.ExternalID != subID || ev.Subject != subject {
 		t.Fatalf("CompleteCheckout of a merchant checkout = %+v, %v", ev, err)
 	}

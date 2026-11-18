@@ -258,7 +258,11 @@ the sandbox), and Russia, China and the other refused countries say web
 payment isn't available. `/dev` links the dashboard's step with a country
 chosen. Pay with `4242 4242 4242 4242`,
 any future expiry and any CVC (on Stripe's page Link may ask for a code:
-the test code is `000000`). The account is entitled as soon as the
+the test code is `000000`). On our page the card form's Country starts at the
+country chosen; pick another and Subscribe is held, with a message naming
+the chosen one. A payment billed elsewhere anyway (enable the button from
+the console) is cancelled and refunded on return, or by the first webhook,
+and the account is not entitled. The account is entitled as soon as the
 checkout completes, before any webhook; `stripe listen` then shows
 `customer.subscription.created` arriving with `[200]`. To exercise later
 changes, use Manage subscription (the Customer Portal) to cancel at period

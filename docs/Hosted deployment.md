@@ -87,7 +87,7 @@ keys are committed.
 | | `API_SIGNING_KEY` | One Ed25519 private key PEM (with `kid`): signs storage access and admin tokens. |
 | | `STORAGE_REFRESH_ROTATION_KEY` | 32 random bytes, base64 (`openssl rand -base64 32`): derives each storage refresh token's successor, `base64url(HMAC-SHA256(key, token))`, so an exchange whose response was lost can be repeated. The API refuses to start without it. |
 | | `RESEND_API_KEY` | A Resend API key with sending access for the `emailFromAddress` domain. Without it the API logs and skips every email (the lapse and purge notices), and starts anyway. |
-| | `STRIPE_SECRET_KEY` | With Stripe: the secret key (`sk_live_...`), or a restricted key (`rk_...`) with write access to Customers, Checkout Sessions, Subscriptions and Customer Portal sessions. Staging uses the sandbox's `sk_test_...`. The API refuses a live key while `DEV_UI` is on. |
+| | `STRIPE_SECRET_KEY` | With Stripe: the secret key (`sk_live_...`), or a restricted key (`rk_...`) with write access to Customers, Checkout Sessions, Subscriptions, Refunds and Customer Portal sessions, and read access to Invoices. Staging uses the sandbox's `sk_test_...`. The API refuses a live key while `DEV_UI` is on. |
 | | `STRIPE_WEBHOOK_SECRET` | With Stripe: the webhook endpoint's signing secret (`whsec_...`). |
 | `notes-storage-<region>` | `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | Credentials for the region's bucket: get, put, list and delete objects. |
 | | `API_PUBLIC_KEYS` | The public half of the API signing key, one PEM block per `kid` (several during rotation). Same value in every region. |
@@ -179,6 +179,42 @@ How it works:
   our checkout page; any other is sent to Stripe. The token key is derived
   from `STRIPE_SECRET_KEY`, so rotating that key also voids outstanding
   links.
+- **Our page is bound to the billing country chosen.** The country decides
+  the route (and who the merchant of record is), but Stripe's card form
+  has its own Country field, defaulted from the visitor's IP. So the
+  Checkout Session and its subscription record the chosen country
+  (`metadata.billing_country`, and `subscription_data.metadata.billing_country`).
+  The page starts the card form's Country at it (Stripe.js
+  `initCheckoutElementsSdk({defaultValues: {billingAddress: {address: {country}}}})`)
+  and holds Subscribe, with a message naming it, while the Payment
+  Element's `change` events report another `value.billingDetails.address.country`
+  (seen at the pinned version; Stripe's reference does not document that
+  field, so without it the page lets Subscribe through and the server
+  alone refuses).
+  The server enforces it: wherever a subscription carrying
+  `billing_country` could entitle the account (the return page's
+  confirmation, every `customer.subscription.*` webhook, and
+  reconciliation's refresh), it reads the Checkout Session that created it
+  (`GET /v1/checkout/sessions?subscription=`) and compares
+  `customer_details.address.country`, the card form's billing country as
+  recorded when the session completed, with the chosen one. On a mismatch,
+  or no country, it cancels the subscription at once
+  (`DELETE /v1/subscriptions/{id}`, idempotency key `refuse-<sub id>`) and
+  refunds every paid invoice's payment (`POST /v1/refunds` per payment
+  intent, key `refund-<pi id>`, `metadata.reason=billing_country_mismatch`;
+  "already refunded" counts as done), and never records an entitlement
+  for it: the webhook is acknowledged with nothing to apply, so the account
+  is not marked lapsed. The return page says which country the card was
+  billed in and that the payment was refunded, and shows the country step
+  again (the dashboard, with the card's country chosen) or tells the app's
+  user to start again from the app (the pay token was used when the
+  session opened). A subscription that would entitle before its session
+  has completed is a webhook error, which Stripe retries, never an
+  entitlement. Sessions on Stripe's Managed Payments page carry no
+  `billing_country` and are not checked. The session's address is used
+  rather than the payment method's (which matched it in the sandbox)
+  because it cannot change later: a card replaced in the Customer Portal
+  never refuses a subscription already accepted.
 - **Everything the checkout must not offer is off per session, in code.**
   Each Checkout Session sets `adaptive_pricing[enabled]=false` (the
   customer pays the price's own USD amount, never a converted one),

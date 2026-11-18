@@ -469,7 +469,7 @@ func (s *Server) handleDashboardCheckout(w http.ResponseWriter, r *http.Request)
 			badRequest(w, r, "Choose your billing country again.")
 			return
 		}
-		s.writeCheckoutSession(w, r, userID, s.cfg.PublicURL+checkoutReturnPath+"?session_id="+checkoutSessionID)
+		s.writeCheckoutSession(w, r, userID, code, s.cfg.PublicURL+checkoutReturnPath+"?session_id="+checkoutSessionID)
 		return
 	}
 	target, err := s.checkoutURL(r.Context(), userID)

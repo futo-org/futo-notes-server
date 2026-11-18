@@ -13,6 +13,12 @@
 // countries, which cannot pay on the web. Webhooks
 // (customer.subscription.created, .updated, .deleted) only say which
 // subscription changed; its state is always fetched from Stripe.
+//
+// The billing country decides the route, so our page's sessions and their
+// subscriptions record the one chosen (metadata.billing_country), and a
+// subscription whose Checkout Session recorded a billing address elsewhere
+// is refused wherever it could entitle the account: cancelled at once,
+// refunded, and never reported.
 package stripe
 
 import (
@@ -53,11 +59,19 @@ const (
 	// metadataSub is the metadata key holding the account's OIDC sub, on
 	// customers, subscriptions and checkout sessions.
 	metadataSub = "sub"
+	// metadataBillingCountry is the metadata key holding the billing
+	// country chosen for our page, on its checkout sessions and the
+	// subscriptions they create.
+	metadataBillingCountry = "billing_country"
 )
 
 const (
 	requestTimeout   = 30 * time.Second
 	maxResponseBytes = 1 << 20
+	// idempotentAttempts and idempotentWait bound how long idempotent waits
+	// for a concurrent request under the same key.
+	idempotentAttempts = 5
+	idempotentWait     = 500 * time.Millisecond
 )
 
 // Config is a Stripe account and the plan the deployment sells.
@@ -213,6 +227,9 @@ func (c *customerRef) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// entitling are the subscription statuses event maps to active or grace.
+var entitling = []string{"active", "trialing", "past_due"}
+
 // subscription is a Subscription, as far as billing reads it. At this API
 // version the billing period lives on each item, not the subscription.
 type subscription struct {
@@ -298,13 +315,145 @@ func event(s subscription, raw json.RawMessage, eventAt time.Time) (billing.Even
 	return ev, nil
 }
 
-// Refresh fetches a subscription's current state.
+// Refresh fetches a subscription's current state. One refused for its
+// billing country is refused again (in case a step failed before) and
+// reported as it then is: over.
 func (p *Provider) Refresh(ctx context.Context, id string) (billing.Event, error) {
 	s, raw, err := p.getSubscription(ctx, id)
 	if err != nil {
 		return billing.Event{}, err
 	}
+	err = p.checkCountry(ctx, s, nil)
+	if mismatch := (*billing.CountryMismatchError)(nil); errors.As(err, &mismatch) {
+		s, raw, err = p.getSubscription(ctx, id)
+	}
+	if err != nil {
+		return billing.Event{}, err
+	}
 	return event(s, raw, p.now())
+}
+
+// checkoutSession is what the billing country check reads of a Checkout
+// Session.
+type checkoutSession struct {
+	Status          string `json:"status"`
+	CustomerDetails *struct {
+		Address *struct {
+			Country string `json:"country"`
+		} `json:"address"`
+	} `json:"customer_details"`
+}
+
+// billedCountry is the country of the billing address the session recorded
+// when it completed: on our page, the card form's.
+func (cs checkoutSession) billedCountry() string {
+	if cs.CustomerDetails == nil || cs.CustomerDetails.Address == nil {
+		return ""
+	}
+	return cs.CustomerDetails.Address.Country
+}
+
+// checkCountry refuses s if our page sold it for one billing country and
+// its Checkout Session (cs, or else looked up) recorded a billing address
+// in another, or none: it cancels s at once, refunds every payment on it,
+// and returns the mismatch as a *billing.CountryMismatchError. Until the session completes, a subscription
+// that would entitle is an error, so a webhook arriving first is retried,
+// never applied. Subscriptions without a chosen country (Stripe's own page,
+// or opened before the check) pass.
+func (p *Provider) checkCountry(ctx context.Context, s subscription, cs *checkoutSession) error {
+	chosen := s.Metadata[metadataBillingCountry]
+	if chosen == "" {
+		return nil
+	}
+	if cs == nil {
+		var found struct {
+			Data []checkoutSession `json:"data"`
+		}
+		query := url.Values{"subscription": {s.ID}, "limit": {"1"}}
+		if err := p.call(ctx, http.MethodGet, "/checkout/sessions", query, "", &found); err != nil {
+			return err
+		}
+		if len(found.Data) > 0 {
+			cs = &found.Data[0]
+		}
+	}
+	if cs == nil || cs.Status != "complete" {
+		if slices.Contains(entitling, s.Status) {
+			return fmt.Errorf("stripe: subscription %s is %s before its checkout session completed", s.ID, s.Status)
+		}
+		return nil
+	}
+	billed := cs.billedCountry()
+	if billed == chosen {
+		return nil
+	}
+	if err := p.refuse(ctx, s); err != nil {
+		return err
+	}
+	return &billing.CountryMismatchError{Chosen: chosen, Billed: billed}
+}
+
+// refuse cancels s at once, unless it is over, and refunds every payment
+// made on it. Each step is safe to repeat: a webhook retry and the return
+// page may refuse the same subscription at the same moment.
+func (p *Provider) refuse(ctx context.Context, s subscription) error {
+	if s.Status != "canceled" && s.Status != "incomplete_expired" {
+		var canceled struct{}
+		if err := p.idempotent(ctx, http.MethodDelete, "/subscriptions/"+url.PathEscape(s.ID), nil, "refuse-"+s.ID, &canceled); err != nil {
+			return err
+		}
+	}
+	var invoices struct {
+		Data []struct {
+			Payments struct {
+				Data []struct {
+					Status  string `json:"status"`
+					Payment struct {
+						PaymentIntent string `json:"payment_intent"`
+					} `json:"payment"`
+				} `json:"data"`
+			} `json:"payments"`
+		} `json:"data"`
+	}
+	query := url.Values{"subscription": {s.ID}, "status": {"paid"}, "limit": {"100"}, "expand[]": {"data.payments"}}
+	if err := p.call(ctx, http.MethodGet, "/invoices", query, "", &invoices); err != nil {
+		return err
+	}
+	for _, invoice := range invoices.Data {
+		for _, payment := range invoice.Payments.Data {
+			intent := payment.Payment.PaymentIntent
+			if payment.Status != "paid" || intent == "" {
+				continue
+			}
+			var refund struct{}
+			form := url.Values{"payment_intent": {intent}, "metadata[reason]": {"billing_country_mismatch"}}
+			err := p.idempotent(ctx, http.MethodPost, "/refunds", form, "refund-"+intent, &refund)
+			if e := (*apiError)(nil); errors.As(err, &e) && e.Code == "charge_already_refunded" {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// idempotent sends a request under idempotencyKey, waiting out a
+// concurrent one under the same key, which Stripe answers 409 until it
+// finishes; the retry then gets its result.
+func (p *Provider) idempotent(ctx context.Context, method, path string, form url.Values, idempotencyKey string, out any) error {
+	for attempt := 1; ; attempt++ {
+		err := p.call(ctx, method, path, form, idempotencyKey, out)
+		if e := (*apiError)(nil); !errors.As(err, &e) || e.StatusCode != http.StatusConflict || attempt == idempotentAttempts {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(idempotentWait):
+		}
+	}
 }
 
 // Cancel stops a subscription renewing; it stays paid up until its period
@@ -422,12 +571,17 @@ func (p *Provider) Route(country string) billing.CheckoutRoute {
 }
 
 // StartCheckout opens a Checkout Session for our page's Payment Element,
-// selling the plan to c. Everything the page must not offer is switched off
-// on the session itself, never left to the account's dashboard settings: it
-// charges the price's own currency (no Adaptive Pricing) and takes cards
-// only (no Link, and wallets are hidden by the page). Stripe sends the
+// selling the plan to c, who chose billingCountry. Everything the page must
+// not offer is switched off on the session itself, never left to the
+// account's dashboard settings: it charges the price's own currency (no
+// Adaptive Pricing) and takes cards only (no Link, and wallets are hidden by
+// the page). The session and its subscription record billingCountry, which
+// the card's billing address must match (checkCountry). Stripe sends the
 // browser to returnURL only after a payment that had to leave the page.
-func (p *Provider) StartCheckout(ctx context.Context, c billing.Customer, returnURL string) (billing.Checkout, error) {
+func (p *Provider) StartCheckout(ctx context.Context, c billing.Customer, billingCountry, returnURL string) (billing.Checkout, error) {
+	if billingCountry == "" {
+		return billing.Checkout{}, errors.New("stripe: checkout without a billing country")
+	}
 	customer, err := p.customer(ctx, c)
 	if err != nil {
 		return billing.Checkout{}, err
@@ -440,7 +594,9 @@ func (p *Provider) StartCheckout(ctx context.Context, c billing.Customer, return
 		"customer":                      {customer},
 		"client_reference_id":           {c.Subject},
 		"metadata[" + metadataSub + "]": {c.Subject},
-		"subscription_data[metadata][" + metadataSub + "]": {c.Subject},
+		"subscription_data[metadata][" + metadataSub + "]":            {c.Subject},
+		"metadata[" + metadataBillingCountry + "]":                    {billingCountry},
+		"subscription_data[metadata][" + metadataBillingCountry + "]": {billingCountry},
 		"return_url":                      {returnURL},
 		"adaptive_pricing[enabled]":       {"false"},
 		"allowed_payment_method_types[0]": {"card"},
@@ -498,13 +654,15 @@ func (p *Provider) StartMerchantCheckout(ctx context.Context, c billing.Customer
 
 // CompleteCheckout returns the subscription a completed Checkout Session
 // created, once the session is shown to be c's: its customer's metadata.sub
-// and its client_reference_id, where set, must both be c's sub.
+// and its client_reference_id, where set, must both be c's sub. One paid
+// with a billing address outside the country chosen for it is refused
+// (checkCountry).
 func (p *Provider) CompleteCheckout(ctx context.Context, c billing.Customer, id string) (billing.Event, error) {
 	if c.Subject == "" || !strings.HasPrefix(id, "cs_") {
 		return billing.Event{}, billing.ErrCheckoutForeign
 	}
 	var session struct {
-		Status            string      `json:"status"`
+		checkoutSession
 		Mode              string      `json:"mode"`
 		ClientReferenceID string      `json:"client_reference_id"`
 		Customer          customerRef `json:"customer"`
@@ -527,12 +685,19 @@ func (p *Provider) CompleteCheckout(ctx context.Context, c billing.Customer, id 
 	if session.Status != "complete" || session.Subscription == nil || *session.Subscription == "" {
 		return billing.Event{}, billing.ErrCheckoutIncomplete
 	}
-	ev, err := p.Refresh(ctx, *session.Subscription)
+	s, raw, err := p.getSubscription(ctx, *session.Subscription)
+	if err != nil {
+		return billing.Event{}, err
+	}
+	ev, err := event(s, raw, p.now())
 	if err != nil {
 		return billing.Event{}, err
 	}
 	if ev.Subject != c.Subject {
 		return billing.Event{}, billing.ErrCheckoutForeign
+	}
+	if err := p.checkCountry(ctx, s, &session.checkoutSession); err != nil {
+		return billing.Event{}, err
 	}
 	return ev, nil
 }
@@ -563,7 +728,8 @@ var subscriptionEvents = []string{
 
 // Verify checks a webhook delivery's signature and fetches the
 // subscription it concerns. The delivery id is the event id. Other event
-// types, and subscriptions Stripe no longer has, produce no events.
+// types, subscriptions Stripe no longer has, and subscriptions refused for
+// their billing country (checkCountry) produce no events.
 func (p *Provider) Verify(ctx context.Context, d billing.Delivery) (string, []billing.Event, error) {
 	if err := checkSignature(p.cfg.WebhookSecret, d.Header.Get(SignatureHeader), d.Body, p.now()); err != nil {
 		return "", nil, fmt.Errorf("%w: %w", billing.ErrInvalidDelivery, err)
@@ -590,6 +756,13 @@ func (p *Provider) Verify(ctx context.Context, d billing.Delivery) (string, []bi
 	}
 	s, raw, err := p.getSubscription(ctx, notice.Data.Object.ID)
 	if errors.Is(err, errNotFound) {
+		return notice.ID, nil, nil
+	}
+	if err != nil {
+		return "", nil, err
+	}
+	err = p.checkCountry(ctx, s, nil)
+	if mismatch := (*billing.CountryMismatchError)(nil); errors.As(err, &mismatch) {
 		return notice.ID, nil, nil
 	}
 	if err != nil {

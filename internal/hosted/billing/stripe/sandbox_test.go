@@ -143,7 +143,7 @@ func TestSandbox(t *testing.T) {
 	// Find-or-create by sub is idempotent: two checkouts, one customer.
 	var sessions []billing.Checkout
 	for range 2 {
-		checkout, err := p.StartCheckout(t.Context(), me, "https://notes.example.test/dashboard/billing/return?session_id={CHECKOUT_SESSION_ID}")
+		checkout, err := p.StartCheckout(t.Context(), me, "US", "https://notes.example.test/dashboard/billing/return?session_id={CHECKOUT_SESSION_ID}")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -181,7 +181,7 @@ func TestSandbox(t *testing.T) {
 		customers[session.Customer] = true
 		customer = session.Customer
 		if session.ClientReferenceID != subject || session.UIMode != "elements" || session.Mode != "subscription" ||
-			session.Status != "open" || session.Metadata["sub"] != subject {
+			session.Status != "open" || session.Metadata["sub"] != subject || session.Metadata["billing_country"] != "US" {
 			t.Fatalf("session %s = %+v", checkout.ID, session)
 		}
 		// The price's own amount and currency, by card alone.

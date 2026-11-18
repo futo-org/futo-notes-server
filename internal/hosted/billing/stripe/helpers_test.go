@@ -40,7 +40,16 @@ type fakeStripe struct {
 	idempotent    map[string]string
 	sessions      map[string]map[string]any
 	subscriptions map[string]map[string]any
-	requests      []fakeRequest
+	// invoices are the paid invoices, by subscription; refunded the
+	// payment intents refunded.
+	invoices map[string][]map[string]any
+	refunded map[string]bool
+	// responses are earlier answers by idempotency key; conflicts the
+	// number of 409s still to answer under a key, as Stripe does while a
+	// request under it is in flight.
+	responses map[string]any
+	conflicts map[string]int
+	requests  []fakeRequest
 }
 
 type fakeCustomer struct {
@@ -72,6 +81,8 @@ func newFakeStripe(t *testing.T) *fakeStripe {
 	f := &fakeStripe{
 		t: t, customers: map[string]*fakeCustomer{}, idempotent: map[string]string{},
 		sessions: map[string]map[string]any{}, subscriptions: map[string]map[string]any{},
+		invoices: map[string][]map[string]any{}, refunded: map[string]bool{},
+		responses: map[string]any{}, conflicts: map[string]int{},
 	}
 	f.srv = httptest.NewServer(f)
 	t.Cleanup(f.srv.Close)
@@ -126,19 +137,52 @@ func (f *fakeStripe) addSubscription(customer, sub, status string, periodEnd int
 	return s["id"].(string)
 }
 
-// completeSession marks a session paid, creating its subscription.
-func (f *fakeStripe) completeSession(id string, periodEnd int64) string {
+// completeSession marks a session paid with a card billed in country
+// billed, creating its subscription, with the session's subscription
+// metadata, and its paid first invoice.
+func (f *fakeStripe) completeSession(id, billed string, periodEnd int64) string {
 	f.mu.Lock()
 	s := f.sessions[id]
 	customer, _ := s["customer"].(string)
 	sub, _ := s["client_reference_id"].(string)
+	metadata := s["subscription_metadata"].(map[string]any)
 	f.mu.Unlock()
-	subID := f.addSubscription(customer, sub, "active", periodEnd, nil)
+	subID := f.addSubscription(customer, sub, "active", periodEnd, func(sub map[string]any) { sub["metadata"] = metadata })
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	s["status"] = "complete"
 	s["subscription"] = subID
+	s["customer_details"] = map[string]any{"email": nil, "address": map[string]any{"country": nilIfEmpty(billed), "postal_code": nil}}
+	f.invoices[subID] = append(f.invoices[subID], map[string]any{
+		"id": f.id("in"), "object": "invoice", "status": "paid", "subscription": subID,
+		"payments": map[string]any{"object": "list", "data": []any{map[string]any{
+			"id": f.id("inpay"), "status": "paid", "payment": map[string]any{"type": "payment_intent", "payment_intent": f.id("pi")},
+		}}},
+	})
 	return subID
+}
+
+// subscriptionStatus is a subscription's status as the fake holds it.
+func (f *fakeStripe) subscriptionStatus(id string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.subscriptions[id]["status"].(string)
+}
+
+// refunds lists the payment intents refunded on subscription id's invoices.
+func (f *fakeStripe) refunds(id string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for _, invoice := range f.invoices[id] {
+		for _, payment := range invoice["payments"].(map[string]any)["data"].([]any) {
+			intent := payment.(map[string]any)["payment"].(map[string]any)["payment_intent"].(string)
+			if f.refunded[intent] {
+				out = append(out, intent)
+			}
+		}
+	}
+	return out
 }
 
 func (f *fakeStripe) calls(method, path string) []fakeRequest {
@@ -176,6 +220,16 @@ func (f *fakeStripe) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.requests = append(f.requests, fakeRequest{Method: r.Method, Path: r.URL.Path, Form: form, IdempotencyKey: r.Header.Get("Idempotency-Key")})
 	path := strings.TrimPrefix(r.URL.Path, "/v1")
 	expandCustomer := form.Get("expand[]") == "customer"
+	key := r.Header.Get("Idempotency-Key")
+	if f.conflicts[key] > 0 {
+		f.conflicts[key]--
+		writeJSON(w, http.StatusConflict, stripeError("idempotency_error", "idempotency_key_in_use", "There is currently another in-progress request using this Idempotent Key."))
+		return
+	}
+	if earlier, ok := f.responses[key]; ok && key != "" && r.Method != http.MethodGet && path != "/customers" {
+		writeJSON(w, http.StatusOK, earlier)
+		return
+	}
 	switch {
 	case r.Method == http.MethodGet && path == "/customers/search":
 		f.search(w, form.Get("query"))
@@ -205,16 +259,53 @@ func (f *fakeStripe) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, c.object())
 	case r.Method == http.MethodPost && path == "/checkout/sessions":
 		id := f.id("cs_test")
+		metadata, subscriptionMetadata := map[string]any{}, map[string]any{}
+		for key := range form {
+			if name, ok := strings.CutPrefix(key, "metadata["); ok {
+				metadata[strings.TrimSuffix(name, "]")] = form.Get(key)
+			}
+			if name, ok := strings.CutPrefix(key, "subscription_data[metadata]["); ok {
+				subscriptionMetadata[strings.TrimSuffix(name, "]")] = form.Get(key)
+			}
+		}
 		f.sessions[id] = map[string]any{
 			"id": id, "object": "checkout.session", "client_secret": id + "_secret_fake", "status": "open",
 			"mode": form.Get("mode"), "ui_mode": form.Get("ui_mode"), "customer": form.Get("customer"),
 			"client_reference_id": nilIfEmpty(form.Get("client_reference_id")), "subscription": nil, "url": nil,
+			"metadata": metadata, "subscription_metadata": subscriptionMetadata, "customer_details": nil,
 		}
 		if form.Get("ui_mode") == "hosted_page" {
 			f.sessions[id]["client_secret"] = nil
 			f.sessions[id]["url"] = "https://checkout.stripe.com/c/pay/" + id
 		}
 		writeJSON(w, http.StatusOK, f.sessions[id])
+	case r.Method == http.MethodGet && path == "/checkout/sessions":
+		data := []any{}
+		for _, s := range f.sessions {
+			if form.Has("subscription") && s["subscription"] == form.Get("subscription") {
+				data = append(data, s)
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data, "has_more": false})
+	case r.Method == http.MethodGet && path == "/invoices":
+		if form.Get("status") != "paid" || form.Get("expand[]") != "data.payments" {
+			f.t.Errorf("invoices listed with %v", form)
+		}
+		data := []any{}
+		for _, invoice := range f.invoices[form.Get("subscription")] {
+			data = append(data, invoice)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data, "has_more": false})
+	case r.Method == http.MethodPost && path == "/refunds":
+		intent := form.Get("payment_intent")
+		if f.refunded[intent] {
+			writeJSON(w, http.StatusBadRequest, stripeError("invalid_request_error", "charge_already_refunded", "Charge has already been refunded."))
+			return
+		}
+		f.refunded[intent] = true
+		refund := map[string]any{"id": f.id("re"), "object": "refund", "payment_intent": intent, "status": "succeeded"}
+		f.responses[key] = refund
+		writeJSON(w, http.StatusOK, refund)
 	case r.Method == http.MethodGet && strings.HasPrefix(path, "/checkout/sessions/"):
 		s, ok := f.sessions[strings.TrimPrefix(path, "/checkout/sessions/")]
 		if !ok {
@@ -227,6 +318,14 @@ func (f *fakeStripe) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			writeJSON(w, http.StatusNotFound, stripeError("invalid_request_error", "resource_missing", "No such subscription"))
 			return
+		}
+		if r.Method == http.MethodDelete {
+			if s["status"] == "canceled" {
+				writeJSON(w, http.StatusBadRequest, stripeError("invalid_request_error", "", "A canceled subscription can only update its cancellation_details and metadata."))
+				return
+			}
+			s["status"] = "canceled"
+			f.responses[key] = maps.Clone(s)
 		}
 		if r.Method == http.MethodPost {
 			if s["status"] == "canceled" {

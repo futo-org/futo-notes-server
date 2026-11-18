@@ -116,7 +116,7 @@
 {{- end}}
 
 {{define "checkout-panel" -}}
-<div class="checkout" data-checkout data-publishable-key="{{.PublishableKey}}" data-session-url="{{.SessionURL}}" data-page-url="{{.PageURL}}">
+<div class="checkout" data-checkout data-publishable-key="{{.PublishableKey}}" data-session-url="{{.SessionURL}}" data-page-url="{{.PageURL}}" data-country="{{.Country}}">
 <div class="plan">
 <div class="plan-head">
 <h3 class="plan-name">FUTO Notes Sync</h3>
@@ -134,6 +134,7 @@
 <p class="muted checkout-loading" data-checkout-status role="status">Loading the secure card form…</p>
 </div>
 <p class="alert" data-checkout-error role="alert" hidden></p>
+<p class="alert" data-checkout-country role="alert" hidden>The billing country must be {{.CountryName}}, the one you chose. {{if .ChangeURL}}<a href="{{.ChangeURL}}"{{if .ChangeHX}} hx-get="{{.ChangeURL}}" hx-push-url="true"{{end}}>Choose another country</a>{{else}}To pay from another country, start again from the app.{{end}}</p>
 <button type="submit" class="checkout-submit" data-checkout-submit disabled><span data-checkout-label>Subscribe · <span data-checkout-amount>{{.Plan.Price}}</span>/<span data-checkout-period>{{.Plan.Period}}</span></span></button>
 <p class="legal">Renews {{.Plan.Renews}} until you cancel. Card payments are processed by Stripe; your card details never reach FUTO. <a href="https://docs.futo.cloud/legal/terms" target="_blank" rel="noopener">Terms</a> · <a href="https://docs.futo.cloud/legal/privacy" target="_blank" rel="noopener">Privacy</a></p>
 <p class="checkout-cancel"><a href="{{.CancelURL}}"{{if .CancelHX}} hx-get="{{.CancelURL}}" hx-push-url="true"{{end}}>Cancel</a></p>

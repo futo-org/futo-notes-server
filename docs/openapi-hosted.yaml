@@ -1006,7 +1006,11 @@ paths:
         The page asks for the billing country first, then takes the payment
         on this server's checkout page, whose card fields are Stripe's
         Payment Element, or on Stripe's own checkout page, where Stripe is
-        the merchant of record; a few countries cannot pay on the web. The
+        the merchant of record; a few countries cannot pay on the web. On
+        this server's page the card's billing address must be in the
+        country chosen: a payment billed elsewhere is cancelled and
+        refunded, never entitles the account, and the page says to start
+        again from the app. The
         link is used when the country is submitted, not when the page is
         opened. When the payment completes, the server confirms it with
         Stripe and the account is entitled at once; `GET /api/billing` then

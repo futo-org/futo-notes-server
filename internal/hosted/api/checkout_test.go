@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -51,11 +52,14 @@ type fakeCustom struct {
 }
 
 type fakeCheckout struct {
-	subject   string
-	returnURL string
-	secret    string
-	complete  bool
-	subID     string
+	subject string
+	// country is the billing country chosen for our page; billed the
+	// card's, once paid.
+	country, billed string
+	returnURL       string
+	secret          string
+	complete        bool
+	subID           string
 	// merchant marks a session on the provider's page, with its URLs.
 	merchant              bool
 	successURL, cancelURL string
@@ -117,7 +121,7 @@ func (f *fakeCustom) PortalURL(_ context.Context, c billing.Customer) (string, e
 	return "https://portal.test/" + c.Subject, nil
 }
 
-func (f *fakeCustom) StartCheckout(_ context.Context, c billing.Customer, returnURL string) (billing.Checkout, error) {
+func (f *fakeCustom) StartCheckout(_ context.Context, c billing.Customer, billingCountry, returnURL string) (billing.Checkout, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if c.Subject == "" {
@@ -125,17 +129,24 @@ func (f *fakeCustom) StartCheckout(_ context.Context, c billing.Customer, return
 	}
 	f.next++
 	id := fmt.Sprintf("cs_test_%d", f.next)
-	s := &fakeCheckout{subject: c.Subject, returnURL: returnURL, secret: id + "_secret_MUST-NOT-BE-LOGGED"}
+	s := &fakeCheckout{subject: c.Subject, country: billingCountry, returnURL: returnURL, secret: id + "_secret_MUST-NOT-BE-LOGGED"}
 	f.sessions[id] = s
 	return billing.Checkout{ID: id, ClientSecret: s.secret}, nil
 }
 
 // pay completes checkout id, creating its subscription.
 func (f *fakeCustom) pay(id string, status billing.Status) {
+	f.payFrom(id, "", status)
+}
+
+// payFrom completes checkout id with a card billed in billed ("" for the
+// country chosen), creating its subscription.
+func (f *fakeCustom) payFrom(id, billed string, status billing.Status) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	s := f.sessions[id]
 	s.complete = true
+	s.billed = cmp.Or(billed, s.country)
 	s.subID = "sub_" + id
 	f.subs[s.subID] = billing.Event{
 		Source: billing.SourceWeb, ExternalID: s.subID, Subject: s.subject, ProductID: "prod_notes", Status: status,
@@ -153,6 +164,9 @@ func (f *fakeCustom) CompleteCheckout(_ context.Context, c billing.Customer, id 
 	}
 	if !s.complete {
 		return billing.Event{}, billing.ErrCheckoutIncomplete
+	}
+	if !s.merchant && s.billed != s.country {
+		return billing.Event{}, &billing.CountryMismatchError{Chosen: s.country, Billed: s.billed}
 	}
 	ev := f.subs[s.subID]
 	ev.EventAt = time.Now()
@@ -574,7 +588,9 @@ func TestDashboardCustomCheckout(t *testing.T) {
 	if reloaded.body != panel.body {
 		t.Fatalf("the panel's page differs from Checkout's:\n%s\n%s", reloaded.body, panel.body)
 	}
-	expectContains(t, panel, `data-checkout`, `data-session-url="/dashboard/billing/checkout?country=US"`,
+	expectContains(t, panel, `data-checkout`, `data-session-url="/dashboard/billing/checkout?country=US"`, `data-country="US"`,
+		`<p class="alert" data-checkout-country role="alert" hidden>The billing country must be United States, the one you chose. `+
+			`<a href="/dashboard/billing/subscribe" hx-get="/dashboard/billing/subscribe" hx-push-url="true">Choose another country</a></p>`,
 		`data-page-url="/dashboard/billing/subscribe?country=US"`, `data-publishable-key="`+testPublishableKey+`"`,
 		`<p class="field-value" aria-labelledby="checkout-email">`+browser.account().User.Email+`</p>`,
 		`<a href="/dashboard" hx-get="/dashboard" hx-push-url="true">Cancel</a>`)
@@ -584,7 +600,7 @@ func TestDashboardCustomCheckout(t *testing.T) {
 	asset := browser.expect(http.MethodGet, "/dashboard/static/checkout.js", nil, http.StatusOK)
 	expectContains(t, asset, "initCheckoutElementsSdk", "createPaymentElement", "changeAppearance", "prefers-color-scheme",
 		`wallets: { applePay: "never", googlePay: "never", link: "never" }`, "adaptivePricing: { allowed: false }",
-		`actions.confirm({ redirect: "if_required" })`)
+		`actions.confirm({ redirect: "if_required" })`, "defaultValues: { billingAddress: { address: { country: chosen } } }")
 	expectLacks(t, asset, "createEmbeddedCheckoutPage")
 
 	// Opening the session needs the CSRF token, and a self-payment
@@ -780,4 +796,58 @@ func TestDashboardCountryRoutes(t *testing.T) {
 		t.Fatal("a merchant checkout did not entitle the account")
 	}
 	expectLacks(t, browser.expect(http.MethodGet, "/dashboard/billing/subscribe", nil, http.StatusOK), "data-country-step")
+}
+
+// A checkout on our page paid with a card billed outside the country chosen
+// is refused by the provider; the return page says why and starts over at
+// the country step, the card's country chosen.
+func TestDashboardCheckoutRefusedForItsCountry(t *testing.T) {
+	h := newCustomHarness(t)
+	browser := h.regionBrowser()
+	var session sessionBody
+	browser.do(http.MethodPost, "/dashboard/billing/checkout?country=US", nil, "X-CSRF-Token", browser.csrf()).json(t, &session)
+	id := checkoutID(t, session.ReturnURL)
+	if h.web.session(id).country != "US" {
+		t.Fatalf("checkout opened for %q, want US", h.web.session(id).country)
+	}
+	h.web.payFrom(id, "CA", billing.StatusActive)
+	for range 2 {
+		refused := browser.do(http.MethodGet, session.ReturnURL, nil, "HX-Request", "true")
+		expectContains(t, refused, "Your card&#39;s billing address was in Canada, but you chose United States as your billing country. "+
+			"We cancelled that subscription and refunded the payment. Choose your billing country to try again.",
+			`data-country-step`, `<option value="CA" data-route="self" selected>Canada</option>`)
+		if refused.status != http.StatusOK {
+			t.Fatalf("return page = %d", refused.status)
+		}
+	}
+	if browser.billing().Entitled {
+		t.Fatal("a payment billed in another country entitled the account")
+	}
+}
+
+func TestCheckoutLinkRefusedForItsCountry(t *testing.T) {
+	h := newCustomHarness(t)
+	app, _ := h.appLogin(h.newSub())
+	browser := h.client()
+	pay := payPath(t, browser, linkPath(t, h, app))
+	// No country step to go back to: the link was used choosing it.
+	expectContains(t, browser.expect(http.MethodGet, pay, nil, http.StatusOK), `data-country="US"`,
+		`<p class="alert" data-checkout-country role="alert" hidden>The billing country must be United States, the one you chose. To pay from another country, start again from the app.</p>`)
+	var session sessionBody
+	browser.expect(http.MethodPost, pay+"/session", nil, http.StatusOK).json(t, &session)
+	id := checkoutID(t, session.ReturnURL)
+	if h.web.session(id).country != "US" {
+		t.Fatalf("checkout opened for %q, want US", h.web.session(id).country)
+	}
+	h.web.payFrom(id, "CA", billing.StatusActive)
+	refused := browser.expect(http.MethodGet, session.ReturnURL, nil, http.StatusOK)
+	expectContains(t, refused, "Your card&#39;s billing address was in Canada, but you chose United States as your billing country. "+
+		"We cancelled that subscription and refunded the payment. Start again from the app.")
+	expectLacks(t, refused, "Your subscription is active", "js.stripe.com")
+	if app.billing().Entitled {
+		t.Fatal("a payment billed in another country entitled the account")
+	}
+	// The pay token stays used; the app's next link starts over.
+	expectHostedError(t, browser.do(http.MethodPost, pay+"/session", nil), http.StatusGone, "checkout_link_expired")
+	payPath(t, browser, linkPath(t, h, app))
 }

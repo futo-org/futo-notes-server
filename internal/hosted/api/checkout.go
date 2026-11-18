@@ -34,6 +34,10 @@ import (
 // completes, by either route, the server fetches the session from the
 // provider and applies its subscription at once, so entitlement never
 // waits for the webhook, which stays the source of every later change.
+// Our page's checkout is bound to the country chosen: the card form starts
+// in it and holds the button while it names another, and the provider
+// refuses (cancels and refunds) a payment billed elsewhere, which the
+// return page then explains.
 const (
 	subscribePath = dashboardPath + "/billing/subscribe"
 	// checkoutReturnPath is where a dashboard checkout returns.
@@ -204,15 +208,16 @@ type checkoutSession struct {
 	ReturnURL    string `json:"return_url"`
 }
 
-// writeCheckoutSession opens a custom checkout for userID returning to
-// returnURL (with checkoutSessionID in it) and answers with its session.
-func (s *Server) writeCheckoutSession(w http.ResponseWriter, r *http.Request, userID, returnURL string) {
+// writeCheckoutSession opens a custom checkout for userID, who chose
+// billingCountry, returning to returnURL (with checkoutSessionID in it) and
+// answers with its session.
+func (s *Server) writeCheckoutSession(w http.ResponseWriter, r *http.Request, userID, billingCountry, returnURL string) {
 	err := s.checkoutAllowed(r.Context(), userID)
 	var checkout billing.Checkout
 	if err == nil {
 		var customer billing.Customer
 		if customer, err = s.billing.Customer(r.Context(), userID); err == nil {
-			checkout, err = s.custom().StartCheckout(r.Context(), customer, returnURL)
+			checkout, err = s.custom().StartCheckout(r.Context(), customer, billingCountry, returnURL)
 		}
 	}
 	if err != nil {
@@ -252,7 +257,8 @@ const (
 
 // completeCheckout fetches userID's checkout from the provider and applies
 // the subscription it created, as a refresh does. It returns
-// billing.ErrCheckoutForeign for another account's checkout.
+// billing.ErrCheckoutForeign for another account's checkout, and the
+// provider's *billing.CountryMismatchError for one it refused.
 func (s *Server) completeCheckout(ctx context.Context, userID, checkoutID string) (checkoutOutcome, error) {
 	customer, err := s.billing.Customer(ctx, userID)
 	if err != nil {
@@ -289,6 +295,13 @@ type checkoutPanel struct {
 	Plan    checkoutPlan
 	// Email is the account's, which the subscription's receipts go to.
 	Email string
+	// Country is the billing country chosen, which the card form starts in
+	// and must keep; CountryName is its name.
+	Country, CountryName string
+	// ChangeURL goes back to the country step, where the flow has one; HX
+	// loads it with htmx.
+	ChangeURL string
+	ChangeHX  bool
 	// CancelURL leaves checkout; CancelHX loads it with htmx.
 	CancelURL string
 	CancelHX  bool
@@ -318,16 +331,16 @@ func planView(p billing.Plan) checkoutPlan {
 	return checkoutPlan{Price: price, Period: p.Interval, Renews: renews}
 }
 
-// newCheckoutPanel is the panel for an account with email, its plan read
-// from the provider.
-func (s *Server) newCheckoutPanel(ctx context.Context, email, sessionURL, pageURL string) (*checkoutPanel, error) {
+// newCheckoutPanel is the panel for an account with email paying from
+// billingCountry, its plan read from the provider.
+func (s *Server) newCheckoutPanel(ctx context.Context, email, billingCountry, sessionURL, pageURL string) (*checkoutPanel, error) {
 	plan, err := s.custom().Plan(ctx)
 	if err != nil {
 		return nil, err
 	}
 	return &checkoutPanel{
 		PublishableKey: s.custom().PublishableKey(), SessionURL: sessionURL, PageURL: pageURL,
-		Plan: planView(plan), Email: email,
+		Plan: planView(plan), Email: email, Country: billingCountry, CountryName: country.Name(billingCountry),
 	}, nil
 }
 
@@ -466,10 +479,12 @@ func (s *Server) dashboardCountryStep(r *http.Request, selected string) (*countr
 
 func (s *Server) dashboardPanel(r *http.Request, billingCountry string) (*checkoutPanel, error) {
 	query := "?country=" + billingCountry
-	panel, err := s.newCheckoutPanel(r.Context(), principalFrom(r).Session.User.Email, dashboardPath+"/billing/checkout"+query, subscribePath+query)
+	panel, err := s.newCheckoutPanel(r.Context(), principalFrom(r).Session.User.Email, billingCountry,
+		dashboardPath+"/billing/checkout"+query, subscribePath+query)
 	if err != nil {
 		return nil, err
 	}
+	panel.ChangeURL, panel.ChangeHX = subscribePath, true
 	panel.CancelURL, panel.CancelHX = dashboardPath, true
 	return panel, nil
 }
@@ -514,6 +529,14 @@ func (s *Server) handleDashboardCheckoutReturn(w http.ResponseWriter, r *http.Re
 		return
 	}
 	outcome, err := s.completeCheckout(r.Context(), principalFrom(r).Session.User.ID, r.URL.Query().Get("session_id"))
+	if mismatch := (*billing.CountryMismatchError)(nil); errors.As(err, &mismatch) {
+		selected := mismatch.Billed
+		if selected == "" {
+			selected = browserCountry(r)
+		}
+		s.showDashboardCountryStep(w, r, selected, countryMismatchMessage(mismatch)+" Choose your billing country to try again.")
+		return
+	}
 	if errors.Is(err, billing.ErrCheckoutForeign) {
 		renderDashboardError(w, r, http.StatusForbidden, "That checkout belongs to another account.")
 		return
@@ -558,6 +581,17 @@ func renderCheckoutPage(w http.ResponseWriter, r *http.Request, status int, v da
 }
 
 const checkoutLinkExpiredMessage = "This checkout link has expired or was already used. Start again from the app."
+
+// countryMismatchMessage says why a checkout was refused for its billing
+// country, and what became of the payment.
+func countryMismatchMessage(m *billing.CountryMismatchError) string {
+	billed := "another country"
+	if m.Billed != "" {
+		billed = country.Name(m.Billed)
+	}
+	return fmt.Sprintf("Your card's billing address was in %s, but you chose %s as your billing country. "+
+		"We cancelled that subscription and refunded the payment.", billed, country.Name(m.Chosen))
+}
 
 // linkAccount checks an app's checkout link: a token signed for purpose,
 // not yet used, for an account that still exists and is not already
@@ -641,7 +675,7 @@ func (s *Server) checkoutLinkPanel(w http.ResponseWriter, r *http.Request, token
 	}
 	v := checkoutPageView()
 	var err error
-	v.Checkout, err = s.newCheckoutPanel(r.Context(), customer.Email, checkoutLinkPath+"/"+token+"/session", checkoutLinkPath+"/"+token)
+	v.Checkout, err = s.newCheckoutPanel(r.Context(), customer.Email, claims.Country, checkoutLinkPath+"/"+token+"/session", checkoutLinkPath+"/"+token)
 	if err != nil {
 		dashboardServerError(w, r, "reading plan", err)
 		return
@@ -739,7 +773,7 @@ func (s *Server) handleCheckoutLinkSession(w http.ResponseWriter, r *http.Reques
 		httputil.WriteError(w, r, http.StatusGone, codeCheckoutLinkExpired, checkoutLinkExpiredMessage)
 		return
 	}
-	s.writeCheckoutSession(w, r, claims.UserID,
+	s.writeCheckoutSession(w, r, claims.UserID, claims.Country,
 		s.cfg.PublicURL+checkoutLinkReturnPath+"?completion="+s.completionToken(claims.UserID)+"&session_id="+checkoutSessionID)
 }
 
@@ -757,7 +791,11 @@ func (s *Server) handleCheckoutLinkReturn(w http.ResponseWriter, r *http.Request
 		return
 	}
 	outcome, err := s.completeCheckout(r.Context(), claims.UserID, r.URL.Query().Get("session_id"))
+	mismatch := (*billing.CountryMismatchError)(nil)
 	switch {
+	case errors.As(err, &mismatch):
+		renderCheckoutPage(w, r, http.StatusOK, dashboardView{Error: countryMismatchMessage(mismatch) + " Start again from the app."})
+		return
 	case errors.Is(err, billing.ErrCheckoutForeign):
 		renderCheckoutPage(w, r, http.StatusForbidden, dashboardView{Error: "That checkout belongs to another account."})
 		return

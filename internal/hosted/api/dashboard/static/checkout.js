@@ -9,6 +9,10 @@
 // card inside its own frames, styled with our theme, and our button confirms
 // the session. Once it is confirmed, the return URL the server answered with
 // confirms it on our side and shows the result.
+//
+// The card form's own Country field starts at the billing country chosen
+// before checkout (data-country), and the button is held, with a message,
+// while the field names another. The server refuses such a payment anyway.
 (() => {
   "use strict";
   // The Payment Element in the page, destroyed when another panel mounts.
@@ -121,6 +125,8 @@
     const status = panel.querySelector("[data-checkout-status]");
     const errorBox = panel.querySelector("[data-checkout-error]");
     const submit = panel.querySelector("[data-checkout-submit]");
+    const countryBox = panel.querySelector("[data-checkout-country]");
+    const chosen = panel.dataset.country;
     const label = panel.querySelector("[data-checkout-label]");
     const idleLabel = label.innerHTML;
 
@@ -130,13 +136,17 @@
     let complete = false;
     let canConfirm = false;
     let busy = false;
+    // The card form's Country field, as its change events report it.
+    let formCountry = chosen;
 
     const showError = (message) => {
       errorBox.textContent = message;
       errorBox.hidden = !message;
     };
     const update = () => {
-      submit.disabled = busy || !actions || !complete || !canConfirm;
+      const otherCountry = formCountry !== chosen;
+      countryBox.hidden = !otherCountry;
+      submit.disabled = busy || !actions || !complete || !canConfirm || otherCountry;
       submit.setAttribute("aria-busy", String(busy));
     };
     const setBusy = (on, text) => {
@@ -173,6 +183,7 @@
         }),
         elementsOptions: { appearance: appearance(), loader: "auto" },
         adaptivePricing: { allowed: false },
+        defaultValues: { billingAddress: { address: { country: chosen } } },
       });
       // Without Barlow the fields keep the fallback fonts; nothing else waits.
       fonts().then((faces) => checkout.loadFonts(faces)).catch(() => {});
@@ -197,6 +208,8 @@
       });
       element.on("change", (event) => {
         complete = event.complete;
+        const details = event.value && event.value.billingDetails;
+        if (details && details.address && details.address.country) formCountry = details.address.country;
         if (actions) canConfirm = actions.getSession().canConfirm;
         update();
       });

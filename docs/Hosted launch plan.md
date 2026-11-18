@@ -317,6 +317,20 @@ type StoreProvider interface {
       the link unused.
     - The mock web provider is not a `CustomCheckout`, so its flow and
       `POST /api/billing/checkout`'s `{url}` are unchanged.
+    - Our page is bound to the country chosen
+      (`feat/hosted-billing-country-match`): Stripe's card form has its own
+      Country, defaulted from the IP, so a buyer could pay there from
+      another country than the one that routed them. `StartCheckout` takes
+      the billing country and records it as `metadata.billing_country` on
+      the session and its subscription; the page starts the card form there
+      and holds Subscribe while it names another. The provider refuses a
+      subscription whose session recorded a billing address
+      (`customer_details.address.country`) outside it, on the return page,
+      on every webhook and on refresh: cancels it at once, refunds its
+      payments, never reports it (no entitlement row, so no lapse), and
+      `CompleteCheckout` returns `*billing.CountryMismatchError`, which the
+      return page explains. Details: `docs/Hosted deployment.md`, "Billing:
+      web provider".
 
 ### C3. Endpoints
 
