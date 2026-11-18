@@ -8,4 +8,9 @@
 {{template "checkout-panel" .}}
 </div>
 {{end}}
+{{with .CountryStep}}
+<div class="card">
+{{template "country-step" .}}
+</div>
+{{end}}
 {{- end}}

@@ -62,7 +62,7 @@
 {{if not .Billing.Entitled -}}
 <p class="hint">Without a subscription your notes stay readable, but your devices cannot sync changes.</p>
 {{if .CustomCheckout -}}
-{{with .Checkout}}{{template "checkout-panel" .}}{{else -}}
+{{with .Checkout}}{{template "checkout-panel" .}}{{else with .CountryStep}}{{template "country-step" .}}{{else -}}
 <p><a class="button" href="/dashboard/billing/subscribe" hx-get="/dashboard/billing/subscribe" hx-push-url="true">Subscribe</a></p>
 {{- end}}
 {{- else if .WebPayments -}}

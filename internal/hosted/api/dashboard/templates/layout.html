@@ -78,6 +78,43 @@
 {{- end}}
 {{- end}}
 
+{{define "plan-perks" -}}
+<ul class="plan-perks">
+<li>Sync your notes across all your devices</li>
+<li>End-to-end encrypted: only you can read them</li>
+<li>Cancel anytime</li>
+</ul>
+{{- end}}
+
+{{define "country-step" -}}
+<form class="checkout country-step" method="post" action="{{.Action}}" hx-post="{{.Action}}" data-country-step>
+{{with .CSRF}}<input type="hidden" name="csrf_token" value="{{.}}">{{end}}
+<div class="plan">
+<div class="plan-head">
+<h3 class="plan-name">FUTO Notes Sync</h3>
+<p class="plan-price"><strong>{{.Plan.Price}}</strong><span class="muted"> / {{.Plan.Period}}<span data-route-note="merchant"{{if ne .Route "merchant"}} hidden{{end}}> plus tax</span></span></p>
+</div>
+{{template "plan-perks"}}
+</div>
+<div class="field">
+<label class="field-label" for="billing-country">Billing country</label>
+<div class="select">
+<select id="billing-country" name="country" required data-country-select>
+<option value=""{{if not .Selected}} selected{{end}} disabled>Choose your country</option>
+{{- range .Countries}}
+<option value="{{.Code}}" data-route="{{.Route}}"{{if eq .Code $.Selected}} selected{{end}}>{{.Name}}</option>
+{{- end}}
+</select>
+</div>
+<p class="hint field-hint" data-route-note="merchant"{{if ne .Route "merchant"}} hidden{{end}}>Stripe sells the subscription in your country and adds any sales tax or VAT due there. You can pay in your currency.</p>
+</div>
+{{with .Error}}<p class="alert" role="alert">{{.}}</p>{{end}}
+<p class="notice" role="status" data-route-note="unavailable"{{if ne .Route "unavailable"}} hidden{{end}}>Paying on the web isn't available in your country yet.</p>
+<button type="submit" class="checkout-submit" data-country-submit{{if eq .Route "unavailable"}} hidden{{end}}>Checkout</button>
+<p class="checkout-cancel"><a href="{{.CancelURL}}"{{if .CancelHX}} hx-get="{{.CancelURL}}" hx-push-url="true"{{end}}>Cancel</a></p>
+</form>
+{{- end}}
+
 {{define "checkout-panel" -}}
 <div class="checkout" data-checkout data-publishable-key="{{.PublishableKey}}" data-session-url="{{.SessionURL}}" data-page-url="{{.PageURL}}">
 <div class="plan">
@@ -85,11 +122,7 @@
 <h3 class="plan-name">FUTO Notes Sync</h3>
 <p class="plan-price"><strong data-checkout-amount>{{.Plan.Price}}</strong><span class="muted"> / <span data-checkout-period>{{.Plan.Period}}</span></span></p>
 </div>
-<ul class="plan-perks">
-<li>Sync your notes across all your devices</li>
-<li>End-to-end encrypted: only you can read them</li>
-<li>Cancel anytime</li>
-</ul>
+{{template "plan-perks"}}
 </div>
 <form class="checkout-form" data-checkout-form novalidate>
 <div class="field">

@@ -38,7 +38,9 @@ const testPublishableKey = "pk_test_custom"
 var checkoutTokenKey = bytes.Repeat([]byte{0x24}, 32)
 
 // fakeCustom is a web provider whose checkout is a page of ours, as
-// Stripe's is: it opens sessions, which the test completes.
+// Stripe's is: it opens sessions, on our page or its own, which the test
+// completes. US and CA pay on our page; RU and CN cannot pay; the rest pay
+// on the provider's page.
 type fakeCustom struct {
 	mu       sync.Mutex
 	next     int
@@ -54,6 +56,41 @@ type fakeCheckout struct {
 	secret    string
 	complete  bool
 	subID     string
+	// merchant marks a session on the provider's page, with its URLs.
+	merchant              bool
+	successURL, cancelURL string
+}
+
+// merchantPage prefixes the provider's checkout pages.
+const merchantPage = "https://checkout.stripe.test/pay/"
+
+func (f *fakeCustom) Route(country string) billing.CheckoutRoute {
+	switch country {
+	case "US", "CA":
+		return billing.RouteSelf
+	case "RU", "CN":
+		return billing.RouteUnavailable
+	}
+	return billing.RouteMerchantOfRecord
+}
+
+func (f *fakeCustom) StartMerchantCheckout(_ context.Context, c billing.Customer, successURL, cancelURL string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if c.Subject == "" {
+		return "", fmt.Errorf("checkout for %+v without a subject", c)
+	}
+	f.next++
+	id := fmt.Sprintf("cs_test_%d", f.next)
+	f.sessions[id] = &fakeCheckout{subject: c.Subject, merchant: true, successURL: successURL, cancelURL: cancelURL}
+	return merchantPage + id, nil
+}
+
+// opened counts the checkouts opened, by either route.
+func (f *fakeCustom) opened() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.sessions)
 }
 
 func newFakeCustom() *fakeCustom {
@@ -177,26 +214,74 @@ func signToken(key []byte, claims map[string]any) string {
 	return base64.RawURLEncoding.EncodeToString(payload) + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
-func TestCheckoutLinkFromTheApp(t *testing.T) {
-	h := newCustomHarness(t)
-	app, tokens := h.appLogin(h.newSub())
+// linkPath is the path of a new checkout link for app's account.
+func linkPath(t *testing.T, h *customHarness, app *client) string {
+	t.Helper()
 	var link struct {
 		URL string `json:"url"`
 	}
 	app.expect(http.MethodPost, "/api/billing/checkout", nil, http.StatusOK).json(t, &link)
-	page, err := url.Parse(link.URL)
-	if err != nil || !strings.HasPrefix(link.URL, h.api.URL+"/billing/checkout/") {
-		t.Fatalf("checkout link %q (%v)", link.URL, err)
+	if !strings.HasPrefix(link.URL, h.api.URL+"/billing/checkout/") {
+		t.Fatalf("checkout link %q", link.URL)
+	}
+	return strings.TrimPrefix(link.URL, h.api.URL)
+}
+
+// chooseCountry posts a link's country step as a browser form.
+func chooseCountry(browser *client, link, country string) response {
+	return browser.postForm(link, url.Values{"country": {country}})
+}
+
+// payPath posts a self-payment country to a link's country step and
+// returns where it sends the browser: our checkout page.
+func payPath(t *testing.T, browser *client, link string) string {
+	t.Helper()
+	res := chooseCountry(browser, link, "US")
+	pay := res.header.Get("Location")
+	if res.status != http.StatusSeeOther || !strings.HasPrefix(pay, "/billing/checkout/") || pay == link {
+		t.Fatalf("Checkout for US = %d to %q %s", res.status, pay, res.body)
+	}
+	return pay
+}
+
+func TestCheckoutLinkFromTheApp(t *testing.T) {
+	h := newCustomHarness(t)
+	app, tokens := h.appLogin(h.newSub())
+	link := linkPath(t, h, app)
+
+	// The system browser has no session: the link alone opens the page,
+	// which asks for the billing country first, prefilled from the
+	// browser's languages. It mounts nothing, so it keeps the strict
+	// policy.
+	browser := h.client()
+	step := browser.do(http.MethodGet, link, nil, "Accept-Language", "en-CA,en;q=0.9")
+	if step.status != http.StatusOK || step.header.Get("Content-Security-Policy") != dashboardCSP {
+		t.Fatalf("country step = %d, CSP %q", step.status, step.header.Get("Content-Security-Policy"))
+	}
+	expectContains(t, step, `data-country-step`, `action="`+link+`" hx-post="`+link+`"`, "FUTO Notes Sync",
+		`<label class="field-label" for="billing-country">Billing country</label>`,
+		`<option value="CA" data-route="self" selected>Canada</option>`,
+		`<option value="GB" data-route="merchant">United Kingdom</option>`,
+		`<option value="RU" data-route="unavailable">Russia</option>`,
+		`data-country-submit>Checkout</button>`, `<a href="/billing/checkout/cancelled">Cancel</a>`)
+	expectLacks(t, step, "js.stripe.com", "data-checkout ", `name="csrf_token"`)
+	// Opening it again, or with no language, does not use the link.
+	expectContains(t, browser.expect(http.MethodGet, link, nil, http.StatusOK), `<option value="" selected disabled>Choose your country</option>`)
+
+	// Checkout for a self-payment country uses the link and sends the
+	// browser to our checkout page.
+	pay := payPath(t, browser, link)
+	expectContains(t, browser.expect(http.MethodGet, link, nil, http.StatusGone), "expired or was already used")
+	if res := chooseCountry(browser, link, "US"); res.status != http.StatusGone {
+		t.Fatalf("second Checkout = %d", res.status)
 	}
 
-	// The system browser has no session: the link alone opens the page.
-	browser := h.client()
-	res := browser.expect(http.MethodGet, page.Path, nil, http.StatusOK)
+	res := browser.expect(http.MethodGet, pay, nil, http.StatusOK)
 	if got := res.header.Get("Content-Security-Policy"); got != checkoutCSP {
 		t.Fatalf("checkout page CSP = %q", got)
 	}
 	expectContains(t, res, `<script src="`+stripe.JSURL+`" defer></script>`, `data-checkout`,
-		`data-publishable-key="`+testPublishableKey+`"`, `data-session-url="`+page.Path+`/session"`,
+		`data-publishable-key="`+testPublishableKey+`"`, `data-session-url="`+pay+`/session"`,
 		// Our page: the plan, the account it is for, our button, the
 		// legal line, and a way out.
 		"FUTO Notes Sync", `<p class="field-value" aria-labelledby="checkout-email">`+tokens.User.Email+`</p>`,
@@ -206,11 +291,14 @@ func TestCheckoutLinkFromTheApp(t *testing.T) {
 	if tokens.User.Email == "" {
 		t.Fatal("the test account has no email")
 	}
-	// Opening the page twice does not use the link.
-	browser.expect(http.MethodGet, page.Path, nil, http.StatusOK)
+	// Opening the page twice does not use it.
+	browser.expect(http.MethodGet, pay, nil, http.StatusOK)
+	if h.web.opened() != 0 {
+		t.Fatalf("%d checkouts opened before the page asked", h.web.opened())
+	}
 
 	var session sessionBody
-	browser.expect(http.MethodPost, page.Path+"/session", nil, http.StatusOK).json(t, &session)
+	browser.expect(http.MethodPost, pay+"/session", nil, http.StatusOK).json(t, &session)
 	id := checkoutID(t, session.ReturnURL)
 	if session.ClientSecret != h.web.session(id).secret || !strings.HasPrefix(session.ReturnURL, h.api.URL+"/billing/checkout/return?completion=") {
 		t.Fatalf("session = %+v", session)
@@ -219,9 +307,11 @@ func TestCheckoutLinkFromTheApp(t *testing.T) {
 		t.Fatalf("provider return URL = %q, want %q", h.web.session(id).returnURL, want)
 	}
 
-	// Used once: the link no longer opens a checkout, nor its page.
-	expectHostedError(t, browser.do(http.MethodPost, page.Path+"/session", nil), http.StatusGone, "checkout_link_expired")
-	expectContains(t, browser.expect(http.MethodGet, page.Path, nil, http.StatusGone), "expired or was already used")
+	// Used once: it no longer opens a checkout, nor its page. The link
+	// itself never opens one.
+	expectHostedError(t, browser.do(http.MethodPost, pay+"/session", nil), http.StatusGone, "checkout_link_expired")
+	expectContains(t, browser.expect(http.MethodGet, pay, nil, http.StatusGone), "expired or was already used")
+	expectHostedError(t, browser.do(http.MethodPost, link+"/session", nil), http.StatusGone, "checkout_link_expired")
 
 	// Returning before paying says so; after paying, the account is
 	// entitled at once, without any webhook.
@@ -243,19 +333,100 @@ func TestCheckoutLinkFromTheApp(t *testing.T) {
 	expectHostedError(t, app.do(http.MethodPost, "/api/billing/checkout", nil), http.StatusConflict, "already_subscribed")
 }
 
+// Everywhere outside the self-payment countries, Checkout sends the
+// browser to the provider's own page, where it is merchant of record, and
+// the return confirms that checkout like ours.
+func TestCheckoutLinkMerchantOfRecord(t *testing.T) {
+	h := newCustomHarness(t)
+	sub := h.newSub()
+	app, _ := h.appLogin(sub)
+	link := linkPath(t, h, app)
+	browser := h.client()
+	expectContains(t, browser.do(http.MethodGet, link, nil, "Accept-Language", "de-DE,de;q=0.9,en;q=0.8"),
+		`<option value="DE" data-route="merchant" selected>Germany</option>`)
+
+	// htmx follows the provider's page with a full load.
+	res := browser.postForm(link, url.Values{"country": {"de"}}, "HX-Request", "true")
+	target := res.header.Get("HX-Redirect")
+	if res.status != http.StatusNoContent || !strings.HasPrefix(target, merchantPage) {
+		t.Fatalf("Checkout for DE = %d, HX-Redirect %q %s", res.status, target, res.body)
+	}
+	id := strings.TrimPrefix(target, merchantPage)
+	session := h.web.session(id)
+	if !session.merchant || session.subject != sub || session.cancelURL != h.api.URL+"/billing/checkout/cancelled" ||
+		!strings.HasPrefix(session.successURL, h.api.URL+"/billing/checkout/return?completion=") ||
+		!strings.HasSuffix(session.successURL, "&session_id={CHECKOUT_SESSION_ID}") {
+		t.Fatalf("merchant session = %+v", session)
+	}
+	// The link is used.
+	if res := chooseCountry(browser, link, "DE"); res.status != http.StatusGone {
+		t.Fatalf("second Checkout = %d", res.status)
+	}
+
+	// Back from the provider's page: the same confirmation as ours.
+	returnURL := strings.Replace(session.successURL, "{CHECKOUT_SESSION_ID}", id, 1)
+	expectContains(t, browser.expect(http.MethodGet, returnURL, nil, http.StatusOK), "did not go through")
+	h.web.pay(id, billing.StatusActive)
+	expectContains(t, browser.expect(http.MethodGet, returnURL, nil, http.StatusOK), "Your subscription is active")
+	if !app.billing().Entitled {
+		t.Fatal("a merchant checkout did not entitle the account")
+	}
+
+	// A plain form post gets a 303 to the provider's page instead.
+	other, _ := h.appLogin(h.newSub())
+	plain := chooseCountry(h.client(), linkPath(t, h, other), "GB")
+	if plain.status != http.StatusSeeOther || !strings.HasPrefix(plain.header.Get("Location"), merchantPage) {
+		t.Fatalf("plain Checkout for GB = %d to %q", plain.status, plain.header.Get("Location"))
+	}
+}
+
+// A country that cannot pay on the web, or is not a country, is said so
+// and opens nothing, whatever is posted, and leaves the link unused.
+func TestCheckoutLinkCountryRefused(t *testing.T) {
+	h := newCustomHarness(t)
+	app, _ := h.appLogin(h.newSub())
+	link := linkPath(t, h, app)
+	browser := h.client()
+
+	prefilled := browser.do(http.MethodGet, link, nil, "Accept-Language", "ru-RU")
+	expectContains(t, prefilled, `<option value="RU" data-route="unavailable" selected>Russia</option>`,
+		`<p class="notice" role="status" data-route-note="unavailable">Paying on the web isn't available in your country yet.</p>`,
+		`data-country-submit hidden>Checkout</button>`)
+
+	for _, country := range []string{"RU", "cn"} {
+		res := chooseCountry(browser, link, country)
+		if res.status != http.StatusOK {
+			t.Fatalf("Checkout for %s = %d", country, res.status)
+		}
+		expectContains(t, res, "Paying on the web isn't available in your country yet.", "data-country-submit hidden")
+	}
+	for _, country := range []string{"", "ZZ", "UK", "USA", "EU", "<b>"} {
+		res := chooseCountry(browser, link, country)
+		if res.status != http.StatusBadRequest {
+			t.Fatalf("Checkout for %q = %d", country, res.status)
+		}
+		expectContains(t, res, "Choose your billing country from the list.", `data-country-step`)
+	}
+	// htmx gets the step as a fragment.
+	fragment := browser.postForm(link, url.Values{"country": {"RU"}}, "HX-Request", "true")
+	expectContains(t, fragment, "isn't available in your country yet")
+	expectLacks(t, fragment, "<!doctype html>")
+	if h.web.opened() != 0 {
+		t.Fatalf("refused countries opened %d checkouts", h.web.opened())
+	}
+	// None of that used the link.
+	payPath(t, browser, link)
+}
+
 func TestCheckoutLinkTokens(t *testing.T) {
 	h := newCustomHarness(t)
 	app, tokens := h.appLogin(h.newSub())
 	browser := h.client()
 	valid := func() string {
-		var link struct {
-			URL string `json:"url"`
-		}
-		app.expect(http.MethodPost, "/api/billing/checkout", nil, http.StatusOK).json(t, &link)
-		return strings.TrimPrefix(link.URL, h.api.URL+"/billing/checkout/")
+		return strings.TrimPrefix(linkPath(t, h, app), "/billing/checkout/")
 	}
 	claims := func(purpose string, expires time.Time) map[string]any {
-		return map[string]any{"p": purpose, "u": tokens.User.ID, "e": expires.Unix(), "n": "nonce-" + purpose + expires.String()}
+		return map[string]any{"p": purpose, "u": tokens.User.ID, "e": expires.Unix(), "n": "nonce-" + purpose + expires.String(), "c": "US"}
 	}
 	token := valid()
 	payload, sig, _ := strings.Cut(token, ".")
@@ -263,6 +434,10 @@ func TestCheckoutLinkTokens(t *testing.T) {
 	other, _ := h.appLogin(h.newSub())
 	otherID := other.account().User.ID
 	retargeted := base64.RawURLEncoding.EncodeToString(bytes.Replace(decoded, []byte(tokens.User.ID), []byte(otherID), 1))
+	pay := strings.TrimPrefix(payPath(t, browser, "/billing/checkout/"+valid()), "/billing/checkout/")
+	payPayload, paySig, _ := strings.Cut(pay, ".")
+	payDecoded, _ := base64.RawURLEncoding.DecodeString(payPayload)
+	payCountry := base64.RawURLEncoding.EncodeToString(bytes.Replace(payDecoded, []byte(`"c":"US"`), []byte(`"c":"DE"`), 1))
 
 	for name, bad := range map[string]string{
 		"payload re-pointed at another user": retargeted + "." + sig,
@@ -272,53 +447,70 @@ func TestCheckoutLinkTokens(t *testing.T) {
 		"expired":                            signToken(checkoutTokenKey, claims("open", time.Now().Add(-time.Second))),
 		"another key":                        signToken(bytes.Repeat([]byte{1}, 32), claims("open", time.Now().Add(time.Hour))),
 		"a completion token":                 signToken(checkoutTokenKey, claims("complete", time.Now().Add(time.Hour))),
+		"an expired pay token":               signToken(checkoutTokenKey, claims("pay", time.Now().Add(-time.Second))),
+		"a pay token for another country":    payCountry + "." + paySig,
 	} {
 		expectHostedError(t, browser.do(http.MethodPost, "/billing/checkout/"+bad+"/session", nil), http.StatusGone, "checkout_link_expired")
 		if res := browser.do(http.MethodGet, "/billing/checkout/"+url.PathEscape(bad), nil); res.status != http.StatusGone {
 			t.Errorf("checkout page with %s = %d", name, res.status)
 		}
+		if res := chooseCountry(browser, "/billing/checkout/"+url.PathEscape(bad), "US"); res.status != http.StatusGone {
+			t.Errorf("Checkout with %s = %d", name, res.status)
+		}
 	}
-	h.web.mu.Lock()
-	opened := len(h.web.sessions)
-	h.web.mu.Unlock()
-	if opened != 0 {
+	// A pay token is not a link: its Checkout is refused.
+	if res := chooseCountry(browser, "/billing/checkout/"+pay, "US"); res.status != http.StatusGone {
+		t.Errorf("Checkout with a pay token = %d", res.status)
+	}
+	// A pay token for a country that no longer pays on our page opens
+	// nothing.
+	signedDE := signToken(checkoutTokenKey, map[string]any{"p": "pay", "u": tokens.User.ID, "e": time.Now().Add(time.Hour).Unix(), "n": "nonce-de", "c": "DE"})
+	expectHostedError(t, browser.do(http.MethodPost, "/billing/checkout/"+signedDE+"/session", nil), http.StatusGone, "checkout_link_expired")
+	if res := browser.do(http.MethodGet, "/billing/checkout/"+signedDE, nil); res.status != http.StatusGone {
+		t.Errorf("checkout page for a DE pay token = %d", res.status)
+	}
+	if opened := h.web.opened(); opened != 0 {
 		t.Fatalf("bad tokens opened %d checkouts", opened)
 	}
 
-	// Reuse is refused even when two requests race for one link.
-	token = valid()
-	results := make(chan int, 4)
-	for range 4 {
-		go func() {
-			res := h.client().do(http.MethodPost, "/billing/checkout/"+token+"/session", nil)
-			results <- res.status
-		}()
-	}
-	ok := 0
-	for range 4 {
-		if <-results == http.StatusOK {
-			ok++
+	// Reuse is refused even when requests race for one link, or one pay
+	// token.
+	race := func(name string, send func() int, ok int) {
+		results := make(chan int, 4)
+		for range 4 {
+			go func() { results <- send() }()
+		}
+		n := 0
+		for range 4 {
+			if <-results == ok {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Fatalf("%d of 4 racing uses of %s went through, want 1", n, name)
 		}
 	}
-	if ok != 1 {
-		t.Fatalf("%d of 4 racing uses opened a checkout, want 1", ok)
-	}
+	token = valid()
+	race("a link", func() int { return chooseCountry(h.client(), "/billing/checkout/"+token, "US").status }, http.StatusSeeOther)
+	pay = payPath(t, browser, "/billing/checkout/"+valid())
+	race("a pay token", func() int { return h.client().do(http.MethodPost, pay+"/session", nil).status }, http.StatusOK)
 
 	// A link whose account was deleted opens nothing.
 	token = valid()
+	pay = payPath(t, browser, "/billing/checkout/"+valid())
 	h.exec(`DELETE FROM users WHERE id = $1`, tokens.User.ID)
-	expectHostedError(t, browser.do(http.MethodPost, "/billing/checkout/"+token+"/session", nil), http.StatusGone, "checkout_link_expired")
+	if res := chooseCountry(browser, "/billing/checkout/"+token, "US"); res.status != http.StatusGone {
+		t.Errorf("Checkout for a deleted account = %d", res.status)
+	}
+	expectHostedError(t, browser.do(http.MethodPost, pay+"/session", nil), http.StatusGone, "checkout_link_expired")
 }
 
 func TestCheckoutLinkReturnRefusesAnotherAccountsSession(t *testing.T) {
 	h := newCustomHarness(t)
 	open := func(app *client) sessionBody {
-		var link struct {
-			URL string `json:"url"`
-		}
-		app.expect(http.MethodPost, "/api/billing/checkout", nil, http.StatusOK).json(t, &link)
+		pay := payPath(t, h.client(), linkPath(t, h, app))
 		var session sessionBody
-		h.client().expect(http.MethodPost, strings.TrimPrefix(link.URL, h.api.URL)+"/session", nil, http.StatusOK).json(t, &session)
+		h.client().expect(http.MethodPost, pay+"/session", nil, http.StatusOK).json(t, &session)
 		return session
 	}
 	victim, _ := h.appLogin(h.newSub())
@@ -363,9 +555,27 @@ func TestDashboardCustomCheckout(t *testing.T) {
 	}
 	expectLacks(t, devices, "js.stripe.com", `name="checkout-host"`)
 
-	panel := browser.do(http.MethodGet, "/dashboard/billing/subscribe", nil, "HX-Request", "true")
-	expectContains(t, panel, `data-checkout`, `data-session-url="/dashboard/billing/checkout"`,
-		`data-page-url="/dashboard/billing/subscribe"`, `data-publishable-key="`+testPublishableKey+`"`,
+	// Subscribe asks for the billing country first, prefilled from the
+	// browser's languages; a self-payment country opens the panel.
+	step := browser.do(http.MethodGet, "/dashboard/billing/subscribe", nil, "HX-Request", "true", "Accept-Language", "en-US,en;q=0.5")
+	expectContains(t, step, `data-country-step`, `hx-post="/dashboard/billing/subscribe"`,
+		`<option value="US" data-route="self" selected>United States</option>`, `data-country-submit>Checkout</button>`,
+		`<a href="/dashboard" hx-get="/dashboard" hx-push-url="true">Cancel</a>`)
+	expectLacks(t, step, `data-checkout `)
+	if res := browser.postForm("/dashboard/billing/subscribe", url.Values{"country": {"US"}}, "HX-Request", "true"); res.status != http.StatusForbidden {
+		t.Fatalf("Checkout without CSRF = %d", res.status)
+	}
+	panel := browser.hxSubmit("/dashboard/billing/subscribe", url.Values{"country": {"us"}})
+	if panel.header.Get("HX-Push-Url") != "/dashboard/billing/subscribe?country=US" {
+		t.Fatalf("Checkout for US pushed %q", panel.header.Get("HX-Push-Url"))
+	}
+	expectRedirect(t, browser.submit("/dashboard/billing/subscribe", url.Values{"country": {"US"}}), "/dashboard/billing/subscribe?country=US")
+	reloaded := browser.do(http.MethodGet, "/dashboard/billing/subscribe?country=US", nil, "HX-Request", "true")
+	if reloaded.body != panel.body {
+		t.Fatalf("the panel's page differs from Checkout's:\n%s\n%s", reloaded.body, panel.body)
+	}
+	expectContains(t, panel, `data-checkout`, `data-session-url="/dashboard/billing/checkout?country=US"`,
+		`data-page-url="/dashboard/billing/subscribe?country=US"`, `data-publishable-key="`+testPublishableKey+`"`,
 		`<p class="field-value" aria-labelledby="checkout-email">`+browser.account().User.Email+`</p>`,
 		`<a href="/dashboard" hx-get="/dashboard" hx-push-url="true">Cancel</a>`)
 	if panel.status != http.StatusOK || panel.header.Get("Content-Security-Policy") != checkoutCSP {
@@ -377,12 +587,20 @@ func TestDashboardCustomCheckout(t *testing.T) {
 		`actions.confirm({ redirect: "if_required" })`)
 	expectLacks(t, asset, "createEmbeddedCheckoutPage")
 
-	// Opening the session needs the CSRF token.
-	if res := browser.do(http.MethodPost, "/dashboard/billing/checkout", nil); res.status != http.StatusForbidden {
+	// Opening the session needs the CSRF token, and a self-payment
+	// country.
+	if res := browser.do(http.MethodPost, "/dashboard/billing/checkout?country=US", nil); res.status != http.StatusForbidden {
 		t.Fatalf("session without CSRF = %d", res.status)
 	}
+	for _, country := range []string{"", "DE", "RU", "ZZ"} {
+		expectHostedError(t, browser.do(http.MethodPost, "/dashboard/billing/checkout?country="+country, nil, "X-CSRF-Token", browser.csrf()),
+			http.StatusBadRequest, "invalid_request")
+	}
+	if h.web.opened() != 0 {
+		t.Fatalf("%d checkouts opened for countries that do not pay on our page", h.web.opened())
+	}
 	var session sessionBody
-	res := browser.do(http.MethodPost, "/dashboard/billing/checkout", nil, "X-CSRF-Token", browser.csrf())
+	res := browser.do(http.MethodPost, "/dashboard/billing/checkout?country=US", nil, "X-CSRF-Token", browser.csrf())
 	if res.status != http.StatusOK {
 		t.Fatalf("session = %d %s", res.status, res.body)
 	}
@@ -392,9 +610,10 @@ func TestDashboardCustomCheckout(t *testing.T) {
 		t.Fatalf("session = %+v", session)
 	}
 
-	// Back before paying: the panel again. Someone else's session: refused.
+	// Back before paying: the country step again. Someone else's
+	// session: refused.
 	notPaid := browser.do(http.MethodGet, session.ReturnURL, nil, "HX-Request", "true")
-	expectContains(t, notPaid, "did not go through", `data-checkout`)
+	expectContains(t, notPaid, "did not go through", `data-country-step`)
 	h.web.pay(id, billing.StatusActive)
 	stranger := h.regionBrowser()
 	expectRenderedError(t, stranger.do(http.MethodGet, session.ReturnURL, nil), http.StatusForbidden)
@@ -412,9 +631,10 @@ func TestDashboardCustomCheckout(t *testing.T) {
 	if !browser.billing().Entitled {
 		t.Fatal("checkout did not entitle the account")
 	}
-	if res := browser.do(http.MethodPost, "/dashboard/billing/checkout", nil, "X-CSRF-Token", browser.csrf()); res.status != http.StatusConflict {
+	if res := browser.do(http.MethodPost, "/dashboard/billing/checkout?country=US", nil, "X-CSRF-Token", browser.csrf()); res.status != http.StatusConflict {
 		t.Fatalf("second checkout = %d %s", res.status, res.body)
 	}
+	expectRenderedError(t, browser.submit("/dashboard/billing/subscribe", url.Values{"country": {"DE"}}), http.StatusConflict)
 
 	if strings.Contains(logs.String(), "_secret_") {
 		t.Fatalf("a client secret was logged:\n%s", logs.String())
@@ -428,7 +648,7 @@ func TestCustomCheckoutWaitsForAPaymentToClear(t *testing.T) {
 	h := newCustomHarness(t)
 	browser := h.regionBrowser()
 	var session sessionBody
-	browser.do(http.MethodPost, "/dashboard/billing/checkout", nil, "X-CSRF-Token", browser.csrf()).json(t, &session)
+	browser.do(http.MethodPost, "/dashboard/billing/checkout?country=US", nil, "X-CSRF-Token", browser.csrf()).json(t, &session)
 	h.web.pay(checkoutID(t, session.ReturnURL), billing.StatusOnHold)
 	pending := browser.expect(http.MethodGet, session.ReturnURL, nil, http.StatusOK)
 	expectContains(t, pending, "payment is processing", `hx-get="`+strings.TrimPrefix(session.ReturnURL, h.api.URL))
@@ -468,7 +688,9 @@ func TestCheckoutPanelShowsThePlan(t *testing.T) {
 		h.web.mu.Lock()
 		h.web.plan = tc.plan
 		h.web.mu.Unlock()
-		panel := browser.expect(http.MethodGet, "/dashboard/billing/subscribe", nil, http.StatusOK)
+		step := browser.expect(http.MethodGet, "/dashboard/billing/subscribe", nil, http.StatusOK)
+		expectContains(t, step, `<p class="plan-price"><strong>`+tc.price+`</strong><span class="muted"> / `+tc.period+`<span data-route-note="merchant" hidden> plus tax</span>`)
+		panel := browser.expect(http.MethodGet, "/dashboard/billing/subscribe?country=US", nil, http.StatusOK)
 		expectContains(t, panel,
 			`<strong data-checkout-amount>`+tc.price+`</strong>`,
 			`Subscribe · <span data-checkout-amount>`+tc.price+`</span>/<span data-checkout-period>`+tc.period+`</span>`,
@@ -480,12 +702,10 @@ func TestCheckoutPanelShowsThePlan(t *testing.T) {
 	h.web.planErr = errors.New("stripe is down")
 	h.web.mu.Unlock()
 	expectRenderedError(t, browser.do(http.MethodGet, "/dashboard/billing/subscribe", nil), http.StatusInternalServerError)
-	var link struct {
-		URL string `json:"url"`
-	}
+	expectRenderedError(t, browser.do(http.MethodGet, "/dashboard/billing/subscribe?country=US", nil), http.StatusInternalServerError)
 	app, _ := h.appLogin(h.newSub())
-	app.expect(http.MethodPost, "/api/billing/checkout", nil, http.StatusOK).json(t, &link)
-	if res := h.client().do(http.MethodGet, strings.TrimPrefix(link.URL, h.api.URL), nil); res.status != http.StatusInternalServerError {
+	link := linkPath(t, h, app)
+	if res := h.client().do(http.MethodGet, link, nil); res.status != http.StatusInternalServerError {
 		t.Fatalf("checkout page without a plan = %d", res.status)
 	}
 }
@@ -498,4 +718,66 @@ func TestCheckoutLinkCancelled(t *testing.T) {
 	if got := res.header.Get("Content-Security-Policy"); got != dashboardCSP {
 		t.Fatalf("cancelled page CSP = %q", got)
 	}
+}
+
+// On the dashboard too, Checkout routes by billing country: the
+// provider's page outside the self-payment countries, and nothing where
+// the web cannot take payment.
+func TestDashboardCountryRoutes(t *testing.T) {
+	h := newCustomHarness(t)
+	browser := h.regionBrowser()
+
+	// Choosing a country by URL shows it chosen, and opens nothing.
+	expectContains(t, browser.expect(http.MethodGet, "/dashboard/billing/subscribe?country=DE", nil, http.StatusOK),
+		`<option value="DE" data-route="merchant" selected>Germany</option>`, `data-route-note="merchant"> plus tax</span>`,
+		"adds any sales tax or VAT")
+	unavailable := browser.expect(http.MethodGet, "/dashboard/billing/subscribe?country=RU", nil, http.StatusOK)
+	expectContains(t, unavailable, `<option value="RU" data-route="unavailable" selected>Russia</option>`,
+		"Paying on the web isn't available in your country yet.", "data-country-submit hidden")
+	expectLacks(t, unavailable, "data-checkout ")
+
+	// Posting a country that cannot pay, or no country, opens nothing.
+	refused := browser.hxSubmit("/dashboard/billing/subscribe", url.Values{"country": {"CN"}})
+	if refused.status != http.StatusOK {
+		t.Fatalf("Checkout for CN = %d", refused.status)
+	}
+	expectContains(t, refused, "Paying on the web isn't available in your country yet.", "data-country-submit hidden")
+	expectLacks(t, refused, "data-checkout ")
+	for _, country := range []string{"", "ZZ", "GBR"} {
+		res := browser.hxSubmit("/dashboard/billing/subscribe", url.Values{"country": {country}})
+		if res.status != http.StatusBadRequest || res.header.Get("HX-Retarget") != "#alert" {
+			t.Fatalf("Checkout for %q = %d", country, res.status)
+		}
+		expectContains(t, res, "Choose your billing country from the list.")
+	}
+	if h.web.opened() != 0 {
+		t.Fatalf("refused countries opened %d checkouts", h.web.opened())
+	}
+
+	// Germany pays on the provider's page: a full load there for htmx, a
+	// 303 without it.
+	res := browser.hxSubmit("/dashboard/billing/subscribe", url.Values{"country": {"DE"}})
+	target := res.header.Get("HX-Redirect")
+	if res.status != http.StatusNoContent || !strings.HasPrefix(target, merchantPage) {
+		t.Fatalf("Checkout for DE = %d, HX-Redirect %q %s", res.status, target, res.body)
+	}
+	plain := browser.submit("/dashboard/billing/subscribe", url.Values{"country": {"GB"}})
+	if plain.status != http.StatusSeeOther || !strings.HasPrefix(plain.header.Get("Location"), merchantPage) {
+		t.Fatalf("plain Checkout for GB = %d to %q", plain.status, plain.header.Get("Location"))
+	}
+	id := strings.TrimPrefix(target, merchantPage)
+	session := h.web.session(id)
+	if !session.merchant || session.successURL != h.api.URL+"/dashboard/billing/return?session_id={CHECKOUT_SESSION_ID}" ||
+		session.cancelURL != h.api.URL+"/dashboard/billing/subscribe?country=DE" {
+		t.Fatalf("merchant session = %+v", session)
+	}
+
+	// Back from the provider's page: confirmed at once, like ours.
+	h.web.pay(id, billing.StatusActive)
+	done := browser.expect(http.MethodGet, strings.Replace(session.successURL, "{CHECKOUT_SESSION_ID}", id, 1), nil, http.StatusOK)
+	expectContains(t, done, "Your subscription is active", `data-billing-status="active"`)
+	if !browser.billing().Entitled {
+		t.Fatal("a merchant checkout did not entitle the account")
+	}
+	expectLacks(t, browser.expect(http.MethodGet, "/dashboard/billing/subscribe", nil, http.StatusOK), "data-country-step")
 }

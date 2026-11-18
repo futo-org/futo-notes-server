@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"futo-notes-server/internal/hosted/billing"
 	"futo-notes-server/internal/hosted/config"
 )
 
@@ -673,6 +674,34 @@ func TestDashboardParity(t *testing.T) {
 			viaAPI.subscribe()
 			expectContains(t, viaAPI.expect(http.MethodGet, "/dashboard", nil, http.StatusOK), `data-billing-status="active"`)
 			expectRenderedError(t, viaAPI.submit("/dashboard/billing/checkout", nil), http.StatusConflict)
+		}},
+		{"POST /dashboard/billing/subscribe", "POST /api/billing/checkout", func(t *testing.T) {
+			c := newCustomHarness(t)
+			viaDashboard := c.regionBrowser()
+			res := viaDashboard.submit("/dashboard/billing/subscribe", url.Values{"country": {"DE"}})
+			id, ok := strings.CutPrefix(res.header.Get("Location"), merchantPage)
+			if res.status != http.StatusSeeOther || !ok {
+				t.Fatalf("dashboard checkout = %d %v", res.status, res.header)
+			}
+			c.web.pay(id, billing.StatusActive)
+			viaDashboard.expect(http.MethodGet, "/dashboard/billing/return?session_id="+id, nil, http.StatusOK)
+			if !viaDashboard.billing().Entitled {
+				t.Fatal("API sees no subscription")
+			}
+			expectHostedError(t, viaDashboard.do(http.MethodPost, "/api/billing/checkout", nil), http.StatusConflict, "already_subscribed")
+
+			viaAPI := c.regionBrowser()
+			var link struct {
+				URL string `json:"url"`
+			}
+			viaAPI.expect(http.MethodPost, "/api/billing/checkout", nil, http.StatusOK).json(t, &link)
+			pay := payPath(t, c.client(), strings.TrimPrefix(link.URL, c.api.URL))
+			var session sessionBody
+			c.client().expect(http.MethodPost, pay+"/session", nil, http.StatusOK).json(t, &session)
+			c.web.pay(checkoutID(t, session.ReturnURL), billing.StatusActive)
+			c.client().expect(http.MethodGet, session.ReturnURL, nil, http.StatusOK)
+			expectContains(t, viaAPI.expect(http.MethodGet, "/dashboard", nil, http.StatusOK), `data-billing-status="active"`)
+			expectRenderedError(t, viaAPI.submit("/dashboard/billing/subscribe", url.Values{"country": {"DE"}}), http.StatusConflict)
 		}},
 		{"POST /dashboard/billing/portal", "GET /api/billing/portal", func(t *testing.T) {
 			b := newBillingHarness(t)
