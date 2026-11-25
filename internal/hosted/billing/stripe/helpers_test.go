@@ -210,6 +210,10 @@ func (f *fakeStripe) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"mode": form.Get("mode"), "ui_mode": form.Get("ui_mode"), "customer": form.Get("customer"),
 			"client_reference_id": nilIfEmpty(form.Get("client_reference_id")), "subscription": nil, "url": nil,
 		}
+		if form.Get("ui_mode") == "hosted_page" {
+			f.sessions[id]["client_secret"] = nil
+			f.sessions[id]["url"] = "https://checkout.stripe.com/c/pay/" + id
+		}
 		writeJSON(w, http.StatusOK, f.sessions[id])
 	case r.Method == http.MethodGet && strings.HasPrefix(path, "/checkout/sessions/"):
 		s, ok := f.sessions[strings.TrimPrefix(path, "/checkout/sessions/")]

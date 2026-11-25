@@ -161,6 +161,11 @@ stripe:
   priceId: ""
   # pk_live_... in prod, pk_test_... in staging (same mode as the secret key).
   publishableKey: ""
+  # Billing countries (ISO 3166-1 alpha-2, e.g. [US, CA]) that pay on our own
+  # checkout page, with FUTO as merchant of record. Every other country pays
+  # on Stripe's hosted page through Managed Payments, with Stripe as merchant
+  # of record; [] sends everyone there.
+  selfPaymentCountries: []
 
 # Dev-only literal: the mock issuer's client secret. Prod's Secret (same name,
 # notes-api) arrives via an ExternalSecret with secretData nulled in the base

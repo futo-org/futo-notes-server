@@ -234,6 +234,7 @@ export STRIPE_SECRET_KEY="$(cat ~/.config/futo-notes/stripe-sandbox.key)"
 export STRIPE_PUBLISHABLE_KEY="$(cat ~/.config/futo-notes/stripe-sandbox.publishable-key)"
 export STRIPE_PRICE_ID=price_1UcsQVFxdnDGYMu2rc65ReEo   # "FUTO Notes Sync (dev)", $5/month
 export STRIPE_WEBHOOK_SECRET="$(stripe listen --print-secret)"
+export STRIPE_SELF_PAYMENT_COUNTRIES=US   # these pay on our page; the rest on Stripe's (Managed Payments)
 mise run api:dev
 ```
 
@@ -249,16 +250,25 @@ signs with, for as long as the CLI stays logged in to that account. The
 Stripe CLI must be logged in to the sandbox (`stripe login`).
 
 Then sign in on the dashboard and press Subscribe, or use "Open checkout"
-on `/dev` for the page an app's link opens. Pay with `4242 4242 4242 4242`,
-any future expiry and any CVC. The account is entitled as soon as the
+on `/dev` for the page an app's link opens. Both ask for the billing
+country first, prefilled from the browser's language: a country in
+`STRIPE_SELF_PAYMENT_COUNTRIES` opens our page, any other redirects to
+Stripe's hosted Managed Payments page (Managed Payments is activated in
+the sandbox), and Russia, China and the other refused countries say web
+payment isn't available. `/dev` links the dashboard's step with a country
+chosen. Pay with `4242 4242 4242 4242`,
+any future expiry and any CVC (on Stripe's page Link may ask for a code:
+the test code is `000000`). The account is entitled as soon as the
 checkout completes, before any webhook; `stripe listen` then shows
 `customer.subscription.created` arriving with `[200]`. To exercise later
 changes, use Manage subscription (the Customer Portal) to cancel at period
 end, or the sandbox dashboard to cancel at once; each arrives as
 `customer.subscription.updated` or `.deleted`.
 
-The provider's tests use an in-process fake of Stripe. One test,
-`TestSandbox`, talks to the sandbox when given a test key file:
+The provider's tests use an in-process fake of Stripe. Two tests,
+`TestSandbox` and `TestSandboxManagedPayments` (which opens a Managed
+Payments session, so it needs Managed Payments activated and the dev
+product's tax code), talk to the sandbox when given a test key file:
 
 ```bash
 STRIPE_TEST_SECRET_KEY_FILE=~/.config/futo-notes/stripe-sandbox.key \
@@ -266,8 +276,8 @@ STRIPE_TEST_PUBLISHABLE_KEY_FILE=~/.config/futo-notes/stripe-sandbox.publishable
   go test -run TestSandbox -v ./internal/hosted/billing/stripe/
 ```
 
-It creates customers and a subscription under a fresh test `sub` and deletes
-them when done.
+They create customers, a subscription and sessions under a fresh test `sub`
+and delete or expire them when done.
 
 ### End-to-end scenario
 

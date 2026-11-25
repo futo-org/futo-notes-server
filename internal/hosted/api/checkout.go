@@ -18,18 +18,22 @@ import (
 
 	"futo-notes-server/internal/hosted/billing"
 	"futo-notes-server/internal/hosted/billing/stripe"
+	"futo-notes-server/internal/hosted/country"
 	"futo-notes-server/internal/httputil"
 )
 
 // Custom checkout: a provider whose checkout is a page of ours
-// (billing.CustomCheckout, i.e. Stripe). Our page shows the plan and the
-// account, the provider's own fields (Stripe's Payment Element, in its
-// frames) take the card, and our button confirms. The dashboard opens it in
-// place; the apps get a one-time link to a page of ours that needs no
-// dashboard session. When the checkout completes, the server fetches the
-// session from the provider and applies its subscription at once, so
-// entitlement never waits for the webhook, which stays the source of every
-// later change.
+// (billing.CustomCheckout, i.e. Stripe). It starts by asking for the
+// buyer's billing country, which decides the route: in the self-payment
+// countries our page shows the plan and the account, the provider's own
+// fields (Stripe's Payment Element, in its frames) take the card, and our
+// button confirms; everywhere else the browser is sent to the provider's
+// own page, where it sells as merchant of record; a few countries cannot
+// pay on the web. The dashboard asks in place; the apps get a one-time link
+// to a page of ours that needs no dashboard session. When the checkout
+// completes, by either route, the server fetches the session from the
+// provider and applies its subscription at once, so entitlement never
+// waits for the webhook, which stays the source of every later change.
 const (
 	subscribePath = dashboardPath + "/billing/subscribe"
 	// checkoutReturnPath is where a dashboard checkout returns.
@@ -69,10 +73,21 @@ const (
 
 // The purposes of a checkout token.
 const (
-	// purposeOpen opens one checkout for its user: an app's link.
+	// purposeOpen opens one checkout for its user: an app's link. It is
+	// used when its country step is posted.
 	purposeOpen = "open"
+	// purposePay opens one checkout on our page for its user and billing
+	// country: what an app's link becomes once a self-payment country is
+	// chosen. It is used when the page opens the checkout session.
+	purposePay = "pay"
 	// purposeComplete confirms a checkout opened from a link.
 	purposeComplete = "complete"
+)
+
+// The country step's messages.
+const (
+	chooseCountryMessage = "Choose your billing country from the list."
+	countryUnavailable   = "Paying on the web isn't available in your country yet."
 )
 
 // custom returns the web provider when its checkout is a page of ours.
@@ -86,8 +101,10 @@ type checkoutClaims struct {
 	Purpose string `json:"p"`
 	UserID  string `json:"u"`
 	Expires int64  `json:"e"`
-	// Nonce identifies an open token, so it is used once.
+	// Nonce identifies an open or pay token, so it is used once.
 	Nonce string `json:"n,omitempty"`
+	// Country is a pay token's billing country.
+	Country string `json:"c,omitempty"`
 }
 
 // signCheckoutToken returns c as base64url(JSON) "." base64url(HMAC).
@@ -121,34 +138,50 @@ func (s *Server) readCheckoutToken(token, purpose string) (checkoutClaims, bool)
 	}
 	var c checkoutClaims
 	if json.Unmarshal(payload, &c) != nil || c.Purpose != purpose || c.UserID == "" || time.Now().Unix() >= c.Expires ||
-		(purpose == purposeOpen && c.Nonce == "") {
+		(purpose != purposeComplete && c.Nonce == "") || (purpose == purposePay && c.Country == "") {
 		return checkoutClaims{}, false
 	}
 	return c, true
 }
 
-// checkoutLink is a one-time link to the checkout page for userID.
-func (s *Server) checkoutLink(userID string) (string, error) {
+// oneTimeToken signs a token for purpose, userID and billing country
+// (pay tokens only) that can be used once within checkoutLinkTTL.
+func (s *Server) oneTimeToken(purpose, userID, billingCountry string) (string, error) {
 	nonce := make([]byte, 16)
 	if _, err := rand.Read(nonce); err != nil {
 		return "", err
 	}
-	token := s.signCheckoutToken(checkoutClaims{
-		Purpose: purposeOpen, UserID: userID, Expires: time.Now().Add(checkoutLinkTTL).Unix(),
-		Nonce: base64.RawURLEncoding.EncodeToString(nonce),
-	})
+	return s.signCheckoutToken(checkoutClaims{
+		Purpose: purpose, UserID: userID, Expires: time.Now().Add(checkoutLinkTTL).Unix(),
+		Nonce: base64.RawURLEncoding.EncodeToString(nonce), Country: billingCountry,
+	}), nil
+}
+
+// checkoutLink is a one-time link to the checkout page for userID.
+func (s *Server) checkoutLink(userID string) (string, error) {
+	token, err := s.oneTimeToken(purposeOpen, userID, "")
+	if err != nil {
+		return "", err
+	}
 	return s.cfg.PublicURL + checkoutLinkPath + "/" + token, nil
 }
 
-// checkoutLinkUsed reports whether an open token has opened its checkout.
+// completionToken names the account a link checkout's return confirms.
+func (s *Server) completionToken(userID string) string {
+	return s.signCheckoutToken(checkoutClaims{
+		Purpose: purposeComplete, UserID: userID, Expires: time.Now().Add(checkoutCompletionTTL).Unix(),
+	})
+}
+
+// checkoutLinkUsed reports whether an open or pay token has been used.
 func (s *Server) checkoutLinkUsed(ctx context.Context, c checkoutClaims) (bool, error) {
 	var used bool
 	err := s.database.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM checkout_token_uses WHERE nonce = $1)`, c.Nonce).Scan(&used)
 	return used, err
 }
 
-// useCheckoutLink records that an open token opened its checkout, and
-// reports false if it already had. Uses are kept until the token would have
+// useCheckoutLink records that an open or pay token was used, and reports
+// false if it already had been. Uses are kept until the token would have
 // expired anyway.
 func (s *Server) useCheckoutLink(ctx context.Context, c checkoutClaims) (bool, error) {
 	if _, err := s.database.ExecContext(ctx, `DELETE FROM checkout_token_uses WHERE expires_at < now()`); err != nil {
@@ -190,6 +223,19 @@ func (s *Server) writeCheckoutSession(w http.ResponseWriter, r *http.Request, us
 		ClientSecret: checkout.ClientSecret,
 		ReturnURL:    strings.ReplaceAll(returnURL, checkoutSessionID, checkout.ID),
 	})
+}
+
+// merchantCheckout opens a checkout for userID on the provider's own page,
+// as merchant of record, and returns the URL to send the browser to.
+func (s *Server) merchantCheckout(ctx context.Context, userID, successURL, cancelURL string) (string, error) {
+	if err := s.checkoutAllowed(ctx, userID); err != nil {
+		return "", err
+	}
+	customer, err := s.billing.Customer(ctx, userID)
+	if err != nil {
+		return "", err
+	}
+	return s.custom().StartMerchantCheckout(ctx, customer, successURL, cancelURL)
 }
 
 // checkoutOutcome is what confirming a checkout found.
@@ -285,6 +331,68 @@ func (s *Server) newCheckoutPanel(ctx context.Context, email, sessionURL, pageUR
 	}, nil
 }
 
+// countryStep asks for the buyer's billing country before checkout, the
+// list prefilled from the browser's languages. Each option carries its
+// route, so the page can say before posting that a country cannot pay on
+// the web, or that tax is added on the provider's page.
+type countryStep struct {
+	// Action is where Checkout posts the country.
+	Action string
+	// CSRF is the dashboard session's token; empty on an app's link page,
+	// whose token authorizes the post.
+	CSRF      string
+	Plan      checkoutPlan
+	Countries []countryOption
+	// Selected is the country chosen, or prefilled; "" for none.
+	Selected string
+	// Route is Selected's route, as routeName names it.
+	Route string
+	// Error says why a post was refused.
+	Error string
+	// CancelURL leaves checkout; CancelHX loads it with htmx.
+	CancelURL string
+	CancelHX  bool
+}
+
+// countryOption is a country in the step's list.
+type countryOption struct {
+	Code, Name, Route string
+}
+
+// routeName is how the page names a billing.CheckoutRoute.
+func routeName(r billing.CheckoutRoute) string {
+	switch r {
+	case billing.RouteSelf:
+		return "self"
+	case billing.RouteMerchantOfRecord:
+		return "merchant"
+	}
+	return "unavailable"
+}
+
+// newCountryStep is the country step with selected chosen, its plan read
+// from the provider.
+func (s *Server) newCountryStep(ctx context.Context, action, selected string) (*countryStep, error) {
+	plan, err := s.custom().Plan(ctx)
+	if err != nil {
+		return nil, err
+	}
+	step := &countryStep{Action: action, Plan: planView(plan), Selected: selected}
+	for _, c := range country.All() {
+		step.Countries = append(step.Countries, countryOption{Code: c.Code, Name: c.Name, Route: routeName(s.custom().Route(c.Code))})
+	}
+	if selected != "" {
+		step.Route = routeName(s.custom().Route(selected))
+	}
+	return step, nil
+}
+
+// browserCountry is the billing country the request's Accept-Language
+// suggests, to prefill the country step; "" when it names none.
+func browserCountry(r *http.Request) string {
+	return country.FromAcceptLanguage(r.Header.Get("Accept-Language"))
+}
+
 // checkoutHost is what a page that hosts custom checkout loads.
 type checkoutHost struct {
 	ScriptURL string
@@ -295,13 +403,30 @@ func hostCheckout(v *dashboardView) {
 	v.CheckoutHost = &checkoutHost{ScriptURL: stripe.JSURL}
 }
 
-// handleDashboardSubscribe shows the overview with the checkout panel open.
+// handleDashboardSubscribe shows the overview with the next checkout step
+// open: given a billing country (?country=) that pays on our page, the
+// checkout panel; otherwise the country step, with that country chosen or
+// the browser's prefilled.
 func (s *Server) handleDashboardSubscribe(w http.ResponseWriter, r *http.Request) {
 	if s.custom() == nil {
 		redirectDashboard(w, r, dashboardPath)
 		return
 	}
-	panel, err := s.dashboardPanel(r)
+	code, ok := country.Parse(r.URL.Query().Get("country"))
+	if ok && s.custom().Route(code) == billing.RouteSelf {
+		s.showDashboardPanel(w, r, code)
+		return
+	}
+	if !ok {
+		code = browserCountry(r)
+	}
+	s.showDashboardCountryStep(w, r, code, "")
+}
+
+// showDashboardPanel shows the overview with the checkout panel for a
+// self-payment billing country.
+func (s *Server) showDashboardPanel(w http.ResponseWriter, r *http.Request, billingCountry string) {
+	panel, err := s.dashboardPanel(r, billingCountry)
 	if err != nil {
 		dashboardServerError(w, r, "reading plan", err)
 		return
@@ -313,8 +438,35 @@ func (s *Server) handleDashboardSubscribe(w http.ResponseWriter, r *http.Request
 	})
 }
 
-func (s *Server) dashboardPanel(r *http.Request) (*checkoutPanel, error) {
-	panel, err := s.newCheckoutPanel(r.Context(), principalFrom(r).Session.User.Email, dashboardPath+"/billing/checkout", subscribePath)
+// showDashboardCountryStep shows the overview with the country step,
+// selected chosen and notice above it.
+func (s *Server) showDashboardCountryStep(w http.ResponseWriter, r *http.Request, selected, notice string) {
+	step, err := s.dashboardCountryStep(r, selected)
+	if err != nil {
+		dashboardServerError(w, r, "reading plan", err)
+		return
+	}
+	s.overviewWith(w, r, func(v *dashboardView) {
+		if !v.Billing.Entitled {
+			v.CountryStep = step
+			v.Notice = notice
+		}
+	})
+}
+
+func (s *Server) dashboardCountryStep(r *http.Request, selected string) (*countryStep, error) {
+	step, err := s.newCountryStep(r.Context(), subscribePath, selected)
+	if err != nil {
+		return nil, err
+	}
+	step.CSRF, _ = r.Context().Value(csrfCtxKey{}).(string)
+	step.CancelURL, step.CancelHX = dashboardPath, true
+	return step, nil
+}
+
+func (s *Server) dashboardPanel(r *http.Request, billingCountry string) (*checkoutPanel, error) {
+	query := "?country=" + billingCountry
+	panel, err := s.newCheckoutPanel(r.Context(), principalFrom(r).Session.User.Email, dashboardPath+"/billing/checkout"+query, subscribePath+query)
 	if err != nil {
 		return nil, err
 	}
@@ -322,10 +474,40 @@ func (s *Server) dashboardPanel(r *http.Request) (*checkoutPanel, error) {
 	return panel, nil
 }
 
-// handleDashboardCheckoutReturn is where a dashboard checkout ends: Stripe
-// sends the browser here after a payment that left the page, and the panel
-// swaps it in once its confirmation succeeds otherwise. It confirms the
-// checkout and shows the overview.
+// handleDashboardChooseCountry is the country step's Checkout, the
+// dashboard's POST /api/billing/checkout for a billing country: our panel
+// for a self-payment country, the provider's page for the rest, and the
+// step again, saying so, for a country that cannot pay on the web.
+func (s *Server) handleDashboardChooseCountry(w http.ResponseWriter, r *http.Request) {
+	if s.custom() == nil {
+		redirectDashboard(w, r, dashboardPath)
+		return
+	}
+	code, ok := country.Parse(r.PostFormValue("country"))
+	if !ok {
+		renderDashboardError(w, r, http.StatusBadRequest, chooseCountryMessage)
+		return
+	}
+	switch s.custom().Route(code) {
+	case billing.RouteSelf:
+		afterAction(w, r, subscribePath+"?country="+code, func() { s.showDashboardPanel(w, r, code) })
+	case billing.RouteMerchantOfRecord:
+		target, err := s.merchantCheckout(r.Context(), principalFrom(r).Session.User.ID,
+			s.cfg.PublicURL+checkoutReturnPath+"?session_id="+checkoutSessionID, s.cfg.PublicURL+subscribePath+"?country="+code)
+		if err != nil {
+			dashboardBillingError(w, r, "creating checkout", err)
+			return
+		}
+		redirectAway(w, r, target)
+	default:
+		s.showDashboardCountryStep(w, r, code, "")
+	}
+}
+
+// handleDashboardCheckoutReturn is where a dashboard checkout ends, by
+// either route: Stripe sends the browser here after a payment on its page,
+// or one that left ours, and our panel swaps it in once its confirmation
+// succeeds otherwise. It confirms the checkout and shows the overview.
 func (s *Server) handleDashboardCheckoutReturn(w http.ResponseWriter, r *http.Request) {
 	if s.custom() == nil {
 		redirectDashboard(w, r, dashboardPath)
@@ -340,12 +522,9 @@ func (s *Server) handleDashboardCheckoutReturn(w http.ResponseWriter, r *http.Re
 		dashboardServerError(w, r, "confirming checkout", err)
 		return
 	}
-	var panel *checkoutPanel
 	if outcome == checkoutOpen {
-		if panel, err = s.dashboardPanel(r); err != nil {
-			dashboardServerError(w, r, "reading plan", err)
-			return
-		}
+		s.showDashboardCountryStep(w, r, browserCountry(r), "The payment did not go through. You can try again.")
+		return
 	}
 	s.overviewWith(w, r, func(v *dashboardView) {
 		switch outcome {
@@ -354,11 +533,6 @@ func (s *Server) handleDashboardCheckoutReturn(w http.ResponseWriter, r *http.Re
 		case checkoutProcessing:
 			v.Notice = "Your payment is processing. This page updates when it clears."
 			v.PendingURL = r.URL.RequestURI()
-		case checkoutOpen:
-			v.Notice = "The payment did not go through. You can try again."
-			if !v.Billing.Entitled {
-				v.Checkout = panel
-			}
 		}
 	})
 }
@@ -370,57 +544,103 @@ func checkoutPageView() dashboardView {
 	return v
 }
 
-// renderCheckoutPage answers with the signed-out checkout page.
+// renderCheckoutPage answers with the signed-out checkout page, or for htmx
+// just the part inside #page.
 func renderCheckoutPage(w http.ResponseWriter, r *http.Request, status int, v dashboardView) {
 	if v.CheckoutHost != nil {
 		w.Header().Set("Content-Security-Policy", checkoutCSP)
 	}
-	writeTemplate(w, r, status, "checkout", "layout", v)
+	name := "layout"
+	if isHTMX(r) {
+		name = "fragment"
+	}
+	writeTemplate(w, r, status, "checkout", name, v)
 }
 
 const checkoutLinkExpiredMessage = "This checkout link has expired or was already used. Start again from the app."
 
-// handleCheckoutLinkPage serves an app's checkout link: our checkout page,
-// without a dashboard session. Opening it does
-// not use the link; mounting the checkout does.
+// linkAccount checks an app's checkout link: a token signed for purpose,
+// not yet used, for an account that still exists and is not already
+// subscribed. Otherwise it answers with the page that says so and returns
+// false.
+func (s *Server) linkAccount(w http.ResponseWriter, r *http.Request, token, purpose string) (checkoutClaims, billing.Customer, bool) {
+	claims, ok := s.readCheckoutToken(token, purpose)
+	used := false
+	if ok {
+		var err error
+		if used, err = s.checkoutLinkUsed(r.Context(), claims); err != nil {
+			dashboardServerError(w, r, "reading checkout link", err)
+			return checkoutClaims{}, billing.Customer{}, false
+		}
+	}
+	if !ok || used {
+		renderCheckoutPage(w, r, http.StatusGone, dashboardView{Error: checkoutLinkExpiredMessage})
+		return checkoutClaims{}, billing.Customer{}, false
+	}
+	err := s.checkoutAllowed(r.Context(), claims.UserID)
+	var customer billing.Customer
+	if err == nil {
+		customer, err = s.billing.Customer(r.Context(), claims.UserID)
+	}
+	if errors.Is(err, errAlreadySubscribed) {
+		renderCheckoutPage(w, r, http.StatusOK, dashboardView{Notice: "You already have an active subscription. You can return to the app."})
+		return checkoutClaims{}, billing.Customer{}, false
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		renderCheckoutPage(w, r, http.StatusGone, dashboardView{Error: checkoutLinkExpiredMessage})
+		return checkoutClaims{}, billing.Customer{}, false
+	}
+	if err != nil {
+		dashboardServerError(w, r, "reading checkout account", err)
+		return checkoutClaims{}, billing.Customer{}, false
+	}
+	return claims, customer, true
+}
+
+// handleCheckoutLinkPage serves an app's checkout link, without a
+// dashboard session: the country step for the link itself, and our
+// checkout panel for the pay token a self-payment country turned it into.
+// Opening either does not use it.
 func (s *Server) handleCheckoutLinkPage(w http.ResponseWriter, r *http.Request) {
 	if s.custom() == nil {
 		renderCheckoutPage(w, r, http.StatusNotFound, dashboardView{Error: "Paying on the web is not available."})
 		return
 	}
 	token := chi.URLParam(r, "token")
-	claims, ok := s.readCheckoutToken(token, purposeOpen)
-	used := false
-	if ok {
-		var err error
-		if used, err = s.checkoutLinkUsed(r.Context(), claims); err != nil {
-			dashboardServerError(w, r, "reading checkout link", err)
-			return
-		}
-	}
-	if !ok || used {
-		renderCheckoutPage(w, r, http.StatusGone, dashboardView{Error: checkoutLinkExpiredMessage})
+	if _, ok := s.readCheckoutToken(token, purposePay); ok {
+		s.checkoutLinkPanel(w, r, token)
 		return
 	}
-	err := s.checkoutAllowed(r.Context(), claims.UserID)
-	if errors.Is(err, errAlreadySubscribed) {
-		renderCheckoutPage(w, r, http.StatusOK, dashboardView{Notice: "You already have an active subscription. You can return to the app."})
+	if _, _, ok := s.linkAccount(w, r, token, purposeOpen); !ok {
 		return
 	}
+	s.checkoutLinkCountryStep(w, r, http.StatusOK, token, browserCountry(r), "")
+}
+
+// checkoutLinkCountryStep answers with an app link's country step.
+func (s *Server) checkoutLinkCountryStep(w http.ResponseWriter, r *http.Request, status int, token, selected, message string) {
+	step, err := s.newCountryStep(r.Context(), checkoutLinkPath+"/"+token, selected)
 	if err != nil {
-		dashboardServerError(w, r, "checking subscription", err)
+		dashboardServerError(w, r, "reading plan", err)
 		return
 	}
-	customer, err := s.billing.Customer(r.Context(), claims.UserID)
-	if errors.Is(err, sql.ErrNoRows) {
+	step.Error = message
+	step.CancelURL = checkoutLinkCancelledPath
+	renderCheckoutPage(w, r, status, dashboardView{CountryStep: step})
+}
+
+// checkoutLinkPanel answers with our checkout page for a pay token.
+func (s *Server) checkoutLinkPanel(w http.ResponseWriter, r *http.Request, token string) {
+	claims, customer, ok := s.linkAccount(w, r, token, purposePay)
+	if !ok {
+		return
+	}
+	if s.custom().Route(claims.Country) != billing.RouteSelf {
 		renderCheckoutPage(w, r, http.StatusGone, dashboardView{Error: checkoutLinkExpiredMessage})
-		return
-	}
-	if err != nil {
-		dashboardServerError(w, r, "reading checkout account", err)
 		return
 	}
 	v := checkoutPageView()
+	var err error
 	v.Checkout, err = s.newCheckoutPanel(r.Context(), customer.Email, checkoutLinkPath+"/"+token+"/session", checkoutLinkPath+"/"+token)
 	if err != nil {
 		dashboardServerError(w, r, "reading plan", err)
@@ -430,19 +650,76 @@ func (s *Server) handleCheckoutLinkPage(w http.ResponseWriter, r *http.Request) 
 	renderCheckoutPage(w, r, http.StatusOK, v)
 }
 
+// handleCheckoutLinkCountry is an app link's Checkout: it uses the link
+// and sends the browser on by the billing country's route, to our checkout
+// page under a pay token or to the provider's page. A country that cannot
+// pay on the web, or is not one, leaves the link unused.
+func (s *Server) handleCheckoutLinkCountry(w http.ResponseWriter, r *http.Request) {
+	if s.custom() == nil {
+		renderCheckoutPage(w, r, http.StatusNotFound, dashboardView{Error: "Paying on the web is not available."})
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	token := chi.URLParam(r, "token")
+	claims, _, ok := s.linkAccount(w, r, token, purposeOpen)
+	if !ok {
+		return
+	}
+	code, ok := country.Parse(r.PostFormValue("country"))
+	if !ok {
+		s.checkoutLinkCountryStep(w, r, http.StatusBadRequest, token, "", chooseCountryMessage)
+		return
+	}
+	route := s.custom().Route(code)
+	if route == billing.RouteUnavailable {
+		s.checkoutLinkCountryStep(w, r, http.StatusOK, token, code, "")
+		return
+	}
+	used, err := s.useCheckoutLink(r.Context(), claims)
+	if err != nil {
+		dashboardServerError(w, r, "using checkout link", err)
+		return
+	}
+	if !used {
+		renderCheckoutPage(w, r, http.StatusGone, dashboardView{Error: checkoutLinkExpiredMessage})
+		return
+	}
+	if route == billing.RouteSelf {
+		pay, err := s.oneTimeToken(purposePay, claims.UserID, code)
+		if err != nil {
+			dashboardServerError(w, r, "opening checkout", err)
+			return
+		}
+		redirectAway(w, r, checkoutLinkPath+"/"+pay)
+		return
+	}
+	target, err := s.merchantCheckout(r.Context(), claims.UserID,
+		s.cfg.PublicURL+checkoutLinkReturnPath+"?completion="+s.completionToken(claims.UserID)+"&session_id="+checkoutSessionID,
+		s.cfg.PublicURL+checkoutLinkCancelledPath)
+	switch {
+	case errors.Is(err, errAlreadySubscribed):
+		renderCheckoutPage(w, r, http.StatusOK, dashboardView{Notice: "You already have an active subscription. You can return to the app."})
+	case err != nil:
+		dashboardServerError(w, r, "creating checkout", err)
+	default:
+		redirectAway(w, r, target)
+	}
+}
+
 // handleCheckoutLinkCancelled is where an app's checkout is abandoned.
 func handleCheckoutLinkCancelled(w http.ResponseWriter, r *http.Request) {
 	renderCheckoutPage(w, r, http.StatusOK, dashboardView{Notice: "No payment was taken. You can close this page and return to the app."})
 }
 
-// handleCheckoutLinkSession uses an app's checkout link to open its one
-// checkout, answering with the session the page mounts.
+// handleCheckoutLinkSession uses a pay token to open its one checkout on
+// our page, answering with the session the page mounts.
 func (s *Server) handleCheckoutLinkSession(w http.ResponseWriter, r *http.Request) {
 	if s.custom() == nil {
 		httputil.WriteError(w, r, http.StatusNotFound, httputil.CodeNotFound, "Not found")
 		return
 	}
-	claims, ok := s.readCheckoutToken(chi.URLParam(r, "token"), purposeOpen)
+	claims, ok := s.readCheckoutToken(chi.URLParam(r, "token"), purposePay)
+	ok = ok && s.custom().Route(claims.Country) == billing.RouteSelf
 	if ok {
 		var err error
 		if ok, err = s.useCheckoutLink(r.Context(), claims); err != nil {
@@ -462,15 +739,13 @@ func (s *Server) handleCheckoutLinkSession(w http.ResponseWriter, r *http.Reques
 		httputil.WriteError(w, r, http.StatusGone, codeCheckoutLinkExpired, checkoutLinkExpiredMessage)
 		return
 	}
-	completion := s.signCheckoutToken(checkoutClaims{
-		Purpose: purposeComplete, UserID: claims.UserID, Expires: time.Now().Add(checkoutCompletionTTL).Unix(),
-	})
 	s.writeCheckoutSession(w, r, claims.UserID,
-		s.cfg.PublicURL+checkoutLinkReturnPath+"?completion="+completion+"&session_id="+checkoutSessionID)
+		s.cfg.PublicURL+checkoutLinkReturnPath+"?completion="+s.completionToken(claims.UserID)+"&session_id="+checkoutSessionID)
 }
 
-// handleCheckoutLinkReturn is where a checkout opened from a link ends. Its
-// completion token names the account the checkout must belong to.
+// handleCheckoutLinkReturn is where a checkout opened from a link ends, by
+// either route. Its completion token names the account the checkout must
+// belong to.
 func (s *Server) handleCheckoutLinkReturn(w http.ResponseWriter, r *http.Request) {
 	if s.custom() == nil {
 		renderCheckoutPage(w, r, http.StatusNotFound, dashboardView{Error: "Paying on the web is not available."})

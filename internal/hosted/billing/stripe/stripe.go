@@ -4,9 +4,13 @@
 // checkout creates carries the same sub, which is how webhooks and refreshes
 // find the account. Nothing is matched by email.
 //
-// Checkout is our own page: the server opens a Checkout Session in
-// ui_mode=elements, and the page mounts Stripe's Payment Element for the
-// card and confirms the session with Stripe.js. Webhooks
+// Checkout depends on the buyer's billing country. In the deployment's
+// self-payment countries it is our own page: the server opens a Checkout
+// Session in ui_mode=elements, and the page mounts Stripe's Payment Element
+// for the card and confirms the session with Stripe.js. Everywhere else
+// Stripe sells as merchant of record (Managed Payments), on its hosted
+// Checkout page, and handles the buyer's taxes; Stripe refuses a few
+// countries, which cannot pay on the web. Webhooks
 // (customer.subscription.created, .updated, .deleted) only say which
 // subscription changed; its state is always fetched from Stripe.
 package stripe
@@ -73,7 +77,16 @@ type Config struct {
 	// APIURL replaces Stripe's (STRIPE_API_URL, for tests); empty means
 	// Stripe's.
 	APIURL string
+	// SelfPaymentCountries are the billing countries, ISO 3166-1 alpha-2
+	// in upper case, that pay through our own checkout page
+	// (STRIPE_SELF_PAYMENT_COUNTRIES), with FUTO as merchant of record.
+	SelfPaymentCountries []string
 }
+
+// managedPaymentsRefused are the billing countries Stripe Managed Payments
+// does not sell to (docs.stripe.com/payments/managed-payments/eligibility,
+// "Restricted countries").
+var managedPaymentsRefused = []string{"AC", "CN", "CU", "IR", "KP", "RU", "SY", "TA", "XK"}
 
 // Provider is the Stripe web payment provider.
 type Provider struct {
@@ -396,6 +409,18 @@ func (p *Provider) Plan(ctx context.Context) (billing.Plan, error) {
 	return *p.plan, nil
 }
 
+// Route sends the self-payment countries to our page and every other
+// country Stripe Managed Payments sells to to Stripe's.
+func (p *Provider) Route(country string) billing.CheckoutRoute {
+	switch {
+	case slices.Contains(p.cfg.SelfPaymentCountries, country):
+		return billing.RouteSelf
+	case slices.Contains(managedPaymentsRefused, country):
+		return billing.RouteUnavailable
+	}
+	return billing.RouteMerchantOfRecord
+}
+
 // StartCheckout opens a Checkout Session for our page's Payment Element,
 // selling the plan to c. Everything the page must not offer is switched off
 // on the session itself, never left to the account's dashboard settings: it
@@ -432,6 +457,43 @@ func (p *Provider) StartCheckout(ctx context.Context, c billing.Customer, return
 		return billing.Checkout{}, errors.New("stripe api: checkout session without an id or client secret")
 	}
 	return billing.Checkout{ID: session.ID, ClientSecret: session.ClientSecret}, nil
+}
+
+// StartMerchantCheckout opens a Managed Payments Checkout Session on
+// Stripe's hosted page, selling the plan to c with Stripe as merchant of
+// record, and returns its URL. Stripe owns the rest of the session and
+// refuses the parameters our own checkout sets: Adaptive Pricing is always
+// on, the payment methods are Stripe's choice, and Stripe adds the tax due
+// on top of the price. The customer and the sub are ours, as on our page.
+func (p *Provider) StartMerchantCheckout(ctx context.Context, c billing.Customer, successURL, cancelURL string) (string, error) {
+	customer, err := p.customer(ctx, c)
+	if err != nil {
+		return "", err
+	}
+	form := url.Values{
+		"mode":                          {"subscription"},
+		"ui_mode":                       {"hosted_page"},
+		"managed_payments[enabled]":     {"true"},
+		"line_items[0][price]":          {p.cfg.PriceID},
+		"line_items[0][quantity]":       {"1"},
+		"customer":                      {customer},
+		"client_reference_id":           {c.Subject},
+		"metadata[" + metadataSub + "]": {c.Subject},
+		"subscription_data[metadata][" + metadataSub + "]": {c.Subject},
+		"success_url": {successURL},
+		"cancel_url":  {cancelURL},
+	}
+	var session struct {
+		ID  string `json:"id"`
+		URL string `json:"url"`
+	}
+	if err := p.call(ctx, http.MethodPost, "/checkout/sessions", form, "", &session); err != nil {
+		return "", err
+	}
+	if session.ID == "" || !strings.HasPrefix(session.URL, "https://") {
+		return "", errors.New("stripe api: hosted checkout session without an id or https url")
+	}
+	return session.URL, nil
 }
 
 // CompleteCheckout returns the subscription a completed Checkout Session

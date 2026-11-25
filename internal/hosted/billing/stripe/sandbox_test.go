@@ -296,3 +296,66 @@ func sandboxEvent(t *testing.T, s sandbox, subID string) []byte {
 		time.Sleep(2 * time.Second)
 	}
 }
+
+// TestSandboxManagedPayments opens a Managed Payments checkout in the
+// sandbox, which needs Managed Payments activated on the account and an
+// eligible tax code on the dev product. It needs STRIPE_TEST_SECRET_KEY_FILE
+// like TestSandbox, and expires the session and deletes the customer when
+// done.
+func TestSandboxManagedPayments(t *testing.T) {
+	key := readKeyFile(t, "STRIPE_TEST_SECRET_KEY_FILE")
+	if !strings.HasPrefix(key, "sk_test_") && !strings.HasPrefix(key, "rk_test_") {
+		t.Fatal("STRIPE_TEST_SECRET_KEY_FILE does not hold a test-mode secret key")
+	}
+	s := sandbox{t: t, key: key}
+	_, price := s.plan()
+	p := stripe.New(stripe.Config{
+		SecretKey: key, PublishableKey: "pk_test_unset", WebhookSecret: []byte("whsec_unused"), PriceID: price,
+		PublicURL: "https://notes.example.test",
+	})
+	subject := "s11-sandbox-" + uuid.NewV7().String()
+	target, err := p.StartMerchantCheckout(t.Context(), billing.Customer{Subject: subject, Email: "sandbox-test@example.com"},
+		"https://notes.example.test/dashboard/billing/return?session_id={CHECKOUT_SESSION_ID}", "https://notes.example.test/dashboard/billing/subscribe")
+	if err != nil {
+		t.Fatalf("StartMerchantCheckout: %v (is Managed Payments activated, and does the dev product have an eligible tax code?)", err)
+	}
+	id := strings.TrimPrefix(target, "https://checkout.stripe.com/c/pay/")
+	id, _, _ = strings.Cut(id, "#")
+	if !strings.HasPrefix(id, "cs_test_") {
+		t.Fatalf("hosted checkout URL %q", target)
+	}
+	var session struct {
+		Customer          string            `json:"customer"`
+		ClientReferenceID string            `json:"client_reference_id"`
+		UIMode            string            `json:"ui_mode"`
+		Mode              string            `json:"mode"`
+		Status            string            `json:"status"`
+		Metadata          map[string]string `json:"metadata"`
+		Currency          string            `json:"currency"`
+		ManagedPayments   struct {
+			Enabled bool `json:"enabled"`
+		} `json:"managed_payments"`
+		AdaptivePricing struct {
+			Enabled bool `json:"enabled"`
+		} `json:"adaptive_pricing"`
+	}
+	s.call(http.MethodGet, "/checkout/sessions/"+id, nil, &session)
+	t.Cleanup(func() {
+		s.call(http.MethodPost, "/checkout/sessions/"+id+"/expire", nil, nil)
+		s.call(http.MethodDelete, "/customers/"+session.Customer, nil, nil)
+	})
+	if !session.ManagedPayments.Enabled || session.UIMode != "hosted_page" || session.Mode != "subscription" || session.Status != "open" ||
+		session.ClientReferenceID != subject || session.Metadata["sub"] != subject || !session.AdaptivePricing.Enabled || session.Currency != "usd" {
+		t.Fatalf("session %s = %+v", id, session)
+	}
+	var cus struct {
+		Metadata map[string]string `json:"metadata"`
+	}
+	s.call(http.MethodGet, "/customers/"+session.Customer, nil, &cus)
+	if cus.Metadata["sub"] != subject {
+		t.Fatalf("customer = %+v", cus)
+	}
+	if _, err := p.CompleteCheckout(t.Context(), billing.Customer{Subject: subject}, id); !errors.Is(err, billing.ErrCheckoutIncomplete) {
+		t.Fatalf("CompleteCheckout of an open Managed Payments session = %v", err)
+	}
+}

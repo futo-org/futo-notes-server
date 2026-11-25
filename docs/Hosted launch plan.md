@@ -15,6 +15,7 @@ Status:
 | S4 | E | Done, in the same MR: the sender, templates, stamps and dev stack. Billing (S5) calls it. |
 | S5 | C | Done, in the MR stacked on S3/S4 (`feat/hosted-billing`): the model, gating, endpoints, webhooks, the mock web provider, the lapse and purge jobs, the emails, the dashboard, `/dev`, and the App Store and Play providers. |
 | S7 | C2 (web) | Done, stacked on S5: the Stripe web provider, our checkout page, matching by OIDC `sub` |
+| S11 | C2 (web) | Done, stacked on the dashboard redesign (`feat/hosted-billing-country`): web checkout asks for the billing country and routes by it, with Stripe Managed Payments outside the self-payment countries |
 
 ## Decisions (2026-11-17)
 
@@ -25,9 +26,9 @@ Status:
 | Hostnames | Prod `https://notes.futo.cloud`, staging `https://notes-staging.apps.futo.network`. |
 | Payment providers | **Pluggable.** The web provider is **Stripe**. App Store and Play are providers behind the same interface. |
 | Web customer matching | Each FUTO account is a Stripe Customer carrying `metadata.sub`, its OIDC `sub`; checkouts and subscriptions carry the same `sub`. **Never matched by email.** |
-| Web checkout | **Our own page** (Checkout Sessions with Stripe's Payment Element for the card), never a redirect to a Stripe-hosted page. USD, cards only. |
+| Web checkout | **Routed by billing country** (2026-11-17), asked first and prefilled from the browser's language. Countries in `STRIPE_SELF_PAYMENT_COUNTRIES` pay on **our own page** (Checkout Sessions with Stripe's Payment Element for the card; USD, cards only), with FUTO as merchant of record. **Every other country** goes to **Stripe Managed Payments** (Stripe as merchant of record) by a **redirect** to Stripe's hosted Checkout. Countries Managed Payments refuses (China, Cuba, Iran, Kosovo, North Korea, Russia, Syria, Ascension Island, Tristan da Cunha) that are not self-payment countries are told paying on the web isn't available yet. Other providers (Polar) may take routes later. |
 | Store rails | Web, App Store and Play subscriptions **all ship at launch**. |
-| Price | One flat plan: **$5/month** on the web, **$5.75/month** in the App Store and Play. |
+| Price | One flat plan: **$5/month** on the web (plus tax under Managed Payments, which adds it on top), **$5.75/month** in the App Store and Play. |
 | Lapse | The account turns **read-only** (writes get 402) and is **purged 90 days** after it lapses. |
 | Lapse and purge emails | Sent by a new mail sender with a **Resend** driver (E). |
 | Family Sharing | **Off** for the App Store subscription. |
@@ -287,6 +288,35 @@ type StoreProvider interface {
     its subscription at once. Webhooks carry every later change.
   - Status mapping, config and Stripe setup: `docs/Hosted deployment.md`,
     "Billing: web provider".
+  - **As built (S11): checkout routed by billing country.**
+    - `internal/hosted/country` holds the countries the step offers: the
+      249 ISO 3166-1 alpha-2 codes plus XK, AC and TA (which Managed
+      Payments names), with CLDR's English names, and the prefill: the
+      first language in `Accept-Language` with an explicit region
+      (`en-GB` is GB; a bare `en` names none). No IP lookup.
+    - `CustomCheckout` gained `Route(country)` (`RouteSelf`,
+      `RouteMerchantOfRecord`, `RouteUnavailable`) and
+      `StartMerchantCheckout`. Stripe routes `STRIPE_SELF_PAYMENT_COUNTRIES`
+      to our page, the countries Managed Payments refuses to "unavailable",
+      and the rest to a Checkout Session with `managed_payments[enabled]=true`,
+      `ui_mode=hosted_page` (the hosted value at the pinned version), the
+      same price, customer, `client_reference_id` and `metadata.sub`, and
+      none of the parameters Managed Payments forbids. Its return confirms
+      it exactly like ours.
+    - Dashboard: Subscribe shows the country step in the overview; Checkout
+      (`POST /dashboard/billing/subscribe`, CSRF) re-checks the country,
+      then shows our panel (`?country=` in its URLs, which the session
+      endpoint re-checks too), redirects to Stripe (`HX-Redirect`), or says
+      the country cannot pay. Cancelling on Stripe's page returns to the
+      step with the country chosen.
+    - App link: opening `/billing/checkout/<token>` shows the step and uses
+      nothing. Posting Checkout uses the link: a self-payment country
+      redirects to `/billing/checkout/<pay token>` (one-time, 15 minutes,
+      bound to the country), which mounts our panel as before; any other
+      sends the browser to Stripe. An unknown or refused country leaves
+      the link unused.
+    - The mock web provider is not a `CustomCheckout`, so its flow and
+      `POST /api/billing/checkout`'s `{url}` are unchanged.
 
 ### C3. Endpoints
 
@@ -386,7 +416,7 @@ As built (S5a):
 
 - **Web provider:** its kind, plus its URL, key and webhook secret. As built:
   `BILLING_WEB_PROVIDER=stripe`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`,
-  `STRIPE_PRICE_ID`, `STRIPE_PUBLISHABLE_KEY`.
+  `STRIPE_PRICE_ID`, `STRIPE_PUBLISHABLE_KEY`, `STRIPE_SELF_PAYMENT_COUNTRIES`.
 - **Apple:** bundle id, issuer, key id, `.p8` key, product ids, and whether to
   accept sandbox (App Review uses sandbox).
 - **Play:** package name, service account, product ids, and the RTDN audience and

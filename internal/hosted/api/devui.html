@@ -141,10 +141,15 @@ third note</textarea></div>
     <h2>Billing</h2>
     <p class="muted">With <code>BILLING_WEB_PROVIDER=mock</code> the web checkout and portal are pages of this API; completing one
       sends a signed webhook through <code>/api/billing/webhooks/web</code>. With <code>BILLING_WEB_PROVIDER=stripe</code> and sandbox
-      keys (docs/DEVELOPMENT.md), checkout is our own page with Stripe's card fields (USD, cards only): "Open checkout" opens the
-      one-time page an app gets, "Dashboard checkout panel" the panel the dashboard swaps in; pay with card 4242 4242 4242 4242,
-      any future date and CVC (4000 0000 0000 0002 is declined, 4000 0025 0000 3155 asks for 3-D Secure).
-      The account is entitled as soon as the checkout completes; <code>stripe listen</code> forwards later changes.
+      keys (docs/DEVELOPMENT.md), checkout first asks for the billing country, prefilled from the browser's language (en-GB is the
+      United Kingdom). Countries in <code>STRIPE_SELF_PAYMENT_COUNTRIES</code> pay on our own page with Stripe's card fields (USD,
+      cards only); every other country is sent to Stripe's hosted page, where Stripe is merchant of record (Managed Payments, plus
+      tax); China, Cuba, Iran, Kosovo, North Korea, Russia, Syria, Ascension Island and Tristan da Cunha cannot pay on the web.
+      "Open checkout" opens the one-time page an app gets (the link is used by its Checkout, not by opening it), the
+      "Dashboard country step" links the dashboard's, with a country chosen (a self-payment country opens our panel at once);
+      pay with card 4242 4242 4242 4242, any future date and CVC (4000 0000 0000 0002 is declined, 4000 0025 0000 3155 asks for
+      3-D Secure; on Stripe's page, Link's test passcode is 000000).
+      The account is entitled as soon as the checkout completes, by either route; <code>stripe listen</code> forwards later changes.
       Without a subscription, writes answer 402 and storage
       tokens are read-only (exchange again after subscribing). Synthetic events act on the signed-in user's subscriptions directly:
       grant adds a 30-day web one; lapse reports them expired; expire lets their paid period end with no news; refund revokes them.
@@ -155,7 +160,12 @@ third note</textarea></div>
       <button id="checkout-open">Open checkout</button>
       <button id="checkout-complete">Complete a mock checkout now</button>
       <button id="portal-open">Open portal</button>
-      <a href="/dashboard/billing/subscribe" target="_blank" rel="noopener">Dashboard checkout panel</a>
+    </div>
+    <div class="row">
+      <a href="/dashboard/billing/subscribe" target="_blank" rel="noopener">Dashboard country step</a>
+      <a href="/dashboard/billing/subscribe?country=US" target="_blank" rel="noopener">… United States</a>
+      <a href="/dashboard/billing/subscribe?country=DE" target="_blank" rel="noopener">… Germany</a>
+      <a href="/dashboard/billing/subscribe?country=RU" target="_blank" rel="noopener">… Russia (not available)</a>
     </div>
     <div class="row">
       <button data-billing-event="grant">Grant</button>

@@ -25,6 +25,7 @@ import (
 	"futo-notes-server/internal/hosted/account"
 	"futo-notes-server/internal/hosted/billing"
 	"futo-notes-server/internal/hosted/config"
+	"futo-notes-server/internal/hosted/country"
 	"futo-notes-server/internal/syncapi"
 )
 
@@ -160,13 +161,15 @@ type dashboardView struct {
 	// WebPayments reports that a web provider is configured.
 	WebPayments bool
 	// CustomCheckout reports that the web provider's checkout is a page
-	// of ours, so Subscribe opens it in place.
+	// of ours, so Subscribe asks for the billing country in place.
 	CustomCheckout bool
 	// CheckoutHost makes the page able to mount custom checkout: it
 	// loads the provider's script and is served checkoutCSP.
 	CheckoutHost *checkoutHost
 	// Checkout is the custom checkout panel to show.
 	Checkout *checkoutPanel
+	// CountryStep is the billing country step to show, before checkout.
+	CountryStep *countryStep
 	// Notice confirms what just happened.
 	Notice string
 	// Subscribed confirms a checkout that entitled the account.
@@ -198,6 +201,7 @@ func (s *Server) dashboardActions() []dashboardAction {
 		{dashboardPath + "/restore", "POST /api/account/restore", s.handleDashboardRestore},
 		{dashboardPath + "/sign-out", "POST /api/auth/logout", s.handleDashboardSignOut},
 		{dashboardPath + "/billing/checkout", "POST /api/billing/checkout", s.handleDashboardCheckout},
+		{subscribePath, "POST /api/billing/checkout", s.handleDashboardChooseCountry},
 		{dashboardPath + "/billing/portal", "GET /api/billing/portal", s.handleDashboardPortal},
 	}
 }
@@ -209,6 +213,7 @@ func (s *Server) dashboardRoutes(r chi.Router) {
 		d.Get(dashboardPath+"/static/{name}", handleDashboardAsset)
 		d.Get(signInPath, handleDashboardSignIn)
 		d.Get(checkoutLinkPath+"/{token}", s.handleCheckoutLinkPage)
+		d.Post(checkoutLinkPath+"/{token}", s.handleCheckoutLinkCountry)
 		d.Post(checkoutLinkPath+"/{token}/session", s.handleCheckoutLinkSession)
 		d.Get(checkoutLinkReturnPath, s.handleCheckoutLinkReturn)
 		d.Get(checkoutLinkCancelledPath, handleCheckoutLinkCancelled)
@@ -453,11 +458,17 @@ func (s *Server) renderOverview(w http.ResponseWriter, r *http.Request, a accoun
 }
 
 // handleDashboardCheckout is the dashboard's POST /api/billing/checkout. A
-// custom checkout's panel calls it for the session it mounts; otherwise it
-// sends the browser to the web checkout.
+// custom checkout's panel calls it for the session it mounts, for a
+// self-payment billing country (?country=); otherwise it sends the browser
+// to the web checkout.
 func (s *Server) handleDashboardCheckout(w http.ResponseWriter, r *http.Request) {
 	userID := principalFrom(r).Session.User.ID
 	if s.custom() != nil {
+		code, ok := country.Parse(r.URL.Query().Get("country"))
+		if !ok || s.custom().Route(code) != billing.RouteSelf {
+			badRequest(w, r, "Choose your billing country again.")
+			return
+		}
 		s.writeCheckoutSession(w, r, userID, s.cfg.PublicURL+checkoutReturnPath+"?session_id="+checkoutSessionID)
 		return
 	}

@@ -58,6 +58,7 @@ set. The secret key and webhook secret come from the Secret. */}}
   (dict "name" "BILLING_WEB_PROVIDER" "value" "stripe")
   (dict "name" "STRIPE_PRICE_ID" "value" .priceId)
   (dict "name" "STRIPE_PUBLISHABLE_KEY" "value" .publishableKey)
+  (dict "name" "STRIPE_SELF_PAYMENT_COUNTRIES" "value" (join "," (.selfPaymentCountries | default list)))
 }}
 {{- end }}
 {{- end }}

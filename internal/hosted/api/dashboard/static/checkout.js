@@ -1,3 +1,8 @@
+// Drives the billing country step ([data-country-step]): as the country
+// changes, it shows what the chosen country's route means (tax added on
+// Stripe's page, or no web payment at all) and hides Checkout where it
+// cannot be used. The server decides the route again when it is posted.
+//
 // Mounts our checkout in every [data-checkout] panel, on page load and
 // whenever htmx swaps one in. The panel's session URL opens a Stripe
 // Checkout Session (ui_mode=elements); Stripe's Payment Element collects the
@@ -237,9 +242,26 @@
     });
   }
 
+  function countryStep(form) {
+    if (form.dataset.bound) return;
+    form.dataset.bound = "true";
+    const select = form.querySelector("[data-country-select]");
+    const submit = form.querySelector("[data-country-submit]");
+    const update = () => {
+      const option = select.selectedOptions[0];
+      const route = (option && option.dataset.route) || "";
+      form.querySelectorAll("[data-route-note]").forEach((el) => { el.hidden = el.dataset.routeNote !== route; });
+      submit.hidden = route === "unavailable";
+    };
+    select.addEventListener("change", update);
+    update();
+  }
+
   function scan(root) {
     if (root.matches && root.matches("[data-checkout]")) mount(root);
     if (root.querySelectorAll) root.querySelectorAll("[data-checkout]").forEach(mount);
+    if (root.matches && root.matches("[data-country-step]")) countryStep(root);
+    if (root.querySelectorAll) root.querySelectorAll("[data-country-step]").forEach(countryStep);
   }
 
   document.addEventListener("DOMContentLoaded", () => scan(document));
