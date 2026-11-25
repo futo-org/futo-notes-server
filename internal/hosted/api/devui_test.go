@@ -13,6 +13,7 @@ func TestDevRoutesAbsentWithoutDevUI(t *testing.T) {
 	for _, request := range []struct{ method, path string }{
 		{http.MethodGet, "/dev"},
 		{http.MethodGet, "/dev/signup"},
+		{http.MethodGet, "/dev/storekit"},
 		{http.MethodPost, "/dev/jobs/blob-gc"},
 		{http.MethodPost, "/dev/jobs/account-purge"},
 		{http.MethodPost, "/dev/jobs/reconciliation"},

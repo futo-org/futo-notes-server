@@ -5,17 +5,22 @@
 // Family Sharing is off for the subscription, so a transaction whose
 // inAppOwnershipType is not PURCHASED never entitles: Submit refuses it and
 // Verify and Refresh ignore it.
+//
+// In development, AcceptXcode admits transactions from Xcode's StoreKit
+// testing, which Apple neither signs nor knows about (see Config).
 package appstore
 
 import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
 
 	"futo-notes-server/internal/hosted/billing"
@@ -42,13 +47,23 @@ type Config struct {
 	SandboxURL    string
 	// Roots replaces the trust anchor; nil means Apple Root CA - G3.
 	Roots *x509.CertPool
+	// AcceptXcode admits transactions whose environment is Xcode: StoreKit
+	// testing in Xcode signs them with a local certificate, so, as in
+	// Apple's App Store Server Library, their signature is not checked,
+	// and Apple has no record of them, so Submit takes the transaction
+	// itself as the subscription's state. Development only: anyone can
+	// forge one. Transactions of other environments are verified as
+	// always.
+	AcceptXcode bool
 }
 
 // Provider is the App Store payment source.
 type Provider struct {
 	cfg      Config
 	verifier verifier
-	api      *apiClient
+	// api is nil without an In-App Purchase key: then only Xcode
+	// transactions can be submitted, and nothing refreshed.
+	api *apiClient
 }
 
 var _ billing.StoreProvider = (*Provider)(nil)
@@ -64,17 +79,17 @@ func New(cfg Config) *Provider {
 	if cfg.Roots == nil {
 		cfg.Roots = AppleRoots()
 	}
-	return &Provider{
-		cfg:      cfg,
-		verifier: verifier{roots: cfg.Roots},
-		api: &apiClient{
+	p := &Provider{cfg: cfg, verifier: verifier{roots: cfg.Roots}}
+	if cfg.PrivateKey != nil {
+		p.api = &apiClient{
 			http:     &http.Client{Timeout: requestTimeout},
 			issuerID: cfg.IssuerID,
 			keyID:    cfg.KeyID,
 			bundleID: cfg.BundleID,
 			key:      cfg.PrivateKey,
-		},
+		}
 	}
+	return p
 }
 
 // Source is billing.SourceAppStore.
@@ -84,6 +99,7 @@ func (p *Provider) Source() billing.Source { return billing.SourceAppStore }
 const (
 	appleProduction = "Production"
 	appleSandbox    = "Sandbox"
+	appleXcode      = "Xcode"
 )
 
 // transaction is JWSTransactionDecodedPayload, as far as billing reads it.
@@ -125,7 +141,7 @@ var errIgnored = errors.New("app store: transaction not tracked")
 func (p *Provider) decode(signedTx, signedRenewal string) (signed, error) {
 	var s signed
 	var err error
-	if s.txRaw, err = p.verifier.verify(signedTx, &s.tx); err != nil {
+	if s.txRaw, err = p.verifyTransaction(signedTx, &s.tx); err != nil {
 		return signed{}, err
 	}
 	if signedRenewal != "" {
@@ -144,10 +160,46 @@ func (p *Provider) decode(signedTx, signedRenewal string) (signed, error) {
 		return signed{}, fmt.Errorf("%w: product %q", errIgnored, s.tx.ProductID)
 	case s.tx.InAppOwnershipType != "PURCHASED":
 		return signed{}, fmt.Errorf("%w: ownership %q", errIgnored, s.tx.InAppOwnershipType)
-	case s.tx.Environment != appleProduction && (s.tx.Environment != appleSandbox || !p.cfg.AcceptSandbox):
+	case !p.acceptsEnvironment(s.tx.Environment):
 		return signed{}, fmt.Errorf("%w: environment %q", errIgnored, s.tx.Environment)
 	}
 	return s, nil
+}
+
+// acceptsEnvironment reports whether transactions of the App Store
+// environment env are tracked.
+func (p *Provider) acceptsEnvironment(env string) bool {
+	switch env {
+	case appleProduction:
+		return true
+	case appleSandbox:
+		return p.cfg.AcceptSandbox
+	case appleXcode:
+		return p.cfg.AcceptXcode
+	}
+	return false
+}
+
+// verifyTransaction verifies a signed transaction and decodes it into v.
+// With AcceptXcode, one whose payload says it is from Xcode is decoded
+// without checking its signature, which no Apple certificate made.
+func (p *Provider) verifyTransaction(signedTx string, v *transaction) (json.RawMessage, error) {
+	if p.cfg.AcceptXcode {
+		parts := strings.Split(signedTx, ".")
+		if len(parts) == 3 {
+			payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+			var env struct {
+				Environment string `json:"environment"`
+			}
+			if err == nil && json.Unmarshal(payload, &env) == nil && env.Environment == appleXcode {
+				if err := json.Unmarshal(payload, v); err != nil {
+					return nil, fmt.Errorf("%w: payload: %w", errSignature, err)
+				}
+				return payload, nil
+			}
+		}
+	}
+	return p.verifier.verify(signedTx, v)
 }
 
 // event is the subscription s describes, in status as of eventAt.
@@ -167,8 +219,11 @@ func (p *Provider) event(s signed, status billing.Status, eventAt int64, raw jso
 		EventAt:      time.UnixMilli(eventAt),
 		Raw:          raw,
 	}
-	if s.tx.Environment == appleSandbox {
+	switch s.tx.Environment {
+	case appleSandbox:
 		ev.Environment = billing.EnvironmentSandbox
+	case appleXcode:
+		ev.Environment = billing.EnvironmentXcode
 	}
 	if status == billing.StatusGrace {
 		ev.GraceUntil = millis(s.renewal.GracePeriodExpiresDate)
@@ -206,11 +261,25 @@ func statusCode(code int) (billing.Status, bool) {
 // signed productId is authoritative; p.ProductID is not read. The event's
 // AccountToken is the submitted transaction's appAccountToken, empty when it
 // has none: offer-code redemptions can carry none, and refusing them would
-// leave the transaction unfinished on the device forever.
+// leave the transaction unfinished on the device forever. An Xcode
+// transaction is its own subscription state, as of its signedDate, and
+// Apple is not asked: it has no record of it. Without the renewal info,
+// which the app does not submit, it is reported as not renewing.
 func (p *Provider) Submit(ctx context.Context, purchase billing.Purchase) (billing.Event, error) {
 	s, err := p.decode(purchase.Token, "")
 	if err != nil {
 		return billing.Event{}, fmt.Errorf("%w: %w", billing.ErrInvalidPurchase, err)
+	}
+	if s.tx.Environment == appleXcode {
+		raw, err := json.Marshal(map[string]any{"transaction": s.txRaw})
+		if err != nil {
+			return billing.Event{}, err
+		}
+		status := fallbackStatus(0, s.tx.ExpiresDate, s.tx.SignedDate)
+		return p.event(s, status, s.tx.SignedDate, raw), nil
+	}
+	if p.api == nil {
+		return billing.Event{}, fmt.Errorf("%w: %s transaction without an In-App Purchase key to confirm it", billing.ErrInvalidPurchase, s.tx.Environment)
 	}
 	base := p.cfg.ProductionURL
 	if s.tx.Environment == appleSandbox {
@@ -229,8 +298,12 @@ func (p *Provider) Submit(ctx context.Context, purchase billing.Purchase) (billi
 
 // Refresh fetches the subscription with this originalTransactionId from the
 // App Store Server API: production first, then sandbox when it is accepted
-// and production does not know the transaction.
+// and production does not know the transaction. Xcode transactions have
+// nothing to refresh from; reconciliation leaves them alone.
 func (p *Provider) Refresh(ctx context.Context, originalTransactionID string) (billing.Event, error) {
+	if p.api == nil {
+		return billing.Event{}, errors.New("app store: no In-App Purchase key to call the App Store Server API with")
+	}
 	ev, err := p.lookup(ctx, p.cfg.ProductionURL, originalTransactionID)
 	if errors.Is(err, errNotFound) && p.cfg.AcceptSandbox {
 		ev, err = p.lookup(ctx, p.cfg.SandboxURL, originalTransactionID)

@@ -43,6 +43,23 @@ func (s *Server) handleDevSignup(w http.ResponseWriter, r *http.Request) {
 	httputil.WriteJSON(w, r, http.StatusOK, devSignup{Restricted: len(s.cfg.AllowedEmailDomains) > 0})
 }
 
+// devStoreKit is whether APPLE_STOREKIT_XCODE accepts Xcode StoreKit
+// testing purchases, and for which app.
+type devStoreKit struct {
+	Xcode    bool   `json:"xcode"`
+	BundleID string `json:"bundle_id,omitempty"`
+}
+
+// handleDevStoreKit serves GET /dev/storekit, for /dev to show whether an
+// iOS simulator's Xcode StoreKit purchase can entitle an account.
+func (s *Server) handleDevStoreKit(w http.ResponseWriter, r *http.Request) {
+	var body devStoreKit
+	if a := s.cfg.AppStore; a != nil && a.AcceptXcode {
+		body = devStoreKit{Xcode: true, BundleID: a.BundleID}
+	}
+	httputil.WriteJSON(w, r, http.StatusOK, body)
+}
+
 // devJobRoutes mounts POST /dev/jobs/*, which run a storage job or the
 // pairing sweep (and, in devBillingRoutes, a billing job) at once on this
 // replica, outside the schedule, its advisory

@@ -136,3 +136,49 @@ func TestLoadStoresRejects(t *testing.T) {
 		}
 	}
 }
+
+func TestStoreKitXcode(t *testing.T) {
+	env := validEnv(t)
+	env["DEV_UI"] = "true"
+	env["APPLE_STOREKIT_XCODE"] = "true"
+	cfg, err := config.Load(getenv(env))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := cfg.AppStore
+	if a == nil || !a.AcceptXcode || a.BundleID != "com.futo.notes.dev" || a.PrivateKey != nil ||
+		!slices.Equal(a.ProductIDs, []string{"com.futo.notes.sync.monthly"}) {
+		t.Fatalf("xcode only: app store = %+v", a)
+	}
+
+	maps.Copy(env, appleEnv(t))
+	if cfg, err = config.Load(getenv(env)); err != nil {
+		t.Fatal(err)
+	}
+	if a = cfg.AppStore; !a.AcceptXcode || a.BundleID != "tech.futo.notes" || a.PrivateKey == nil {
+		t.Fatalf("with an app: app store = %+v", a)
+	}
+
+	delete(env, "APPLE_STOREKIT_XCODE")
+	if cfg, err = config.Load(getenv(env)); err != nil || cfg.AppStore.AcceptXcode {
+		t.Fatalf("default: %+v, %v", cfg.AppStore, err)
+	}
+
+	for name, change := range map[string]map[string]string{
+		"without DEV_UI": {"DEV_UI": ""},
+		"DEV_UI false":   {"DEV_UI": "false"},
+	} {
+		env := validEnv(t)
+		env["APPLE_STOREKIT_XCODE"] = "true"
+		maps.Copy(env, change)
+		if _, err := config.Load(getenv(env)); err == nil || !strings.Contains(err.Error(), "APPLE_STOREKIT_XCODE") {
+			t.Errorf("%s: err = %v", name, err)
+		}
+	}
+	env = validEnv(t)
+	env["DEV_UI"] = "true"
+	env["APPLE_STOREKIT_XCODE"] = "maybe"
+	if _, err := config.Load(getenv(env)); err == nil || !strings.Contains(err.Error(), "APPLE_STOREKIT_XCODE") {
+		t.Errorf("bad flag: err = %v", err)
+	}
+}

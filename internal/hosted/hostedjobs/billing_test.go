@@ -324,6 +324,9 @@ func TestReconcileEntitlements(t *testing.T) {
 	e.exec(`UPDATE entitlements SET updated_at = now() - interval '20 days' WHERE external_id = $1`, expired.ExternalID)
 	broken := e.subscribe(userID, billing.StatusActive, now.Add(time.Hour), now)
 	e.web.failing[broken.ExternalID] = true
+	// Xcode StoreKit testing subscriptions have no provider to ask.
+	xcode := e.subscribe(userID, billing.StatusActive, now.Add(time.Hour), now)
+	e.exec(`UPDATE entitlements SET environment = 'xcode' WHERE external_id = $1`, xcode.ExternalID)
 
 	result, err := hostedjobs.ReconcileEntitlements(t.Context(), e.b.Store, e.b.Providers)
 	if err == nil || result.Failed != 1 {
@@ -334,7 +337,7 @@ func TestReconcileEntitlements(t *testing.T) {
 			t.Errorf("%s was not refreshed", id)
 		}
 	}
-	for _, id := range []string{fresh.ExternalID, expired.ExternalID} {
+	for _, id := range []string{fresh.ExternalID, expired.ExternalID, xcode.ExternalID} {
 		if slices.Contains(e.web.refreshed, id) {
 			t.Errorf("%s was refreshed", id)
 		}

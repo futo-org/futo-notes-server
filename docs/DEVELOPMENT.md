@@ -279,6 +279,41 @@ STRIPE_TEST_PUBLISHABLE_KEY_FILE=~/.config/futo-notes/stripe-sandbox.publishable
 They create customers, a subscription and sessions under a fresh test `sub`
 and delete or expire them when done.
 
+### App Store purchases from Xcode
+
+`APPLE_STOREKIT_XCODE=true` lets a purchase made in the iOS simulator with
+Xcode's StoreKit testing entitle an account, with no App Store Connect app or
+key. The API refuses it without `DEV_UI=true`. With no `APPLE_*` app
+configured it turns the App Store rail on for the Debug build,
+`com.futo.notes.dev`, and its subscription `com.futo.notes.sync.monthly`
+(with one configured, for `APPLE_BUNDLE_ID` and its products). It accepts
+only transactions whose `environment` is `Xcode`: their signature is not
+checked (Xcode signs them with a local certificate, and Apple's own library
+skips them too) and Apple is never called, so the submitted transaction is
+the subscription's state. Every other transaction is verified as always,
+and without an App Store app is refused.
+
+```bash
+APPLE_STOREKIT_XCODE=true mise run api:dev
+```
+
+In the client repo, open the generated `FutoNotesNative` project, then in
+Product > Scheme > Edit Scheme > Run:
+
+- Options: StoreKit Configuration is `FutoNotes.storekit` (the scheme
+  generated from `apps/ios/project.yml` already sets it).
+- Arguments > Environment Variables: `FUTO_HOSTED_SERVER` =
+  `http://localhost:3005` (the simulator shares the Mac's network).
+
+Run the Debug build on a simulator, sign in, and subscribe: the app posts the
+transaction to `/api/billing/app-store/transactions` and the account is
+entitled at once. `/dev` shows whether the mode is on. Nothing renews or
+expires the subscription on the server's side: reconciliation skips Xcode
+rows (`environment = xcode`), so the account is entitled until the
+transaction's `expiresDate`, unless the app submits a later transaction.
+Refunds and expiry made in Xcode's Transaction Manager reach the server only
+when the app submits the changed transaction.
+
 ### End-to-end scenario
 
 `e2e/hosted` builds `cmd/mock-oidc`, `cmd/storage` and `cmd/api`, runs them as

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"net/mail"
 	"strconv"
@@ -24,8 +25,17 @@ var (
 	}
 )
 
+// The app and product Xcode StoreKit testing buys with when no App Store app
+// is configured: the iOS app's Debug build and its subscription.
+const (
+	xcodeBundleID  = "com.futo.notes.dev"
+	xcodeProductID = "com.futo.notes.sync.monthly"
+)
+
 // loadStores reads the App Store and Google Play billing providers into
 // cfg.AppStore and cfg.Play, leaving either nil when it is not configured.
+// APPLE_STOREKIT_XCODE, development only, also accepts Xcode StoreKit
+// testing transactions, for the configured app or else the Debug build.
 func loadStores(getenv Getenv, cfg *Config) error {
 	on, err := storeConfigured(getenv, "App Store", appleRequired)
 	if err != nil {
@@ -35,6 +45,19 @@ func loadStores(getenv Getenv, cfg *Config) error {
 		if cfg.AppStore, err = loadAppStore(getenv); err != nil {
 			return err
 		}
+	}
+	xcode, err := hostedenv.Bool(getenv, "APPLE_STOREKIT_XCODE", false)
+	if err != nil {
+		return err
+	}
+	if xcode {
+		if !cfg.DevUI {
+			return errors.New("APPLE_STOREKIT_XCODE accepts unsigned StoreKit test purchases and needs DEV_UI=true")
+		}
+		if cfg.AppStore == nil {
+			cfg.AppStore = &appstore.Config{BundleID: xcodeBundleID, ProductIDs: []string{xcodeProductID}}
+		}
+		cfg.AppStore.AcceptXcode = true
 	}
 	if on, err = storeConfigured(getenv, "Google Play", playRequired); err != nil {
 		return err

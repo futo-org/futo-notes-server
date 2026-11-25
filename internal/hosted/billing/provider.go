@@ -44,6 +44,10 @@ type Environment string
 const (
 	EnvironmentProduction Environment = "production"
 	EnvironmentSandbox    Environment = "sandbox"
+	// EnvironmentXcode is Xcode's StoreKit testing, accepted only in
+	// development. No provider knows its subscriptions, so reconciliation
+	// skips them.
+	EnvironmentXcode Environment = "xcode"
 )
 
 // Event is one provider's view of one subscription at EventAt. The store keeps

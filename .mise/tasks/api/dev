@@ -33,6 +33,9 @@ export DEV_UI="${DEV_UI:-true}"
 # pages. Set BILLING_WEB_PROVIDER= (empty) to run with billing off.
 export BILLING_WEB_PROVIDER="${BILLING_WEB_PROVIDER-mock}"
 export BILLING_MOCK_WEBHOOK_SECRET="${BILLING_MOCK_WEBHOOK_SECRET:-dev-mock-webhook-secret}"
+# APPLE_STOREKIT_XCODE=true accepts the iOS simulator's Xcode StoreKit
+# testing purchases (docs/DEVELOPMENT.md, "App Store purchases from Xcode").
+export APPLE_STOREKIT_XCODE="${APPLE_STOREKIT_XCODE:-false}"
 export OTLP_METRICS_ENDPOINT="${OTLP_METRICS_ENDPOINT:-localhost:8428}"
 export OTLP_METRICS_URL_PATH="${OTLP_METRICS_URL_PATH:-/opentelemetry/v1/metrics}"
 export DRAIN_DELAY_MS="${DRAIN_DELAY_MS:-0}"
