@@ -25,6 +25,14 @@ test:go:
   services:
     - name: postgres:16@sha256:dd2bf3ce2dc83a81674cf7f217fcfd8a5009a4b325dda5b843bfee82a06cff6f
       alias: postgres
+    # Same image as compose.hosted.yml.
+    - name: cgr.dev/chainguard/minio@sha256:1ec745a06a986762f89e68e855fc189f403941eff8c0a5f94767e92c8e39d3f5
+      alias: minio
+      command: ["server", "/tmp/data"]
+      variables:
+        MINIO_ROOT_USER: minio
+        MINIO_ROOT_PASSWORD: miniominio
+        _MINIO_DRIVE_ACTIVE_MONITORING: "off"
   variables:
     POSTGRES_USER: futo_notes
     POSTGRES_PASSWORD: ci
@@ -35,16 +43,57 @@ test:go:
     BLOBS_TEST_DATABASE_URL: postgres://futo_notes:ci@postgres:5432/blobs_test
     SERVER_TEST_DATABASE_URL: postgres://futo_notes:ci@postgres:5432/server_test
     MIGRATION_TEST_DATABASE_URL: postgres://futo_notes:ci@postgres:5432/migration_test
+    HOSTED_TEST_DATABASE_URL: postgres://futo_notes:ci@postgres:5432/hosted_test
+    HOSTED_E2E_DATABASE_URL: postgres://futo_notes:ci@postgres:5432/hosted_e2e
+    S3_TEST_ENDPOINT: http://minio:9000
+    S3_TEST_ACCESS_KEY_ID: minio
+    S3_TEST_SECRET_ACCESS_KEY: miniominio
+    S3_TEST_REGION: us-east-1
   before_script:
     - apt-get update && apt-get install -y --no-install-recommends postgresql-client
     - |
-      for db in objects_test events_test jobs_test blobs_test server_test migration_test; do
+      for db in objects_test events_test jobs_test blobs_test server_test migration_test hosted_test hosted_e2e; do
         PGPASSWORD=ci createdb -h postgres -U futo_notes "$db"
+      done
+    # One bucket per storage region, created with a SigV4-signed PUT, so the
+    # job needs no MinIO client.
+    - |
+      for _ in $(seq 1 60); do
+        curl -sf "$S3_TEST_ENDPOINT/minio/health/ready" && break
+        sleep 1
+      done
+      for bucket in notes-us-east notes-eu-central notes-ap-southeast; do
+        curl -sSf -X PUT --aws-sigv4 "aws:amz:$S3_TEST_REGION:s3" \
+          --user "$S3_TEST_ACCESS_KEY_ID:$S3_TEST_SECRET_ACCESS_KEY" "$S3_TEST_ENDPOINT/$bucket"
       done
   script:
     - go test -race ./...
     - go vet ./...
     - go run ./cmd/compare -engine-parity -mode dev -postgres "postgres://futo_notes:$POSTGRES_PASSWORD@postgres:5432/futo_notes"
+
+lint:go:
+  extends: .skip-soak-schedule
+  stage: test
+  image: golangci/golangci-lint:v2.15.0@sha256:fbfcfd12a6f8d7f1b97b3362ca80fc2a244d46863148c73cb88e7793af96c481
+  script:
+    - golangci-lint run ./...
+
+.mise:
+  image:
+    name: jdxcode/mise:2026.11.8-debian@sha256:05360b08fb68ace24d4814adaa6f36371584f6931782ead4891872049667af5a
+    entrypoint: [""]
+  variables:
+    MISE_TRUSTED_CONFIG_PATHS: $CI_PROJECT_DIR
+    MISE_YES: "1"
+
+k8s:validate:
+  extends:
+    - .skip-soak-schedule
+    - .mise
+  stage: test
+  script:
+    - mise install helm kubeconform
+    - mise run k8s:validate
 
 test:image:
   extends: .skip-soak-schedule
@@ -63,6 +112,30 @@ test:image:
     # fix on the next build, so re-running the pipeline is the remedy. The socket
     # mount resolves on the dind daemon, which is where the image was built.
     - docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.76.2@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 futo-notes-server:ci
+
+test:storage-image:
+  extends: .skip-soak-schedule
+  stage: test
+  image: docker:29@sha256:4bbc7223f81db790097c6dea42fb93e05b8fead4f0431fbe6ccaba6e8473201c
+  services:
+    - docker:29-dind@sha256:4bbc7223f81db790097c6dea42fb93e05b8fead4f0431fbe6ccaba6e8473201c
+  variables:
+    DOCKER_TLS_CERTDIR: /certs
+  script:
+    - docker build -f cmd/storage/Dockerfile --build-arg VERSION="$CI_COMMIT_SHORT_SHA" -t futo-notes-storage:ci .
+    - docker image inspect futo-notes-storage:ci --format '{{.Architecture}} {{.Size}}'
+
+test:api-image:
+  extends: .skip-soak-schedule
+  stage: test
+  image: docker:29@sha256:4bbc7223f81db790097c6dea42fb93e05b8fead4f0431fbe6ccaba6e8473201c
+  services:
+    - docker:29-dind@sha256:4bbc7223f81db790097c6dea42fb93e05b8fead4f0431fbe6ccaba6e8473201c
+  variables:
+    DOCKER_TLS_CERTDIR: /certs
+  script:
+    - docker build -f cmd/api/Dockerfile --build-arg VERSION="$CI_COMMIT_SHORT_SHA" -t futo-notes-api:ci .
+    - docker image inspect futo-notes-api:ci --format '{{.Architecture}} {{.Size}}'
 
 # This is the cutover gate, not a unit approximation. It creates databases with
 # the current and historical TypeScript servers, drives them with the native
@@ -205,6 +278,84 @@ publish:image:
     - if: '$CI_PIPELINE_SOURCE == "schedule" && $FUTO_SOAK_CHECK == "true"'
       when: never
     - if: $CI_COMMIT_TAG
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# Hosted images and charts go to oci.futo.org, logged in with the masked
+# OCI_REGISTRY_USER / OCI_REGISTRY_PASSWORD variables; Docker Hub and the
+# GitLab registry carry the self-hosted server.
+publish:storage-image:
+  stage: publish
+  image: docker:29@sha256:4bbc7223f81db790097c6dea42fb93e05b8fead4f0431fbe6ccaba6e8473201c
+  services:
+    - docker:29-dind@sha256:4bbc7223f81db790097c6dea42fb93e05b8fead4f0431fbe6ccaba6e8473201c
+  variables:
+    DOCKER_TLS_CERTDIR: /certs
+    HOSTED_IMAGE: oci.futo.org/futo-notes/notes-storage
+  needs:
+    - test:go
+    - lint:go
+    - test:storage-image
+  before_script:
+    - printf '%s' "$OCI_REGISTRY_PASSWORD" | docker login --username "$OCI_REGISTRY_USER" --password-stdin oci.futo.org
+    - docker run --privileged --rm tonistiigi/binfmt:qemu-v10.2.3 --install arm64
+    - docker buildx create --use --name futo-notes-storage --driver docker-container
+  script:
+    - VERSION_TAG=${CI_COMMIT_TAG:-$CI_COMMIT_SHORT_SHA}
+    - TRACK_TAG=$(if [ -n "$CI_COMMIT_TAG" ]; then echo stable; else echo latest; fi)
+    - docker buildx build -f cmd/storage/Dockerfile --platform linux/amd64,linux/arm64 --provenance=false --build-arg VERSION="$VERSION_TAG" --tag "$HOSTED_IMAGE:$VERSION_TAG" --tag "$HOSTED_IMAGE:$TRACK_TAG" --push .
+    - docker buildx imagetools inspect "$HOSTED_IMAGE:$VERSION_TAG"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule" && $FUTO_SOAK_CHECK == "true"'
+      when: never
+    - if: $CI_COMMIT_TAG
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+publish:api-image:
+  stage: publish
+  image: docker:29@sha256:4bbc7223f81db790097c6dea42fb93e05b8fead4f0431fbe6ccaba6e8473201c
+  services:
+    - docker:29-dind@sha256:4bbc7223f81db790097c6dea42fb93e05b8fead4f0431fbe6ccaba6e8473201c
+  variables:
+    DOCKER_TLS_CERTDIR: /certs
+    HOSTED_IMAGE: oci.futo.org/futo-notes/notes-api
+  needs:
+    - test:go
+    - lint:go
+    - test:api-image
+  before_script:
+    - printf '%s' "$OCI_REGISTRY_PASSWORD" | docker login --username "$OCI_REGISTRY_USER" --password-stdin oci.futo.org
+    - docker run --privileged --rm tonistiigi/binfmt:qemu-v10.2.3 --install arm64
+    - docker buildx create --use --name futo-notes-api --driver docker-container
+  script:
+    - VERSION_TAG=${CI_COMMIT_TAG:-$CI_COMMIT_SHORT_SHA}
+    - TRACK_TAG=$(if [ -n "$CI_COMMIT_TAG" ]; then echo stable; else echo latest; fi)
+    - docker buildx build -f cmd/api/Dockerfile --platform linux/amd64,linux/arm64 --provenance=false --build-arg VERSION="$VERSION_TAG" --tag "$HOSTED_IMAGE:$VERSION_TAG" --tag "$HOSTED_IMAGE:$TRACK_TAG" --push .
+    - docker buildx imagetools inspect "$HOSTED_IMAGE:$VERSION_TAG"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule" && $FUTO_SOAK_CHECK == "true"'
+      when: never
+    - if: $CI_COMMIT_TAG
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# Chart versions are 0.0.<pipeline iid>; appVersion is the short SHA, the tag
+# the image publish jobs push on the default branch. Charts go out only once
+# every image they point at exists, so each app chart's image job is in
+# `needs`.
+publish:charts:
+  extends: .mise
+  stage: publish
+  needs:
+    - k8s:validate
+    - publish:storage-image
+    - publish:api-image
+  script:
+    - mise install helm
+    - mise run charts:package "0.0.$CI_PIPELINE_IID" "$CI_COMMIT_SHORT_SHA" dist/charts
+    - printf '%s' "$OCI_REGISTRY_PASSWORD" | mise exec -- helm registry login oci.futo.org --username "$OCI_REGISTRY_USER" --password-stdin
+    - for chart in dist/charts/*.tgz; do mise exec -- helm push "$chart" oci://oci.futo.org/futo-notes/charts; done
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule" && $FUTO_SOAK_CHECK == "true"'
+      when: never
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
 
 publish:binaries:

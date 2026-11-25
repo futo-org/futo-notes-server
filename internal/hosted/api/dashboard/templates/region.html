@@ -1,0 +1,22 @@
+{{define "title"}}Choose a region{{end}}
+
+{{define "main" -}}
+<h1>Choose where your notes are stored</h1>
+<section class="card">
+<p>Your notes are encrypted on your devices and stored in the region you choose. Pick the one closest to you.
+<strong>You choose once: the region cannot be changed later.</strong></p>
+<form class="stack" method="post" action="/dashboard/region" hx-post="/dashboard/region">
+{{template "csrf-field" .}}
+<fieldset>
+<legend>Region</legend>
+{{- range .Regions}}
+<div class="choice">
+<input type="radio" id="region-{{.ID}}" name="region_id" value="{{.ID}}" required>
+<label for="region-{{.ID}}"><strong>{{.Name}}</strong> <span>{{.Description}}</span></label>
+</div>
+{{- end}}
+</fieldset>
+<button type="submit">Choose region</button>
+</form>
+</section>
+{{- end}}

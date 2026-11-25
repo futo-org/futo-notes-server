@@ -1,0 +1,6 @@
+[tools]
+# Patch version of CI's golang:1.27-bookworm image; bump them together.
+go = "1.27.4"
+golangci-lint = "2.15.0"
+helm = "4.3.0"
+kubeconform = "0.8.0"

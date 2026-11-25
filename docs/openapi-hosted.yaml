@@ -1,0 +1,1814 @@
+openapi: 3.0.3
+
+info:
+  title: FUTO Notes Hosted API
+  version: "1.0.0"
+  description: |
+    HTTP contract of the hosted FUTO Notes API (`cmd/api`): the self-hosted
+    sync contract (`docs/openapi.yaml`) with blob bytes moved to the regional
+    storage services (`docs/openapi-storage.yaml`), plus OIDC sign-in,
+    storage tokens, and account, region and device management.
+
+    The sync operations reuse the self-hosted spec's schemas, parameters and
+    responses by `$ref` into `openapi.yaml`, so the two cannot drift apart.
+    Where the hosted API differs from self-hosted it is said on the
+    operation.
+
+    ## What changes from self-hosted
+
+    - **No blob bytes.** `POST /api/blobs`, `GET|DELETE
+      /api/blobs/{userId}/{blobId}`, `POST /api/blobs/batch` and the three
+      `blob-objects` routes do not exist here (`404`). Clients upload to and
+      download from their region's storage service with an access token from
+      `POST /api/storage/token`.
+    - **Receipts instead of staged keys.** Object create and update take
+      `{"receipt": "<jwt>"}`, the receipt the storage service returned for
+      the upload. It names the key and the size; the object's `blob_key` and
+      `size_bytes` come from it.
+    - **OIDC sign-in.** No password or dev login. Sessions last 90 days and
+      slide: every authenticated request extends them, and a request
+      authenticated by the session cookie gets the cookie re-issued when it
+      slides.
+    - **Pending deletion.** Between `DELETE /api/account` and the purge 30
+      days later, every sync operation except logout, and
+      `POST /api/storage/token`, answer
+      `403 {"code": "account_pending_deletion", "error": "account pending deletion"}`.
+      Account, session and restore operations keep working.
+
+    ## Two error shapes
+
+    - Operations of the sync contract (tag `sync`, plus `GET /`) keep its
+      body, `{"error": "..."}`, and its two `401` bodies. Failures only the
+      hosted API has (a pending deletion, a rejected or spent receipt, an
+      unknown key field) add the stable `code` the sync contract's
+      `invalid_session` body already carries: `{"code": "...", "error": "..."}`.
+    - Operations only the hosted API serves answer
+      `{"statusCode", "code", "message", "requestId"}`, with `requestId`
+      equal to the `X-Request-Id` response header. Unknown paths (`404`) and
+      methods (`405`) answer this shape too, on every path.
+
+    The exception is the `403` for a pending deletion, which keeps the sync
+    shape on `POST /api/storage/token` as well, so clients handle it once.
+
+    **Branch on `code`, never on the message.** Codes are stable and listed
+    in the `ErrorCode` schema; messages are for people and may change. Each
+    response below names the codes it can carry.
+
+    Any operation may answer `500` when the database fails, in the shape of
+    its surface. A handler panic answers the sync `500` body on every route.
+
+    Every `GET` also answers `HEAD`.
+
+    ## Not part of this API
+
+    The hosted API also serves the htmx account dashboard under
+    `/dashboard` (server-rendered HTML for browsers, behind the session
+    cookie and CSRF tokens; every state-changing page calls the same service
+    code as the JSON operation it matches) and, when `DEV_UI` is set, a
+    manual test page at `/dev` with its `/dev/jobs/*` triggers. Those are
+    pages and test tooling, not API: clients must not
+    depend on them, so they are listed in `x-internal-routes` rather than
+    described as operations.
+  license:
+    name: FUTO Source First License
+    url: https://sourcefirst.com/
+
+x-internal-routes:
+  - GET /dashboard
+  - GET /dashboard/delete
+  - GET /dashboard/devices
+  - GET /dashboard/region
+  - GET /dashboard/sign-in
+  - GET /dashboard/static/{name}
+  - GET /dev
+  - POST /dashboard/delete
+  - POST /dashboard/devices/{id}/revoke
+  - POST /dashboard/region
+  - POST /dashboard/restore
+  - POST /dashboard/sign-out
+  - POST /dev/jobs/account-purge
+  - POST /dev/jobs/blob-gc
+  - POST /dev/jobs/reconciliation
+
+servers:
+  - url: "{baseUrl}"
+    description: The hosted API origin
+    variables:
+      baseUrl:
+        default: http://localhost:3005
+
+tags:
+  - name: capability
+    description: Unauthenticated discovery and health
+  - name: sign-in
+    description: OIDC sign-in for the dashboard and native apps
+  - name: storage
+    description: Regions and storage access tokens
+  - name: account
+    description: Account, region and deletion
+  - name: sessions
+    description: Signed-in devices
+  - name: sync
+    description: The self-hosted sync contract, with receipts in place of staged blobs
+
+paths:
+  /:
+    get:
+      operationId: getCapability
+      tags: [capability]
+      security: []
+      summary: Capability discovery
+      description: |
+        Same document as self-hosted, plus `blob_storage`. The hosted values
+        are fixed: `auth_mode: "oidc"`, `signup: "open"`, `billing: false`,
+        `blob_storage: "regional"`. Choose the blob transport from
+        `blob_storage`, not from `auth_mode`.
+      responses:
+        "200":
+          description: Server capabilities
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Capability"
+
+  /readyz:
+    get:
+      operationId: ready
+      tags: [capability]
+      security: []
+      summary: Readiness probe
+      description: |
+        `200` while serving; `503` once SIGTERM starts the drain, while
+        requests are still served. Does not check the database. Not logged,
+        not counted in metrics, and outside the `X-Request-Id` chain.
+      responses:
+        "200":
+          description: Ready
+        "503":
+          description: Draining
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /api/regions:
+    get:
+      operationId: listRegions
+      tags: [storage]
+      security: []
+      summary: List the regions a user can choose
+      responses:
+        "200":
+          description: The configured regions, in configuration order
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Region"
+
+  /api/auth/oidc/start:
+    get:
+      operationId: startSignIn
+      tags: [sign-in]
+      security: []
+      summary: Begin an OIDC sign-in
+      description: |
+        Redirects the browser to the identity provider and sets the
+        `oidc_state` cookie (path `/api/auth/oidc/callback`, 10 minutes) that
+        binds the login to this browser.
+
+        **Dashboard sign-in:** no parameters. The callback ends with the
+        session cookie.
+
+        **App sign-in:** pass `redirect_uri`, your own PKCE `code_challenge`
+        (S256), and optionally `state`. The callback ends by redirecting the
+        browser to `redirect_uri` with a one-time `code` (and your `state`),
+        which the app swaps at `POST /api/auth/oidc/token`. `redirect_uri`
+        must use one of the configured custom schemes, or be loopback `http`
+        on an IP literal with a port (`http://127.0.0.1:PORT/...`,
+        `http://[::1]:PORT/...`, RFC 8252 section 7.3); it may not carry a
+        fragment or user info.
+      parameters:
+        - name: redirect_uri
+          in: query
+          required: false
+          description: The app's redirect URI. Omit for a dashboard sign-in.
+          schema:
+            type: string
+        - name: code_challenge
+          in: query
+          required: false
+          description: Required with `redirect_uri`. Unpadded base64url SHA-256 of the app's code verifier.
+          schema:
+            type: string
+            pattern: "^[A-Za-z0-9_-]{43}$"
+        - name: code_challenge_method
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [S256]
+        - name: state
+          in: query
+          required: false
+          description: Opaque app value, returned on the redirect back to the app.
+          schema:
+            type: string
+        - name: reauthenticate
+          in: query
+          required: false
+          description: |
+            `true` makes the provider ask for credentials again
+            (`max_age=0`), which `DELETE /api/account` needs within the
+            last 10 minutes. The callback refuses a sign-in whose
+            `auth_time` is older than that. A dashboard reauthentication
+            refreshes the browser's current session, if it has one for the
+            same user, and returns to `/dashboard/delete`; an app gets a
+            one-time code for a new session, as for any sign-in.
+          schema:
+            type: string
+            enum: ["true", "false"]
+      responses:
+        "302":
+          description: To the identity provider's authorization endpoint
+          headers:
+            Location:
+              $ref: "#/components/headers/Location"
+            Set-Cookie:
+              required: true
+              description: "`oidc_state`"
+              schema:
+                type: string
+        "400":
+          description: |
+            `invalid_request`: `redirect_uri` is not allowed,
+            `code_challenge_method` is not `S256`, `code_challenge` is not
+            an S256 challenge, or `reauthenticate` is neither `true` nor
+            `false`
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostedError"
+        "500":
+          $ref: "#/components/responses/HostedServerError"
+        "503":
+          description: "`provider_unavailable`: the identity provider cannot be reached"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostedError"
+
+  /api/auth/oidc/callback:
+    get:
+      operationId: completeSignIn
+      tags: [sign-in]
+      security: []
+      summary: The identity provider's redirect back
+      description: |
+        Not called by clients directly. Requires the `oidc_state` cookie of
+        the browser that started the login, which every response clears. The
+        API swaps the provider's code, verifies the ID token and its nonce,
+        and upserts the user by `sub`.
+
+        A login is single-use: replaying a callback answers `400`.
+      parameters:
+        - name: state
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: code
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: error
+          in: query
+          required: false
+          description: The provider's error, when the user did not sign in.
+          schema:
+            type: string
+      responses:
+        "302":
+          description: |
+            App sign-in: to the app's `redirect_uri` with `code` (one-time,
+            for `POST /api/auth/oidc/token`), the provider's `error`,
+            `error=invalid_request` when the provider sent neither, or
+            `error=reauthentication_required` when a `reauthenticate=true`
+            sign-in came back with a stale `auth_time`, plus the app's
+            `state`.
+          headers:
+            Location:
+              $ref: "#/components/headers/Location"
+            Set-Cookie:
+              $ref: "#/components/headers/ClearsStateCookie"
+        "303":
+          description: |
+            Dashboard sign-in: to `/dashboard`, with the session cookie
+            (`session`, `HttpOnly`, `SameSite=Lax`, 90 days, `Secure` unless
+            `COOKIE_SECURE=false`). A reauthentication goes to
+            `/dashboard/delete` instead, and sets the cookie only when the
+            browser had no session of that user to refresh.
+          headers:
+            Location:
+              $ref: "#/components/headers/Location"
+            Set-Cookie:
+              required: true
+              description: "`oidc_state` cleared, and `session` unless a reauthentication refreshed the current one"
+              schema:
+                type: string
+        "400":
+          description: |
+            `invalid_login_state`: missing, mismatched, unknown or
+            already-used state, or a nonce mismatch. Or, for a dashboard
+            sign-in, `sign_in_not_completed`: the provider's error, or a
+            callback with neither `code` nor `error`.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+            Set-Cookie:
+              $ref: "#/components/headers/ClearsStateCookie"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostedError"
+        "403":
+          description: |
+            `reauthentication_required`: a dashboard `reauthenticate=true`
+            sign-in came back with an `auth_time` older than 10 minutes, so
+            the provider did not confirm a fresh sign-in
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+            Set-Cookie:
+              $ref: "#/components/headers/ClearsStateCookie"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostedError"
+        "500":
+          $ref: "#/components/responses/HostedServerError"
+        "502":
+          description: |
+            `provider_error`: the code exchange or ID token verification
+            failed
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+            Set-Cookie:
+              $ref: "#/components/headers/ClearsStateCookie"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostedError"
+
+  /api/auth/oidc/token:
+    post:
+      operationId: redeemAppCode
+      tags: [sign-in]
+      security: []
+      summary: Swap an app's one-time code for its tokens
+      description: |
+        The code is single-use and short-lived; a wrong `code_verifier`
+        spends it. The session token is returned here, never in a URL. Send
+        it as `Authorization: Bearer <token>`. Keep `storage_refresh_token`
+        for `POST /api/storage/token`; it is bound to this session.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code, code_verifier]
+              properties:
+                code:
+                  type: string
+                  minLength: 1
+                code_verifier:
+                  type: string
+                  minLength: 1
+                device_name:
+                  type: string
+                  description: |
+                    What the device list calls this session, for example
+                    `Pixel 9`: 1 to 100 characters once surrounding
+                    whitespace is trimmed. Without it the list shows the
+                    request's `User-Agent`.
+      responses:
+        "200":
+          description: Signed in
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [token, storage_refresh_token, user]
+                additionalProperties: false
+                properties:
+                  token:
+                    type: string
+                    description: The session token
+                  storage_refresh_token:
+                    type: string
+                  user:
+                    $ref: "openapi.yaml#/components/schemas/User"
+        "400":
+          description: |
+            `invalid_request`: invalid JSON, a missing field, or a
+            `device_name` that is blank or over 100 characters (the code is
+            not spent).
+            `invalid_code`: an unknown, used or expired code.
+            `code_verifier_mismatch`: a verifier that does not match the
+            challenge (the code is spent).
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostedError"
+        "500":
+          $ref: "#/components/responses/HostedServerError"
+
+  /api/storage/token:
+    post:
+      operationId: exchangeStorageToken
+      tags: [storage]
+      security: []
+      summary: Get a storage access token
+      description: |
+        Authenticated by the **storage refresh token in the body**, not by
+        the session (so it works before the app has restored its session).
+        Returns a 24h access token for the user's region's storage service
+        and the refresh token that replaces the one sent.
+
+        The refresh token **rotates on every exchange**, and its replacement
+        is derived from it. Presenting a token again while its replacement
+        has never been exchanged answers `200` with **the same replacement**
+        and a fresh access token. So a retry after a lost response, or two
+        concurrent requests, all end up with one token to keep. Presenting it
+        once the replacement has itself been exchanged is treated as theft:
+        it signs the session out (`401`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token:
+                  type: string
+                  minLength: 1
+      responses:
+        "200":
+          description: Issued
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [access_token, expires_at, refresh_token, region]
+                additionalProperties: false
+                properties:
+                  access_token:
+                    type: string
+                    description: |
+                      Ed25519 JWT for the storage service: `aud` = region id,
+                      `sub` = user id, `scope` = `blobs`.
+                  expires_at:
+                    type: string
+                    format: date-time
+                  refresh_token:
+                    type: string
+                    description: |
+                      The replacement refresh token. Keep it in place of the one
+                      sent. Sending the old one again returns this same token
+                      until this one is exchanged.
+                  region:
+                    type: object
+                    required: [id, endpoint]
+                    additionalProperties: false
+                    properties:
+                      id:
+                        type: string
+                      endpoint:
+                        type: string
+        "400":
+          description: "`invalid_request`: invalid JSON or no `refresh_token`"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostedError"
+        "401":
+          description: |
+            `refresh_token_invalid`: an unknown or revoked refresh token, or
+            one whose replacement can no longer be derived after a server key
+            rotation; sign in again (the session, if any, is kept).
+            `refresh_token_reused`: a token whose replacement was already
+            exchanged; the session has been signed out.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostedError"
+        "403":
+          $ref: "#/components/responses/PendingDeletion"
+        "409":
+          description: "`region_required`: no region has been chosen yet"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostedError"
+        "500":
+          $ref: "#/components/responses/HostedServerError"
+
+  /api/account:
+    get:
+      operationId: getAccount
+      tags: [account]
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      summary: The caller's account
+      responses:
+        "200":
+          $ref: "#/components/responses/Account"
+        "401":
+          $ref: "#/components/responses/HostedUnauthorized"
+        "500":
+          $ref: "#/components/responses/HostedServerError"
+    delete:
+      operationId: deleteAccount
+      tags: [account]
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      summary: Schedule the account's deletion
+      description: |
+        Schedules the purge 30 days from now and signs out every other
+        session. Requesting it again keeps the original schedule. Until the
+        purge, `POST /api/account/restore` cancels it.
+
+        The session must have signed in within the last **10 minutes** (the
+        identity provider's `auth_time`). Otherwise sign in again with
+        `GET /api/auth/oidc/start?reauthenticate=true` and retry with the
+        new session.
+      responses:
+        "200":
+          $ref: "#/components/responses/Account"
+        "401":
+          $ref: "#/components/responses/HostedUnauthorized"
+        "403":
+          description: "`reauthentication_required`: the session signed in more than 10 minutes ago"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostedError"
+        "500":
+          $ref: "#/components/responses/HostedServerError"
+
+  /api/account/region:
+    put:
+      operationId: chooseRegion
+      tags: [account]
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      summary: Choose the account's region, once
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [region_id]
+              properties:
+                region_id:
+                  type: string
+                  description: An `id` from `GET /api/regions`
+      responses:
+        "200":
+          $ref: "#/components/responses/Account"
+        "400":
+          description: "`invalid_request`: invalid JSON or an unknown region"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostedError"
+        "401":
+          $ref: "#/components/responses/HostedUnauthorized"
+        "409":
+          description: "`region_already_chosen`: a region is already chosen; it is fixed"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostedError"
+        "500":
+          $ref: "#/components/responses/HostedServerError"
+
+  /api/account/restore:
+    post:
+      operationId: restoreAccount
+      tags: [account]
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      summary: Cancel a scheduled deletion
+      description: Restoring an account with no deletion pending changes nothing.
+      responses:
+        "200":
+          $ref: "#/components/responses/Account"
+        "401":
+          $ref: "#/components/responses/HostedUnauthorized"
+        "409":
+          description: "`purge_started`: the grace period is over and the purge may have begun; the account can no longer be restored"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostedError"
+        "500":
+          $ref: "#/components/responses/HostedServerError"
+
+  /api/sessions:
+    get:
+      operationId: listSessions
+      tags: [sessions]
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      summary: The caller's signed-in devices
+      responses:
+        "200":
+          description: Every live session of the caller
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sessions]
+                additionalProperties: false
+                properties:
+                  sessions:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Session"
+        "401":
+          $ref: "#/components/responses/HostedUnauthorized"
+        "500":
+          $ref: "#/components/responses/HostedServerError"
+
+  /api/sessions/{id}:
+    delete:
+      operationId: revokeSession
+      tags: [sessions]
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      summary: Sign a device out
+      description: |
+        Deletes the session and the storage refresh token bound to it. The
+        device's storage access token keeps working until it expires (at
+        most 24h). Revoking the current session is allowed.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Revoked
+        "401":
+          $ref: "#/components/responses/HostedUnauthorized"
+        "404":
+          description: "`not_found`: no such session of the caller's"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostedError"
+        "500":
+          $ref: "#/components/responses/HostedServerError"
+
+  /api/auth:
+    get:
+      operationId: getCurrentUser
+      tags: [sync]
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      summary: Who am I
+      responses:
+        "200":
+          description: The authenticated user
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user]
+                properties:
+                  user:
+                    $ref: "openapi.yaml#/components/schemas/User"
+        "401":
+          $ref: "#/components/responses/SyncUnauthorized"
+        "403":
+          $ref: "#/components/responses/PendingDeletion"
+        "500":
+          $ref: "#/components/responses/SyncServerError"
+
+  /api/auth/logout:
+    post:
+      operationId: logout
+      tags: [sync]
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      summary: Destroy the current session
+      description: |
+        Deletes the session, and with it the storage refresh token bound to
+        it, and clears the `session` cookie. Works while a deletion is
+        pending.
+      responses:
+        "204":
+          description: Session destroyed
+          headers:
+            Set-Cookie:
+              required: true
+              description: "`session` cleared"
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/SyncUnauthorized"
+        "500":
+          $ref: "#/components/responses/SyncServerError"
+
+  /api/collections:
+    post:
+      operationId: claimCollection
+      tags: [sync]
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      summary: Claim the account's vault, or return the existing one
+      description: As self-hosted. Takes no request body.
+      responses:
+        "201":
+          description: Vault created
+          content:
+            application/json:
+              schema:
+                $ref: "openapi.yaml#/components/schemas/CollectionEnvelope"
+        "200":
+          description: Vault already existed; this is it
+          content:
+            application/json:
+              schema:
+                $ref: "openapi.yaml#/components/schemas/CollectionEnvelope"
+        "401":
+          $ref: "#/components/responses/SyncUnauthorized"
+        "403":
+          $ref: "#/components/responses/PendingDeletion"
+        "500":
+          $ref: "#/components/responses/SyncServerError"
+    get:
+      operationId: listCollections
+      tags: [sync]
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      summary: List the user's collections
+      description: Ordered oldest first by `(created_at, id)`.
+      responses:
+        "200":
+          description: The user's collections
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [collections]
+                properties:
+                  collections:
+                    type: array
+                    items:
+                      $ref: "openapi.yaml#/components/schemas/Collection"
+        "401":
+          $ref: "#/components/responses/SyncUnauthorized"
+        "403":
+          $ref: "#/components/responses/PendingDeletion"
+        "500":
+          $ref: "#/components/responses/SyncServerError"
+
+  /api/collections/{id}:
+    parameters:
+      - $ref: "#/components/parameters/CollectionId"
+    get:
+      operationId: getCollection
+      tags: [sync]
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      summary: Get one collection
+      responses:
+        "200":
+          description: The collection
+          content:
+            application/json:
+              schema:
+                $ref: "openapi.yaml#/components/schemas/CollectionEnvelope"
+        "401":
+          $ref: "#/components/responses/SyncUnauthorized"
+        "403":
+          $ref: "#/components/responses/PendingDeletion"
+        "404":
+          $ref: "openapi.yaml#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/SyncServerError"
+    delete:
+      operationId: deleteCollection
+      tags: [sync]
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      summary: Delete a collection
+      description: |
+        As self-hosted: objects cascade, and the collection's blobs become
+        purgeable. Blob GC then deletes their keys through the region's
+        storage service.
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: "#/components/responses/SyncUnauthorized"
+        "403":
+          $ref: "#/components/responses/PendingDeletion"
+        "404":
+          $ref: "openapi.yaml#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/SyncServerError"
+
+  /api/collections/{id}/key:
+    parameters:
+      - $ref: "#/components/parameters/CollectionId"
+    get:
+      operationId: getCollectionKey
+      tags: [sync]
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      summary: Get encrypted vault key material
+      responses:
+        "200":
+          description: |
+            The stored material, or `{"key": null}` when the collection exists
+            but no key has been claimed yet.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [key]
+                properties:
+                  key:
+                    type: object
+                    nullable: true
+                    allOf:
+                      - $ref: "openapi.yaml#/components/schemas/KeyMaterial"
+        "401":
+          $ref: "#/components/responses/SyncUnauthorized"
+        "403":
+          $ref: "#/components/responses/PendingDeletion"
+        "404":
+          $ref: "openapi.yaml#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/SyncServerError"
+    put:
+      operationId: putCollectionKey
+      tags: [sync]
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      summary: Claim or rotate encrypted vault key material
+      description: |
+        As self-hosted (`putCollectionKey` in `openapi.yaml`): a claim without
+        `previous_key_updated_at` adopts and returns the authoritative
+        material; a rotation needs the current `key_updated_at` and answers
+        `409` with `currentKey` when it is stale.
+
+        Unlike self-hosted, a field this API does not store is refused
+        (`400` `invalid_request`) rather than dropped, so a client never
+        believes part of an envelope was saved when it was not. The body is
+        at most 64 KiB.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [key_salt, key_kdf, encrypted_vault_key]
+              additionalProperties: false
+              properties:
+                key_salt:
+                  type: string
+                  minLength: 1
+                key_kdf:
+                  type: object
+                  description: Any JSON object — the client's KDF parameters.
+                  additionalProperties: true
+                encrypted_vault_key:
+                  type: string
+                  minLength: 1
+                previous_key_updated_at:
+                  type: string
+                  minLength: 1
+                  description: |
+                    Opaque revision token from a prior GET/PUT. Required for
+                    rotation, omitted for a first claim.
+      responses:
+        "200":
+          description: Material stored, or the authoritative material adopted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [key]
+                properties:
+                  key:
+                    $ref: "openapi.yaml#/components/schemas/KeyMaterial"
+        "400":
+          description: |
+            As self-hosted: `invalid json`, `key_salt is required`,
+            `encrypted_vault_key is required`, `key_kdf must be an object`,
+            `previous_key_updated_at must be non-empty when present`, or a
+            rotation with no key to rotate (`no existing key to rotate`).
+            Hosted only, with code `invalid_request`: a field outside the
+            schema (`unknown field "<name>"`), or a body over 64 KiB.
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: "openapi.yaml#/components/schemas/Error"
+                  - $ref: "#/components/schemas/InvalidRequestError"
+        "401":
+          $ref: "#/components/responses/SyncUnauthorized"
+        "403":
+          $ref: "#/components/responses/PendingDeletion"
+        "404":
+          $ref: "openapi.yaml#/components/responses/NotFound"
+        "409":
+          description: Stale rotation token
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error, currentKey]
+                properties:
+                  error:
+                    type: string
+                    enum: [key conflict]
+                  currentKey:
+                    $ref: "openapi.yaml#/components/schemas/KeyMaterial"
+        "500":
+          $ref: "#/components/responses/SyncServerError"
+
+  /api/collections/{id}/objects:
+    parameters:
+      - $ref: "#/components/parameters/CollectionId"
+    get:
+      operationId: listObjects
+      tags: [sync]
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      summary: Pull objects changed since a cursor
+      description: |
+        As self-hosted (`listObjects` in `openapi.yaml`). Omitting `limit`
+        returns `{"objects": [...]}`; supplying it adds `hasMore` and
+        `nextCursor`.
+      parameters:
+        - name: sinceVersion
+          in: query
+          required: false
+          description: Exclusive cursor. Defaults to 0 (full pull).
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+            default: 0
+        - name: limit
+          in: query
+          required: false
+          description: |
+            Page size. Values above 1000 are silently clamped to 1000, not
+            rejected. Values below 1 or non-integers return `400`.
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        "200":
+          description: The delta page
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: "openapi.yaml#/components/schemas/ObjectList"
+                  - $ref: "openapi.yaml#/components/schemas/PagedObjectList"
+        "400":
+          description: Invalid `sinceVersion` or `limit`
+          content:
+            application/json:
+              schema:
+                $ref: "openapi.yaml#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/SyncUnauthorized"
+        "403":
+          $ref: "#/components/responses/PendingDeletion"
+        "404":
+          $ref: "openapi.yaml#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/SyncServerError"
+    post:
+      operationId: createObject
+      tags: [sync]
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      summary: Create an object from a storage receipt
+      description: |
+        Upload the ciphertext to the region's storage service first, then
+        pass the receipt it returned here. The receipt must be signed by the
+        caller's region, name the caller as `sub`, be unexpired (24h), and
+        name a key the API has never seen; the object's `blob_key` and
+        `size_bytes` come from it. Anything else is `400 invalid receipt`
+        with a `code` saying why, and a receipt already spent by an earlier
+        mutation is `409` `receipt_used`; upload again for a fresh receipt
+        and retry under a **new** `Mutation-Id`.
+
+        A replayed `Mutation-Id` returns the recorded outcome (`201` with
+        `replayed: true`, or the recorded `404`/`409`) **before** the
+        receipt is looked at, so a retry whose receipt has since expired
+        still gets its original answer. A rejected receipt records nothing:
+        the `Mutation-Id` stays free for a retry with a valid one.
+      parameters:
+        - $ref: "openapi.yaml#/components/parameters/MutationIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateObjectRequest"
+      responses:
+        "201":
+          description: Created, or the replayed outcome of this Mutation-Id
+          content:
+            application/json:
+              schema:
+                $ref: "openapi.yaml#/components/schemas/CreateMutationSuccess"
+        "400":
+          description: |
+            The body is not a JSON object (`invalid json`) or the
+            `Mutation-Id` header is invalid (`invalid Mutation-Id`), as on
+            self-hosted. Or the receipt is rejected (`ReceiptRejectedError`).
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    required: [error]
+                    properties:
+                      error:
+                        type: string
+                        enum: [invalid json, invalid Mutation-Id]
+                  - $ref: "#/components/schemas/ReceiptRejectedError"
+        "401":
+          $ref: "#/components/responses/SyncUnauthorized"
+        "403":
+          $ref: "#/components/responses/PendingDeletion"
+        "404":
+          $ref: "openapi.yaml#/components/responses/NotFound"
+        "409":
+          description: |
+            Receipt already spent, Mutation-Id reused for a different intent,
+            or the first request under this Mutation-Id is still running
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ReceiptUsedError"
+                  - $ref: "openapi.yaml#/components/schemas/MutationMismatchError"
+                  - $ref: "#/components/schemas/MutationPendingError"
+        "500":
+          $ref: "#/components/responses/SyncServerError"
+
+  /api/collections/{id}/objects/{objectId}:
+    parameters:
+      - $ref: "#/components/parameters/CollectionId"
+      - $ref: "#/components/parameters/ObjectId"
+    get:
+      operationId: getObject
+      tags: [sync]
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      summary: Get object metadata
+      responses:
+        "200":
+          description: The object
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [object]
+                properties:
+                  object:
+                    $ref: "openapi.yaml#/components/schemas/Object"
+        "401":
+          $ref: "#/components/responses/SyncUnauthorized"
+        "403":
+          $ref: "#/components/responses/PendingDeletion"
+        "404":
+          $ref: "openapi.yaml#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/SyncServerError"
+    put:
+      operationId: updateObject
+      tags: [sync]
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      summary: Update an object from a storage receipt (version-guarded)
+      description: |
+        `version` must equal the object's current version + 1; anything else
+        is a `409` carrying the server's current state. The receipt follows
+        the create rules, including replay before verification. Unlike
+        create, the success body carries no `replayed` field. The prior blob
+        moves to `retained` for 365 days, as on self-hosted.
+      parameters:
+        - $ref: "openapi.yaml#/components/parameters/MutationIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateObjectRequest"
+      responses:
+        "200":
+          description: Updated, or the replayed outcome of this Mutation-Id
+          content:
+            application/json:
+              schema:
+                $ref: "openapi.yaml#/components/schemas/MutationSuccess"
+        "400":
+          description: |
+            The body is not a JSON object (`invalid json`), `version` is
+            missing or below 1 (`invalid version`), or the `Mutation-Id`
+            header is invalid (`invalid Mutation-Id`), as on self-hosted. Or
+            the receipt is rejected (`ReceiptRejectedError`).
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    required: [error]
+                    properties:
+                      error:
+                        type: string
+                        enum: [invalid json, invalid version, invalid Mutation-Id]
+                  - $ref: "#/components/schemas/ReceiptRejectedError"
+        "401":
+          $ref: "#/components/responses/SyncUnauthorized"
+        "403":
+          $ref: "#/components/responses/PendingDeletion"
+        "404":
+          $ref: "openapi.yaml#/components/responses/NotFound"
+        "409":
+          description: |
+            Version conflict, receipt already spent, Mutation-Id intent
+            mismatch, or the first request under this Mutation-Id is still
+            running
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "openapi.yaml#/components/schemas/VersionConflict"
+                  - $ref: "#/components/schemas/ReceiptUsedError"
+                  - $ref: "openapi.yaml#/components/schemas/MutationMismatchError"
+                  - $ref: "#/components/schemas/MutationPendingError"
+        "500":
+          $ref: "#/components/responses/SyncServerError"
+    delete:
+      operationId: deleteObject
+      tags: [sync]
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      summary: Soft delete an object
+      description: |
+        As self-hosted (`deleteObject` in `openapi.yaml`): sets
+        `deleted: true`, keeps the tombstone, and retains the blob for 365
+        days. `?version=N` makes the delete lose to a newer concurrent edit.
+      parameters:
+        - $ref: "openapi.yaml#/components/parameters/MutationIdHeader"
+        - name: version
+          in: query
+          required: false
+          description: Optional race guard — the version the client expects to delete.
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+      responses:
+        "200":
+          description: Tombstoned
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [object, collectionVersion]
+                properties:
+                  object:
+                    $ref: "openapi.yaml#/components/schemas/DeletedObject"
+                  collectionVersion:
+                    $ref: "openapi.yaml#/components/schemas/CollectionVersion"
+        "400":
+          description: Invalid `?version` (`invalid version`), or invalid `Mutation-Id`
+          content:
+            application/json:
+              schema:
+                $ref: "openapi.yaml#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/SyncUnauthorized"
+        "403":
+          $ref: "#/components/responses/PendingDeletion"
+        "404":
+          $ref: "openapi.yaml#/components/responses/NotFound"
+        "409":
+          description: |
+            Version conflict, Mutation-Id intent mismatch, or the first
+            request under this Mutation-Id is still running
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "openapi.yaml#/components/schemas/VersionConflict"
+                  - $ref: "openapi.yaml#/components/schemas/MutationMismatchError"
+                  - $ref: "#/components/schemas/MutationPendingError"
+        "500":
+          $ref: "#/components/responses/SyncServerError"
+
+  /api/collections/{id}/create-mutations/{mutationId}:
+    parameters:
+      - $ref: "#/components/parameters/CollectionId"
+      - name: mutationId
+        in: path
+        required: true
+        description: |
+          The create Mutation-Id to look up. Percent-encode it if it contains
+          characters outside the URL-safe set.
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+    get:
+      operationId: getCreateMutation
+      tags: [sync]
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      summary: Recover a durable create outcome
+      description: |
+        As self-hosted (`getCreateMutation` in `openapi.yaml`): successful
+        creates are retained for the collection's lifetime, so a `404` for an
+        existing collection proves this Mutation-Id never committed a create.
+        A create still running answers `409`.
+      responses:
+        "200":
+          description: "The recorded create outcome, with `replayed: true`"
+          content:
+            application/json:
+              schema:
+                $ref: "openapi.yaml#/components/schemas/CreateMutationSuccess"
+        "400":
+          description: Invalid Mutation-Id syntax
+          content:
+            application/json:
+              schema:
+                $ref: "openapi.yaml#/components/schemas/Error"
+              example: { error: invalid Mutation-Id }
+        "401":
+          $ref: "#/components/responses/SyncUnauthorized"
+        "403":
+          $ref: "#/components/responses/PendingDeletion"
+        "404":
+          description: |
+            No create committed under this Mutation-Id — or the collection is
+            not the caller's.
+          content:
+            application/json:
+              schema:
+                $ref: "openapi.yaml#/components/schemas/Error"
+        "409":
+          description: The original create is still in progress
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MutationPendingError"
+        "500":
+          $ref: "#/components/responses/SyncServerError"
+
+  /api/sync/events:
+    get:
+      operationId: syncEvents
+      tags: [sync]
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      summary: SSE change stream
+      description: |
+        The self-hosted stream (`syncEvents` in `openapi.yaml`), byte for
+        byte: `ready` once, `change` with
+        `{"collectionId": "...", "currentVersion": N}` on each mutation, and
+        `ping` every 25s. It is a doorbell, not a pipe, and lossy across
+        disconnects: pull on every `ready`.
+
+        Changes reach every API replica's streams through Postgres
+        `LISTEN/NOTIFY`. A stream ends when its replica's listener
+        reconnects; reconnect and pull.
+      responses:
+        "200":
+          description: Event stream
+          headers:
+            Cache-Control:
+              required: true
+              schema:
+                type: string
+                enum: [no-cache]
+            X-Accel-Buffering:
+              required: true
+              schema:
+                type: string
+                enum: ["no"]
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/SyncUnauthorized"
+        "403":
+          $ref: "#/components/responses/PendingDeletion"
+        "500":
+          $ref: "#/components/responses/SyncServerError"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        The session token from `POST /api/auth/oidc/token`. What native apps
+        use.
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: session
+      description: |
+        Set by a dashboard sign-in: `HttpOnly`, `SameSite=Lax`, `Secure`
+        unless `COOKIE_SECURE=false`, 90 days. The session slides with use,
+        and a request it authenticates gets the cookie re-issued (a
+        `Set-Cookie` on any authenticated response) when it slides. The
+        cookie is checked before the `Authorization` header.
+
+  parameters:
+    CollectionId:
+      name: id
+      in: path
+      required: true
+      description: Collection id. Anything that is not one of the caller's answers `404`.
+      schema:
+        type: string
+        format: uuid
+    ObjectId:
+      name: objectId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+  headers:
+    RequestId:
+      required: true
+      description: The request id, also logged and echoed as `requestId`
+      schema:
+        type: string
+        minLength: 1
+    Location:
+      required: true
+      schema:
+        type: string
+        minLength: 1
+    NoStore:
+      required: true
+      schema:
+        type: string
+        enum: [no-store]
+    ClearsStateCookie:
+      required: true
+      description: "`oidc_state` cleared"
+      schema:
+        type: string
+
+  responses:
+    Account:
+      description: The caller's account
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Account"
+    HostedUnauthorized:
+      description: |
+        `unauthorized`: no session token. `invalid_session`: one naming no
+        live session, which also carries
+        `WWW-Authenticate: Bearer realm="futo-notes", error="invalid_token"`
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
+        WWW-Authenticate:
+          schema:
+            type: string
+            enum: ['Bearer realm="futo-notes", error="invalid_token"']
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/HostedError"
+    HostedServerError:
+      description: "`internal_error`: an internal failure"
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/HostedError"
+    SyncUnauthorized:
+      description: |
+        The self-hosted contract's two `401`s: no credentials
+        (`{"error": "unauthorized"}`), or a token naming no live session,
+        which carries `WWW-Authenticate` and the stable code
+        `invalid_session`. Re-login, retry once, and keep the sync cursor.
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+            enum: ['Bearer realm="futo-notes", error="invalid_token"']
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: "#/components/schemas/UnauthorizedError"
+              - $ref: "#/components/schemas/InvalidSessionError"
+    PendingDeletion:
+      description: |
+        `account_pending_deletion`: the account is scheduled for deletion.
+        Restore it with `POST /api/account/restore` to sync again.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [code, error]
+            additionalProperties: false
+            properties:
+              code:
+                type: string
+                enum: [account_pending_deletion]
+              error:
+                type: string
+                enum: [account pending deletion]
+    SyncServerError:
+      description: Internal failure
+      content:
+        application/json:
+          schema:
+            $ref: "openapi.yaml#/components/schemas/Error"
+          example: { error: internal server error }
+
+  schemas:
+    HostedError:
+      type: object
+      required: [statusCode, code, message, requestId]
+      additionalProperties: false
+      properties:
+        statusCode:
+          type: integer
+          description: The response status
+        code:
+          $ref: "#/components/schemas/ErrorCode"
+        message:
+          type: string
+          description: For people; may change. Branch on `code`.
+        requestId:
+          type: string
+          minLength: 1
+
+    UnauthorizedError:
+      type: object
+      required: [error]
+      additionalProperties: false
+      properties:
+        error:
+          type: string
+          enum: [unauthorized]
+
+    InvalidSessionError:
+      type: object
+      required: [code, error]
+      additionalProperties: false
+      properties:
+        code:
+          type: string
+          enum: [invalid_session]
+        error:
+          type: string
+          enum: [session expired or invalid]
+
+    ReceiptUsedError:
+      type: object
+      required: [code, error]
+      additionalProperties: false
+      description: |
+        The receipt's key is already in the ledger: an earlier mutation
+        spent it. Upload again for a fresh receipt and retry under a new
+        Mutation-Id.
+      properties:
+        code:
+          type: string
+          enum: [receipt_used]
+        error:
+          type: string
+          enum: [receipt already used]
+
+    InvalidRequestError:
+      type: object
+      required: [code, error]
+      additionalProperties: false
+      description: A hosted-only refusal of a malformed sync request.
+      properties:
+        code:
+          type: string
+          enum: [invalid_request]
+        error:
+          type: string
+
+    ReceiptRejectedError:
+      type: object
+      required: [code, error]
+      additionalProperties: false
+      description: |
+        The receipt cannot be claimed:
+
+        - `receipt_invalid`: missing, malformed, or not signed by a region
+          the API trusts
+        - `receipt_expired`: older than 24h; upload again
+        - `receipt_wrong_region`: signed by another region than the
+          account's
+        - `receipt_wrong_user`: issued to another user
+        - `region_required`: the account has no region yet
+      properties:
+        code:
+          type: string
+          enum: [receipt_invalid, receipt_expired, receipt_wrong_region, receipt_wrong_user, region_required]
+        error:
+          type: string
+          enum: [invalid receipt]
+
+    ErrorCode:
+      type: string
+      description: |
+        The stable code of a hosted error body.
+
+        | Code | Status | Meaning |
+        |---|---|---|
+        | `invalid_request` | 400 | The request is malformed or names something unknown |
+        | `unauthorized` | 401 | No session token |
+        | `invalid_session` | 401 | The session token names no live session |
+        | `invalid_login_state` | 400 | The sign-in callback's state is missing, wrong, used or expired |
+        | `sign_in_not_completed` | 400 | The user did not complete a dashboard sign-in |
+        | `provider_error` | 502 | The identity provider rejected the sign-in |
+        | `provider_unavailable` | 503 | The identity provider cannot be reached |
+        | `invalid_code` | 400 | The app's one-time code is unknown, used or expired |
+        | `code_verifier_mismatch` | 400 | The app's PKCE verifier does not match its challenge |
+        | `refresh_token_invalid` | 401 | Sign in again |
+        | `refresh_token_reused` | 401 | The session has been signed out |
+        | `region_required` | 409 | Choose a region first |
+        | `region_already_chosen` | 409 | The region is fixed |
+        | `purge_started` | 409 | The account can no longer be restored |
+        | `reauthentication_required` | 403 | Sign in again with `reauthenticate=true` first |
+        | `not_found` | 404 | No such route or session |
+        | `method_not_allowed` | 405 | The route does not take this method |
+        | `internal_error` | 500 | An internal failure |
+      enum:
+        - invalid_request
+        - unauthorized
+        - invalid_session
+        - invalid_login_state
+        - sign_in_not_completed
+        - provider_error
+        - provider_unavailable
+        - invalid_code
+        - code_verifier_mismatch
+        - refresh_token_invalid
+        - refresh_token_reused
+        - region_required
+        - region_already_chosen
+        - purge_started
+        - reauthentication_required
+        - not_found
+        - method_not_allowed
+        - internal_error
+
+    MutationPendingError:
+      type: object
+      required: [error]
+      description: The first request under this Mutation-Id is still running; retry later.
+      properties:
+        error:
+          type: string
+          enum: [mutation still in progress]
+
+    Capability:
+      type: object
+      required: [name, version, auth_mode, signup, billing, mutation_ids, blob_storage]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          enum: [futo-notes]
+        version:
+          type: string
+          description: Server build version.
+        auth_mode:
+          type: string
+          enum: [oidc]
+          description: Sign in through `GET /api/auth/oidc/start`.
+        signup:
+          type: string
+          enum: [open]
+        billing:
+          type: boolean
+          enum: [false]
+        mutation_ids:
+          $ref: "openapi.yaml#/components/schemas/Capability/properties/mutation_ids"
+        blob_storage:
+          type: string
+          enum: [regional]
+          description: |
+            Blobs are uploaded to and downloaded from the user's region's
+            storage service (`POST /api/storage/token`), never this API.
+            Absent on self-hosted, which serves blobs itself.
+
+    Region:
+      type: object
+      required: [id, name, description, endpoint]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          example: us-east
+        name:
+          type: string
+        description:
+          type: string
+        endpoint:
+          type: string
+          description: The region's storage service base URL (`docs/openapi-storage.yaml`)
+
+    Account:
+      type: object
+      required: [user, region, deletion, usage]
+      additionalProperties: false
+      properties:
+        user:
+          $ref: "openapi.yaml#/components/schemas/User"
+        region:
+          description: "`null` until a region is chosen"
+          type: object
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/Region"
+        deletion:
+          description: "`null` unless a deletion is pending"
+          type: object
+          nullable: true
+          required: [requested_at, purge_at]
+          additionalProperties: false
+          properties:
+            requested_at:
+              type: string
+              format: date-time
+            purge_at:
+              type: string
+              format: date-time
+              description: When the purge may begin; 30 days after `requested_at`
+        usage:
+          type: object
+          required: [collections, blobs, stored_bytes]
+          additionalProperties: false
+          description: JSON **numbers**, unlike the sync contract's bigint strings
+          properties:
+            collections:
+              type: integer
+              format: int64
+              minimum: 0
+            blobs:
+              type: integer
+              format: int64
+              minimum: 0
+              description: Claimed and retained blobs
+            stored_bytes:
+              type: integer
+              format: int64
+              minimum: 0
+
+    Session:
+      type: object
+      required: [id, created_at, last_used_at, expires_at, user_agent, device_name, current]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        last_used_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+          description: 90 days after `last_used_at`
+        user_agent:
+          type: string
+          description: The `User-Agent` that signed in; may be empty
+        device_name:
+          type: string
+          nullable: true
+          description: |
+            The `device_name` the app signed in with; `null` when it gave
+            none (show `user_agent` instead)
+        current:
+          type: boolean
+          description: Whether this is the session making the request
+
+    CreateObjectRequest:
+      type: object
+      required: [receipt]
+      properties:
+        receipt:
+          type: string
+          description: The receipt JWT from the storage service's `POST /blobs`
+
+    UpdateObjectRequest:
+      type: object
+      required: [version, receipt]
+      properties:
+        version:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Must be the object's current version + 1.
+        receipt:
+          type: string
+          description: The receipt JWT from the storage service's `POST /blobs`

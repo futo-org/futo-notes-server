@@ -1,0 +1,47 @@
+{{- /* Runs `api migrate` before the release's pods change. A pre-* hook, not
+backups' post-*: the API refuses to start with migrations pending, and Helm
+(and Flux, which waits by default) runs post-* hooks only once the new pods
+are Ready, which they never become before migrating. Pods of the previous
+release keep serving meanwhile, so migrations must stay backward compatible
+for one release. The CNPG cluster (charts/platform/cnpg-cluster) and its
+"<cluster>-app" Secret must exist before the first install. */}}
+{{- if .Values.migration.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "notes-common.fullname" . }}-migrate
+  labels:
+    {{- include "notes-common.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  # A database still starting fails fast; retrying covers it.
+  backoffLimit: 10
+  template:
+    metadata:
+      labels:
+        {{- include "notes-common.selectorLabels" . | nindent 8 }}
+        job: migrate
+    spec:
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy | default "IfNotPresent" }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          command: ["api", "migrate"]
+          env:
+            {{- include "api.postgresEnv" . | nindent 12 }}
+{{- end }}

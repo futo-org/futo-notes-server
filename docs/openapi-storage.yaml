@@ -1,0 +1,609 @@
+openapi: 3.0.3
+
+info:
+  title: FUTO Notes Hosted Storage API
+  version: "1.0.0"
+  description: |
+    HTTP contract of one region's hosted storage service (`cmd/storage`).
+    Each region (`us-east`, `eu-central`, `ap-southeast`) runs its own
+    deployment against its own S3 bucket; keys are `<userId>/<blobId>`.
+
+    Clients upload and download ciphertext here directly with a 24h **access
+    token** from the API's `POST /api/storage/token`. The API's background
+    jobs call the `/internal` endpoints with 5-minute **admin tokens**. Both
+    are Ed25519 JWTs signed by the API, with `aud` = the region id; see
+    `internal/hostedauth`.
+
+    Every upload returns a **receipt**: a JWT signed by this region
+    (`iss` = region id, `aud` = `notes-api`, `sub`, `key`, `size`, 24h) that
+    the client hands to the API when an object claims the blob.
+
+    Every error body is `{"statusCode", "code", "message", "requestId"}`;
+    the `X-Request-Id` response header carries the same request id. `code`
+    is stable (the `ErrorCode` schema lists them); branch on it, never on
+    `message`, which is for people and may change. Each response below
+    names the codes it can carry.
+
+    | Limit | Value |
+    |---|---|
+    | upload body | 1 byte to 100 MiB (104857600), `Content-Length` required |
+    | batch request body | 64 KiB |
+    | batch keys | 1 to 200, each at most 128 characters |
+    | batch response payload | 32 MiB (33554432), but the first available blob always ships |
+    | admin delete keys | 1 to 1000 |
+    | admin list page | 1 to 1000 (default 1000) |
+    | user purge per call | up to 1000 objects |
+
+    Any operation may also answer `500` with the error body when S3 fails.
+  license:
+    name: FUTO Source First License
+    url: https://sourcefirst.com/
+
+servers:
+  - url: "{baseUrl}"
+    description: One region's storage endpoint, as listed by `GET /api/regions`
+    variables:
+      baseUrl:
+        default: http://localhost:3015
+
+tags:
+  - name: blobs
+    description: Client ciphertext, under an access token
+  - name: internal
+    description: API jobs (GC, reconciliation, account purge), under an admin token
+  - name: health
+    description: Kubernetes probes
+
+paths:
+  /blobs:
+    post:
+      operationId: uploadBlob
+      tags: [blobs]
+      summary: Store one blob and get a receipt for it
+      description: |
+        The server mints the key `<sub>/<uuidv7>` and stores the body with a
+        create-only conditional write. The body is streamed straight to S3;
+        a body that ends before `Content-Length` bytes stores nothing.
+      security:
+        - accessToken: []
+      parameters:
+        - name: Content-Length
+          in: header
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 104857600
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "201":
+          description: Stored
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadResponse"
+        "400":
+          description: "`invalid_request`: an empty body, or the body ended early"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "411":
+          description: "`length_required`: no `Content-Length` (for example a chunked body)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "413":
+          description: "`payload_too_large`: `Content-Length` over 100 MiB"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/StorageError"
+
+  /blobs/{userId}/{blobId}:
+    get:
+      operationId: getBlob
+      tags: [blobs]
+      summary: Download one blob, or a byte range of it
+      description: |
+        `userId` must be the token's `sub`. Another user's key, a malformed
+        `blobId` and an absent blob all answer `404`, so a key's existence
+        never leaks.
+
+        A single byte range (`bytes=a-b`, `bytes=a-`, `bytes=-n`) answers
+        `206`. Any other `Range` value (several ranges, `last < first`,
+        malformed) is ignored and the whole blob is served.
+      security:
+        - accessToken: []
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+        - name: blobId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: Range
+          in: header
+          required: false
+          schema:
+            type: string
+            example: bytes=0-1023
+      responses:
+        "200":
+          description: The whole blob
+          headers:
+            Content-Length:
+              $ref: "#/components/headers/ContentLength"
+            Accept-Ranges:
+              $ref: "#/components/headers/AcceptRanges"
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "206":
+          description: The requested range
+          headers:
+            Content-Length:
+              $ref: "#/components/headers/ContentLength"
+            Accept-Ranges:
+              $ref: "#/components/headers/AcceptRanges"
+            Content-Range:
+              required: true
+              description: "`bytes first-last/size`"
+              schema:
+                type: string
+                pattern: '^bytes \d+-\d+/\d+$'
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "416":
+          description: "`range_not_satisfiable`: the range starts past the end of the blob"
+          headers:
+            Content-Range:
+              required: true
+              description: "`bytes */size`"
+              schema:
+                type: string
+                pattern: '^bytes \*/\d+$'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/StorageError"
+
+  /blobs/batch:
+    post:
+      operationId: batchFetchBlobs
+      tags: [blobs]
+      summary: Fetch up to 200 blobs in one request
+      description: |
+        Same request, limits and frame format as the self-hosted
+        `POST /api/blobs/batch`. One frame per requested key, in request
+        order, integers big-endian:
+
+        ```
+        [u16 keyLen][key utf8][u8 status][u32 blobLen][blob bytes]
+        ```
+
+        | status | meaning |
+        |---|---|
+        | `0` ok | `blobLen` bytes of blob follow |
+        | `1` missing | absent, malformed, outside the caller's namespace, or over 100 MiB; `blobLen = 0` |
+        | `2` omitted | including this blob would push the response past 32 MiB; re-request it in a fresh batch; `blobLen = 0` |
+
+        The cap counts every frame's 7 fixed bytes, UTF-8 key bytes, and blob
+        bytes. The first available blob always ships even if its frame alone
+        exceeds the cap, so a client always makes progress.
+
+        A storage failure after the `200` has been sent aborts the connection
+        mid-body rather than emitting an error frame; clients see a truncated
+        transfer and retry.
+      security:
+        - accessToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [keys]
+              properties:
+                keys:
+                  type: array
+                  minItems: 1
+                  maxItems: 200
+                  items:
+                    type: string
+                    maxLength: 128
+      responses:
+        "200":
+          description: Binary frame stream
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "400":
+          description: |
+            `invalid_request`: invalid JSON (`invalid json`), empty `keys`
+            (`keys must not be empty`), more than 200 keys (`too many keys
+            (max 200)`), a non-string key (`keys must be strings`), or a key
+            over 128 characters (`key too long (max 128 chars)`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          description: "`payload_too_large`: request body over 64 KiB"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /internal/blobs:
+    delete:
+      operationId: deleteBlobs
+      tags: [internal]
+      summary: Delete a list of blobs
+      description: |
+        Used by blob GC. Keys that are already gone count as deleted.
+        Per-key failures are reported in `failed` with a `200`; retry those
+        keys.
+      security:
+        - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [keys]
+              properties:
+                keys:
+                  type: array
+                  minItems: 1
+                  maxItems: 1000
+                  items:
+                    $ref: "#/components/schemas/BlobKey"
+      responses:
+        "200":
+          description: Done; see `failed`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteBlobsResponse"
+        "400":
+          description: |
+            `invalid_request`: invalid JSON, empty `keys`, more than 1000
+            keys, or a key that is not `<userId>/<blobId>` (lowercase
+            `userId`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          description: "`payload_too_large`: request body over 128 KiB"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/StorageError"
+    get:
+      operationId: listBlobs
+      tags: [internal]
+      summary: List stored blobs, a page at a time
+      description: |
+        Used by orphan reconciliation. Lists in key order. `older_than` is
+        applied after S3 returns a page, so a page may hold fewer than
+        `limit` blobs, or none, while `next_cursor` is still set. Keep
+        calling with `cursor = next_cursor` until it is `null`.
+      security:
+        - adminToken: []
+      parameters:
+        - name: prefix
+          in: query
+          required: false
+          description: Empty for the whole bucket, or one user's `<userId>/`
+          schema:
+            type: string
+            pattern: '^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/)?$'
+        - name: older_than
+          in: query
+          required: false
+          description: Only blobs last modified strictly before this instant
+          schema:
+            type: string
+            format: date-time
+        - name: cursor
+          in: query
+          required: false
+          description: A previous page's `next_cursor`
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          description: Keys to scan for this page
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 1000
+      responses:
+        "200":
+          description: One page
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListBlobsResponse"
+        "400":
+          description: "`invalid_request`: a bad `prefix`, `older_than` or `limit`"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/StorageError"
+
+  /internal/users/{userId}:
+    delete:
+      operationId: purgeUser
+      tags: [internal]
+      summary: Delete up to 1000 of a user's blobs
+      description: |
+        Used by account purge. Each call deletes up to 1000 objects under
+        `<userId>/`. Call again until `done` is `true`. Idempotent: a purged
+        user answers `{"deleted": 0, "done": true}`.
+      security:
+        - adminToken: []
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "200":
+          description: Progress
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PurgeUserResponse"
+        "400":
+          description: "`invalid_request`: `userId` is not a lowercase canonical UUID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/StorageError"
+
+  /readyz:
+    get:
+      operationId: ready
+      tags: [health]
+      summary: Readiness probe
+      description: |
+        `200` while serving; `503` once SIGTERM starts the drain, while
+        in-flight and new requests are still served. Does not check S3. Not
+        logged, not counted in metrics, and outside the `X-Request-Id` chain.
+      security: []
+      responses:
+        "200":
+          description: Ready
+        "503":
+          description: Draining
+          content:
+            text/plain:
+              schema:
+                type: string
+
+components:
+  securitySchemes:
+    accessToken:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        API-signed access token: `iss` = `notes-api`, `aud` = this region,
+        `scope` = `blobs`, `sub` = user id, 24h.
+    adminToken:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        API-signed admin token: `iss` = `notes-api`, `aud` = this region,
+        `scope` = `admin`, no `sub`, 5 minutes.
+
+  parameters:
+    UserId:
+      name: userId
+      in: path
+      required: true
+      schema:
+        type: string
+
+  headers:
+    RequestId:
+      description: The request id, also logged and echoed in error bodies
+      schema:
+        type: string
+    ContentLength:
+      required: true
+      schema:
+        type: integer
+        minimum: 0
+    AcceptRanges:
+      required: true
+      schema:
+        type: string
+        enum: [bytes]
+
+  responses:
+    Unauthorized:
+      description: |
+        `unauthorized`: no Bearer token. `invalid_token`: one that is
+        expired, for another region, of the wrong kind, or otherwise
+        invalid.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: "`not_found`"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    StorageError:
+      description: "`internal_error`: S3 failed"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+  schemas:
+    Error:
+      type: object
+      required: [statusCode, code, message, requestId]
+      additionalProperties: false
+      properties:
+        statusCode:
+          type: integer
+        code:
+          $ref: "#/components/schemas/ErrorCode"
+        message:
+          type: string
+          description: For people; may change. Branch on `code`.
+        requestId:
+          type: string
+    ErrorCode:
+      type: string
+      description: |
+        The stable code of an error body.
+
+        | Code | Status | Meaning |
+        |---|---|---|
+        | `invalid_request` | 400 | The request is malformed |
+        | `unauthorized` | 401 | No Bearer token |
+        | `invalid_token` | 401 | The token is expired, for another region, of the wrong kind, or invalid |
+        | `not_found` | 404 | No such blob or route |
+        | `method_not_allowed` | 405 | The route does not take this method |
+        | `length_required` | 411 | No `Content-Length` |
+        | `payload_too_large` | 413 | The body is over the limit |
+        | `range_not_satisfiable` | 416 | The range starts past the end of the blob |
+        | `internal_error` | 500 | S3 or another internal failure |
+        | `client_closed_request` | 499 | Logged only: the client left before the answer |
+      enum:
+        - invalid_request
+        - unauthorized
+        - invalid_token
+        - not_found
+        - method_not_allowed
+        - length_required
+        - payload_too_large
+        - range_not_satisfiable
+        - internal_error
+        - client_closed_request
+    BlobKey:
+      type: string
+      description: "`<userId>/<blobId>`"
+      pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    UploadResponse:
+      type: object
+      required: [key, size, receipt]
+      additionalProperties: false
+      properties:
+        key:
+          $ref: "#/components/schemas/BlobKey"
+        size:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 104857600
+        receipt:
+          type: string
+          description: Region-signed JWT naming `sub`, `key` and `size`
+    DeleteBlobsResponse:
+      type: object
+      required: [deleted, failed]
+      additionalProperties: false
+      properties:
+        deleted:
+          type: integer
+          minimum: 0
+          description: Keys now absent, including ones already gone
+        failed:
+          type: array
+          items:
+            type: object
+            required: [key, message]
+            additionalProperties: false
+            properties:
+              key:
+                type: string
+              message:
+                type: string
+                description: S3 error code and message
+    ListBlobsResponse:
+      type: object
+      required: [blobs, next_cursor]
+      additionalProperties: false
+      properties:
+        blobs:
+          type: array
+          items:
+            type: object
+            required: [key, size, last_modified]
+            additionalProperties: false
+            properties:
+              key:
+                type: string
+              size:
+                type: integer
+                format: int64
+                minimum: 0
+              last_modified:
+                type: string
+                format: date-time
+        next_cursor:
+          type: string
+          nullable: true
+    PurgeUserResponse:
+      type: object
+      required: [deleted, done]
+      additionalProperties: false
+      properties:
+        deleted:
+          type: integer
+          minimum: 0
+          maximum: 1000
+        done:
+          type: boolean

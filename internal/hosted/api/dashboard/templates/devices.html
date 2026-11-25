@@ -1,0 +1,36 @@
+{{define "title"}}Devices{{end}}
+
+{{define "main" -}}
+<h1>Devices</h1>
+<p>These devices are signed in to your account. Signing a device out also ends its access to storage; it has to sign in again to sync.
+To sign out this browser, use <strong>Sign out</strong> at the top.</p>
+{{template "devices-list" .}}
+{{- end}}
+
+{{define "devices-list" -}}
+<section id="devices" class="card" aria-labelledby="devices-heading">
+<h2 id="devices-heading">Signed-in devices</h2>
+<table>
+<thead>
+<tr><th scope="col">Device</th><th scope="col">Signed in</th><th scope="col">Last used</th><th scope="col"><span class="visually-hidden">Action</span></th></tr>
+</thead>
+<tbody>
+{{- range .Devices}}
+<tr>
+<td class="ua">{{if .DeviceName}}{{.DeviceName}}{{else if .UserAgent}}{{.UserAgent}}{{else}}Unknown device{{end}}{{if .Current}} <span class="tag">This device</span>{{end}}</td>
+<td><time datetime="{{isoTime .CreatedAt}}">{{utcTime .CreatedAt}}</time></td>
+<td><time datetime="{{isoTime .LastUsedAt}}">{{utcTime .LastUsedAt}}</time></td>
+<td>
+{{- if not .Current}}
+<form method="post" action="/dashboard/devices/{{.ID}}/revoke" hx-post="/dashboard/devices/{{.ID}}/revoke" hx-target="#devices" hx-swap="outerHTML">
+{{template "csrf-field" $}}
+<button type="submit" class="secondary" aria-label="Sign out device signed in {{utcTime .CreatedAt}}">Sign out</button>
+</form>
+{{- end}}
+</td>
+</tr>
+{{- end}}
+</tbody>
+</table>
+</section>
+{{- end}}

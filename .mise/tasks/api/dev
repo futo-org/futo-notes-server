@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+#MISE description="Run the hosted API on the host (:3005) against compose Postgres and mock-oidc, with the dev keys"
+#MISE dir="{{config_root}}"
+# Needs `mise run docker:start` first. Runs on the host rather than in compose
+# because the mock issuer is http://localhost:8092, a name the API must
+# resolve the same way browsers do. Applies migrations, then serves; the dev
+# page is at http://localhost:3005/dev. Regions point at the storage dev ports
+# (3015-3017, `mise run storage:dev` or compose profile "services").
+set -euo pipefail
+
+export API_PORT="${API_PORT:-3005}"
+export PUBLIC_URL="${PUBLIC_URL:-http://localhost:$API_PORT}"
+export POSTGRES_HOST="${POSTGRES_HOST:-localhost}"
+export POSTGRES_PORT="${POSTGRES_PORT:-15432}"
+export POSTGRES_DATABASE="${POSTGRES_DATABASE:-notes}"
+export POSTGRES_USERNAME="${POSTGRES_USERNAME:-postgres}"
+export POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-postgres}"
+export OIDC_ISSUER="${OIDC_ISSUER:-http://localhost:8092}"
+export OIDC_CLIENT_ID="${OIDC_CLIENT_ID:-notes-dev}"
+export OIDC_CLIENT_SECRET="${OIDC_CLIENT_SECRET:-notes-dev-secret}"
+# Release and dev builds of the apps, so either can sign in locally.
+export APP_REDIRECT_SCHEMES="${APP_REDIRECT_SCHEMES:-tech.futo.notes,tech.futo.notes.dev}"
+export REGIONS_FILE="${REGIONS_FILE:-dev/hosted-regions.json}"
+export API_SIGNING_KEY="${API_SIGNING_KEY:-$(cat dev/hosted-keys/api.key.pem)}"
+export STORAGE_REFRESH_ROTATION_KEY="${STORAGE_REFRESH_ROTATION_KEY:-$(cat dev/hosted-keys/storage-refresh-rotation.key)}"
+export COOKIE_SECURE="${COOKIE_SECURE:-false}"
+export DEV_UI="${DEV_UI:-true}"
+export OTLP_METRICS_ENDPOINT="${OTLP_METRICS_ENDPOINT:-localhost:8428}"
+export OTLP_METRICS_URL_PATH="${OTLP_METRICS_URL_PATH:-/opentelemetry/v1/metrics}"
+export DRAIN_DELAY_MS="${DRAIN_DELAY_MS:-0}"
+export LOG_FORMAT="${LOG_FORMAT:-pretty}"
+export LOG_LEVEL="${LOG_LEVEL:-debug}"
+
+go build -o dist/api ./cmd/api
+dist/api migrate
+exec dist/api

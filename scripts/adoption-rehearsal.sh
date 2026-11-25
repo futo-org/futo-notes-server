@@ -169,7 +169,7 @@ start_go() {
   (
     cd "$repo_root"
     exec env AUTH_MODE=password PORT="$port" DATABASE_URL="postgres://futo_notes:$postgres_password@$postgres_host:$postgres_port/$active_database" \
-      BLOB_DIR="$blob_dir" COOKIE_SECURE=false BLOB_GC_ENABLED=false DEV_UI=true \
+      BLOB_DIR="$blob_dir" COOKIE_SECURE=false BLOB_GC_ENABLED=false DEV_UI=true LOG_FORMAT=json \
       FUTO_NOTES_PASSWORD= FUTO_NOTES_PASSWORD_HASH="$password_hash" "$go_server"
   ) >"$server_log" 2>&1 &
   server_pid=$!
@@ -442,7 +442,7 @@ rehearse() {
     assert_eq "old-version migrations applied" \
       "$(scalar "SELECT string_agg(name, ',' ORDER BY name) FROM kysely_migration WHERE name >= '009_'")" \
       '009_restore_plural_collections,010_authoritative_blob_ledger,011_mutation_results'
-    if ! rg -q 'count=3 migrations="009_restore_plural_collections, 010_authoritative_blob_ledger, 011_mutation_results"' "$server_log"; then
+    if ! rg -F -q '"count":3,"migrations":"009_restore_plural_collections, 010_authoritative_blob_ledger, 011_mutation_results"' "$server_log"; then
       echo "Go did not report exactly migrations 009-011 for old TS adoption" >&2
       exit 1
     fi

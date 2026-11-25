@@ -38,7 +38,7 @@ func TestBlobGCRegistrationCanBeDisabled(t *testing.T) {
 			if len(jobs) != test.wantJobCount {
 				t.Fatalf("job count = %d, want %d", len(jobs), test.wantJobCount)
 			}
-			if got := jobs[len(jobs)-1].name; got != test.wantLastJob {
+			if got := jobs[len(jobs)-1].Name; got != test.wantLastJob {
 				t.Fatalf("last job = %q, want %q", got, test.wantLastJob)
 			}
 		})
@@ -55,28 +55,27 @@ func TestRunnerRepeatsAndContinuesAfterJobErrors(t *testing.T) {
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			run(ctx, Schedule{
+			RunJobs(ctx, Schedule{
 				InitialDelay:        time.Minute,
 				SessionInterval:     time.Hour,
 				MaintenanceInterval: 6 * time.Hour,
-			}, scheduledJobs{
-				sessions: []scheduledJob{{name: "sessions", run: func(context.Context) (string, error) {
-					if sessionRuns.Add(1) == 1 {
-						return "first run", jobError
-					}
-					return "later run", nil
-				}}},
-				maintenance: []scheduledJob{
-					{name: "failing maintenance", run: func(context.Context) (string, error) {
+			}, []Job{{Name: "sessions", Run: func(context.Context) (string, error) {
+				if sessionRuns.Add(1) == 1 {
+					return "first run", jobError
+				}
+				return "later run", nil
+			}}},
+				[]Job{
+					{Name: "failing maintenance", Run: func(context.Context) (string, error) {
 						failingMaintenanceRuns.Add(1)
 						return "failed", jobError
 					}},
-					{name: "later maintenance", run: func(context.Context) (string, error) {
+					{Name: "later maintenance", Run: func(context.Context) (string, error) {
 						laterMaintenanceRuns.Add(1)
 						return "ran", nil
 					}},
 				},
-			})
+			)
 		}()
 
 		assertRuns := func(when string, sessions, maintenance int32) {

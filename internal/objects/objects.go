@@ -38,6 +38,9 @@ var (
 	// ErrMutationPending reports that the first request under a Mutation ID
 	// has not finished yet.
 	ErrMutationPending = errors.New("mutation still in progress")
+	// ErrReceiptUsed reports that a mutation named a ReceiptBlob whose key the
+	// blob ledger already records, so the receipt was already spent.
+	ErrReceiptUsed = errors.New("receipt already used")
 )
 
 // ConflictError reports a mutation that named a version other than the one
@@ -117,12 +120,6 @@ func New(database *db.DB, publisher events.Publisher) *Store {
 
 // ValidMutationID reports whether id is a well-formed client Mutation ID.
 func ValidMutationID(id string) bool { return mutationIDPattern.MatchString(id) }
-
-// ValidBlobKey reports whether key is a blob key scoped to userID: the user's
-// UUID, a slash, and a blob UUID.
-func ValidBlobKey(userID, key string) bool {
-	return len(userID) == 36 && len(key) == 73 && key[:36] == userID && key[36] == '/' && ids.IsUUID(key[37:])
-}
 
 func scanObject(row db.Scanner) (Object, error) {
 	var o Object
@@ -262,8 +259,11 @@ func (r storedResult) mutationResponse(create bool) (MutationResponse, error) {
 		if err := json.Unmarshal(r.Body, &body); err != nil {
 			return MutationResponse{}, err
 		}
-		if body.Error == "blob is not staged" {
+		switch body.Error {
+		case "blob is not staged":
 			return MutationResponse{}, ErrBlobNotStaged
+		case ErrReceiptUsed.Error():
+			return MutationResponse{}, ErrReceiptUsed
 		}
 		return MutationResponse{}, r.conflict()
 	case http.StatusProcessing:
@@ -486,6 +486,8 @@ func fail(ctx context.Context, tx *db.Tx, in intent, err error) error {
 		status, body = http.StatusConflict, conflict.Conflict
 	case errors.Is(err, ErrBlobNotStaged):
 		status, body = http.StatusConflict, errorBody{Error: "blob is not staged"}
+	case errors.Is(err, ErrReceiptUsed):
+		status, body = http.StatusConflict, errorBody{Error: ErrReceiptUsed.Error()}
 	case errors.Is(err, ErrNotFound):
 		status, body = http.StatusNotFound, errorBody{Error: "not found"}
 	default:
@@ -529,6 +531,44 @@ func lockObject(ctx context.Context, tx *db.Tx, in intent) (Object, error) {
 		return Object{}, ErrNotFound
 	}
 	return current, err
+}
+
+// Blob is the blob a create or update points its object at. StagedBlob and
+// ReceiptBlob are the two ways a mutation can obtain one.
+type Blob struct {
+	key     string
+	size    int64
+	receipt bool
+}
+
+// StagedBlob is a blob the user uploaded to this server, which recorded it in
+// the ledger as staged. The mutation claims it only while it is still staged
+// and less than 24 hours old, and fails with ErrBlobNotStaged otherwise.
+func StagedBlob(key string) Blob { return Blob{key: key} }
+
+// ReceiptBlob is a blob a storage service holds, as a receipt the caller has
+// already verified describes it. The server never saw the upload, so the
+// mutation records the key in the ledger itself, already claimed, and fails
+// with ErrReceiptUsed when the ledger knows the key.
+func ReceiptBlob(key string, size int64) Blob { return Blob{key: key, size: size, receipt: true} }
+
+// take reserves the blob for the mutation in tx and returns its size.
+func (b Blob) take(ctx context.Context, tx *db.Tx, userID string) (int64, error) {
+	if !b.receipt {
+		return stagedBlobSize(ctx, tx, userID, b.key)
+	}
+	// Two mutations spending the same receipt race on the primary key: the
+	// loser waits for the winner's transaction and then inserts nothing.
+	var inserted int
+	now := db.Timestamp(time.Now())
+	err := tx.QueryRowContext(ctx, `INSERT INTO blob_ledger
+		(blob_key, user_id, size_bytes, state, created_at, state_changed_at)
+		VALUES ($1, $2, $3, 'claimed', $4, $4)
+		ON CONFLICT (blob_key) DO NOTHING RETURNING 1`, b.key, userID, b.size, now).Scan(&inserted)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrReceiptUsed
+	}
+	return b.size, err
 }
 
 // stagedBlobSize locks the user's staged blob and returns its size, or
@@ -607,8 +647,50 @@ func (s *Store) ReserveCreate(ctx context.Context, m Mutation) (Reservation, err
 	return Reservation{Replay: &response, mutation: in.Mutation}, nil
 }
 
-// Create records a new object for the staged blob blobKey.
-func (s *Store) Create(ctx context.Context, m Mutation, blobKey string) (MutationResponse, error) {
+// ReplayCreate returns the outcome a create Mutation ID already carries,
+// without claiming the ID: a completed create as the response with replayed
+// set, a failed one as its error. replayed is false when the ID carries no
+// result, so a create would run. A caller whose blob still needs checking
+// asks first, so a retry gets its original answer whatever the blob now is.
+func (s *Store) ReplayCreate(ctx context.Context, m Mutation) (response MutationResponse, replayed bool, err error) {
+	stored, found, err := s.storedResult(ctx, createIntent(m))
+	if err != nil || !found {
+		return MutationResponse{}, false, err
+	}
+	response, err = stored.mutationResponse(true)
+	return response, true, err
+}
+
+// ReplayUpdate is ReplayCreate for an update to version.
+func (s *Store) ReplayUpdate(ctx context.Context, m Mutation, version int64) (response MutationResponse, replayed bool, err error) {
+	stored, found, err := s.storedResult(ctx, intent{Mutation: m, kind: kindUpdate, requestedVersion: &version})
+	if err != nil || !found {
+		return MutationResponse{}, false, err
+	}
+	response, err = stored.mutationResponse(false)
+	return response, true, err
+}
+
+// storedResult returns the result the intent's Mutation ID carries, and
+// whether it carries one. A pending result counts: the request that claimed
+// the ID is still running.
+func (s *Store) storedResult(ctx context.Context, in intent) (storedResult, bool, error) {
+	if in.MutationID == "" {
+		return storedResult{}, false, nil
+	}
+	tx, stored, err := s.begin(ctx, in, false)
+	if err != nil {
+		return storedResult{}, false, err
+	}
+	if tx != nil {
+		tx.Discard()
+		return storedResult{}, false, nil
+	}
+	return *stored, true, nil
+}
+
+// Create records a new object for blob.
+func (s *Store) Create(ctx context.Context, m Mutation, blob Blob) (MutationResponse, error) {
 	reservation, err := s.ReserveCreate(ctx, m)
 	if err != nil {
 		return MutationResponse{}, err
@@ -616,12 +698,12 @@ func (s *Store) Create(ctx context.Context, m Mutation, blobKey string) (Mutatio
 	if reservation.Replay != nil {
 		return *reservation.Replay, nil
 	}
-	return s.CreateReserved(ctx, reservation, blobKey)
+	return s.CreateReserved(ctx, reservation, blob)
 }
 
-// CreateReserved records a new object for the staged blob blobKey under the
-// claim ReserveCreate took.
-func (s *Store) CreateReserved(ctx context.Context, reservation Reservation, blobKey string) (MutationResponse, error) {
+// CreateReserved records a new object for blob under the claim ReserveCreate
+// took.
+func (s *Store) CreateReserved(ctx context.Context, reservation Reservation, blob Blob) (MutationResponse, error) {
 	in := createIntent(reservation.mutation)
 	tx, stored, err := s.begin(ctx, in, reservation.prepared)
 	if err != nil {
@@ -634,7 +716,7 @@ func (s *Store) CreateReserved(ctx context.Context, reservation Reservation, blo
 	if err := lockCollection(ctx, tx, in); err != nil {
 		return MutationResponse{}, fail(ctx, tx, in, err)
 	}
-	size, err := stagedBlobSize(ctx, tx, in.UserID, blobKey)
+	size, err := blob.take(ctx, tx, in.UserID)
 	if err != nil {
 		return MutationResponse{}, fail(ctx, tx, in, err)
 	}
@@ -647,12 +729,12 @@ func (s *Store) CreateReserved(ctx context.Context, reservation Reservation, blo
 	o, err := scanObject(tx.QueryRowContext(ctx, `INSERT INTO objects
 		(id, collection_id, user_id, version, change_seq, blob_key, size_bytes, created_at, updated_at)
 		VALUES ($1, $2, $3, 1, $4, $5, $6, $7, $7) RETURNING `+objectColumns,
-		objectID, in.CollectionID, in.UserID, collectionVersion, blobKey, size, now))
+		objectID, in.CollectionID, in.UserID, collectionVersion, blob.key, size, now))
 	if err != nil {
 		return MutationResponse{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE blob_ledger SET state = 'claimed', collection_id = $2,
-		object_id = $3, object_version = 1, state_changed_at = $4 WHERE blob_key = $1`, blobKey, in.CollectionID, objectID, now); err != nil {
+		object_id = $3, object_version = 1, state_changed_at = $4 WHERE blob_key = $1`, blob.key, in.CollectionID, objectID, now); err != nil {
 		return MutationResponse{}, err
 	}
 	// The stored result names the object the create made.
@@ -664,9 +746,9 @@ func (s *Store) CreateReserved(ctx context.Context, reservation Reservation, blo
 	return response, nil
 }
 
-// Update replaces the object's blob with the staged blob blobKey. version
-// must be exactly one more than the object's current version.
-func (s *Store) Update(ctx context.Context, m Mutation, blobKey string, version int64) (MutationResponse, error) {
+// Update points the object at blob. version must be exactly one more than the
+// object's current version.
+func (s *Store) Update(ctx context.Context, m Mutation, blob Blob, version int64) (MutationResponse, error) {
 	in := intent{Mutation: m, kind: kindUpdate, requestedVersion: &version}
 	prepared, err := s.prepare(ctx, in)
 	if err != nil {
@@ -690,7 +772,7 @@ func (s *Store) Update(ctx context.Context, m Mutation, blobKey string, version 
 	if version != current.Version+1 {
 		return MutationResponse{}, fail(ctx, tx, in, conflictWith(current))
 	}
-	size, err := stagedBlobSize(ctx, tx, in.UserID, blobKey)
+	size, err := blob.take(ctx, tx, in.UserID)
 	if err != nil {
 		return MutationResponse{}, fail(ctx, tx, in, err)
 	}
@@ -701,7 +783,7 @@ func (s *Store) Update(ctx context.Context, m Mutation, blobKey string, version 
 	now := db.Timestamp(time.Now())
 	o, err := scanObject(tx.QueryRowContext(ctx, `UPDATE objects SET version = $2, change_seq = $3,
 		blob_key = $4, size_bytes = $5, updated_at = $6 WHERE id = $1 RETURNING `+objectColumns,
-		in.ObjectID, version, collectionVersion, blobKey, size, now))
+		in.ObjectID, version, collectionVersion, blob.key, size, now))
 	if err != nil {
 		return MutationResponse{}, err
 	}
@@ -709,7 +791,7 @@ func (s *Store) Update(ctx context.Context, m Mutation, blobKey string, version 
 		return MutationResponse{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE blob_ledger SET state = 'claimed', collection_id = $2,
-		object_id = $3, object_version = $4, state_changed_at = $5 WHERE blob_key = $1`, blobKey, in.CollectionID, in.ObjectID, version, now); err != nil {
+		object_id = $3, object_version = $4, state_changed_at = $5 WHERE blob_key = $1`, blob.key, in.CollectionID, in.ObjectID, version, now); err != nil {
 		return MutationResponse{}, err
 	}
 	response := MutationResponse{Object: o, CollectionVersion: collectionVersion}

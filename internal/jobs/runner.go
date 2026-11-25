@@ -3,8 +3,9 @@ package jobs
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"time"
+
+	"github.com/rs/zerolog/log"
 
 	"futo-notes-server/internal/blobs"
 	"futo-notes-server/internal/db"
@@ -30,41 +31,48 @@ var DefaultSchedule = Schedule{
 func Run(ctx context.Context, database *db.DB, store *blobs.Store, schedule Schedule, collectGarbage bool) {
 	maintenance := maintenanceJobs(database, store, collectGarbage)
 
-	run(ctx, schedule, scheduledJobs{
-		sessions: []scheduledJob{{
-			name: "sessions",
-			run: func(ctx context.Context) (string, error) {
-				result, err := ReapSessions(ctx, database)
-				return fmt.Sprintf("reaped %d", result.Reaped), err
-			},
-		}},
-		maintenance: maintenance,
-	})
+	RunJobs(ctx, schedule, []Job{SessionReaping(database)}, maintenance)
+}
+
+// SessionReaping is the job that runs ReapSessions.
+func SessionReaping(database *db.DB) Job {
+	return Job{
+		Name: "sessions",
+		Run: func(ctx context.Context) (string, error) {
+			result, err := ReapSessions(ctx, database)
+			return fmt.Sprintf("reaped %d", result.Reaped), err
+		},
+	}
+}
+
+// MutationResultExpiry is the job that runs ExpireMutationResults.
+func MutationResultExpiry(database *db.DB) Job {
+	return Job{
+		Name: "mutation results",
+		Run: func(ctx context.Context) (string, error) {
+			result, err := ExpireMutationResults(ctx, database)
+			return fmt.Sprintf("expired %d pending, %d other", result.PendingExpired, result.OtherExpired), err
+		},
+	}
 }
 
 // maintenanceJobs lists the maintenance group, with blob GC only when
 // collectGarbage is set.
-func maintenanceJobs(database *db.DB, store *blobs.Store, collectGarbage bool) []scheduledJob {
-	maintenance := []scheduledJob{
+func maintenanceJobs(database *db.DB, store *blobs.Store, collectGarbage bool) []Job {
+	maintenance := []Job{
 		{
-			name: "storage reconciliation",
-			run: func(ctx context.Context) (string, error) {
+			Name: "storage reconciliation",
+			Run: func(ctx context.Context) (string, error) {
 				result, err := ReconcileStorage(ctx, database, store)
 				return fmt.Sprintf("adopted %d, skipped %d, cap hit %t", result.Adopted, result.Skipped, result.CapHit), err
 			},
 		},
-		{
-			name: "mutation results",
-			run: func(ctx context.Context) (string, error) {
-				result, err := ExpireMutationResults(ctx, database)
-				return fmt.Sprintf("expired %d pending, %d other", result.PendingExpired, result.OtherExpired), err
-			},
-		},
+		MutationResultExpiry(database),
 	}
 	if collectGarbage {
-		maintenance = append(maintenance, scheduledJob{
-			name: "blob GC",
-			run: func(ctx context.Context) (string, error) {
+		maintenance = append(maintenance, Job{
+			Name: "blob GC",
+			Run: func(ctx context.Context) (string, error) {
 				result, err := GarbageCollectBlobs(ctx, database, store)
 				return fmt.Sprintf("purged %d rows, removed %d files", result.RowsPurged, result.FilesRemoved), err
 			},
@@ -73,21 +81,17 @@ func maintenanceJobs(database *db.DB, store *blobs.Store, collectGarbage bool) [
 	return maintenance
 }
 
-// scheduledJob is one named job. run returns a human-readable summary for the
-// log, even on error.
-type scheduledJob struct {
-	name string
-	run  func(context.Context) (string, error)
+// Job is one named job. Run returns a human-readable summary for the log, even
+// on error.
+type Job struct {
+	Name string
+	Run  func(context.Context) (string, error)
 }
 
-// scheduledJobs holds the two job groups Run fires on separate intervals.
-type scheduledJobs struct {
-	sessions    []scheduledJob
-	maintenance []scheduledJob
-}
-
-// run is Run with the jobs injectable for tests.
-func run(ctx context.Context, schedule Schedule, jobs scheduledJobs) {
+// RunJobs runs the session jobs every SessionInterval and the maintenance jobs
+// every MaintenanceInterval, both first after InitialDelay, until ctx is
+// cancelled. An error from one job never stops later jobs.
+func RunJobs(ctx context.Context, schedule Schedule, sessions, maintenance []Job) {
 	sessionTicker := time.NewTicker(schedule.InitialDelay)
 	defer sessionTicker.Stop()
 	maintenanceTicker := time.NewTicker(schedule.InitialDelay)
@@ -103,26 +107,26 @@ func run(ctx context.Context, schedule Schedule, jobs scheduledJobs) {
 				sessionTicker.Reset(schedule.SessionInterval)
 				sessionFirst = false
 			}
-			runJobs(ctx, jobs.sessions)
+			runJobs(ctx, sessions)
 		case <-maintenanceTicker.C:
 			if maintenanceFirst {
 				maintenanceTicker.Reset(schedule.MaintenanceInterval)
 				maintenanceFirst = false
 			}
-			runJobs(ctx, jobs.maintenance)
+			runJobs(ctx, maintenance)
 		}
 	}
 }
 
 // runJobs runs jobs in order, logging each outcome and continuing past
 // failures.
-func runJobs(ctx context.Context, jobs []scheduledJob) {
+func runJobs(ctx context.Context, jobs []Job) {
 	for _, job := range jobs {
-		summary, err := job.run(ctx)
+		summary, err := job.Run(ctx)
 		if err != nil {
-			slog.Error("running job", "job", job.name, "summary", summary, "err", err)
+			log.Error().Err(err).Str("job", job.Name).Str("summary", summary).Msg("running job")
 			continue
 		}
-		slog.Info("ran job", "job", job.name, "summary", summary)
+		log.Info().Str("job", job.Name).Str("summary", summary).Msg("ran job")
 	}
 }

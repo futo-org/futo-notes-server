@@ -1,0 +1,72 @@
+{{define "layout" -}}
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="htmx-config" content='{"includeIndicatorStyles":false,"allowEval":false,"allowScriptTags":false,"historyCacheSize":0,"refreshOnHistoryMiss":true,"responseHandling":[{"code":"204","swap":false},{"code":"...","swap":true}]}'>
+{{- with .CSRF}}
+<meta name="csrf-token" content="{{.}}">
+{{- end}}
+<title>{{template "title" .}} · FUTO Notes</title>
+<link rel="stylesheet" href="/dashboard/static/dashboard.css">
+<script src="/dashboard/static/htmx-2.0.4.min.js" defer></script>
+</head>
+<body hx-target="#page"{{with .HXHeaders}} hx-headers="{{.}}"{{end}}>
+<a class="skip" href="#main">Skip to content</a>
+<header class="site">
+<a class="brand" href="/dashboard">FUTO Notes</a>
+{{- if .SignedIn}}
+<span class="who">{{.User.Email}}</span>
+<form method="post" action="/dashboard/sign-out">
+{{template "csrf-field" .}}
+<button type="submit" class="secondary">Sign out</button>
+</form>
+{{- end}}
+</header>
+<div id="page">
+{{template "page" .}}
+</div>
+</body>
+</html>
+{{end}}
+
+{{define "fragment" -}}
+<title>{{template "title" .}} · FUTO Notes</title>
+{{template "page" .}}
+{{end}}
+
+{{define "page" -}}
+{{if .SignedIn -}}
+<nav aria-label="Account" hx-push-url="true">
+<ul>
+<li><a href="/dashboard" hx-get="/dashboard"{{if eq .Nav "overview"}} aria-current="page"{{end}}>Overview</a></li>
+<li><a href="/dashboard/devices" hx-get="/dashboard/devices"{{if eq .Nav "devices"}} aria-current="page"{{end}}>Devices</a></li>
+<li><a href="/dashboard/delete" hx-get="/dashboard/delete"{{if eq .Nav "delete"}} aria-current="page"{{end}}>Delete account</a></li>
+</ul>
+</nav>
+{{end -}}
+<div id="alert" role="alert">{{with .Error}}{{template "alert" .}}{{end}}</div>
+<main id="main">
+{{template "main" .}}
+</main>
+{{- end}}
+
+{{define "alert"}}<p class="alert">{{.}}</p>{{end}}
+
+{{define "csrf-field"}}<input type="hidden" name="csrf_token" value="{{.CSRF}}">{{end}}
+
+{{define "restore-form" -}}
+<form method="post" action="/dashboard/restore" hx-post="/dashboard/restore">
+{{template "csrf-field" .}}
+<button type="submit">Cancel deletion</button>
+</form>
+{{- end}}
+
+{{define "pending-deletion" -}}
+<section class="banner" aria-labelledby="pending-heading">
+<h2 id="pending-heading">Your account is scheduled for deletion</h2>
+<p>On <time datetime="{{isoTime .Account.PurgeAt}}">{{utcTime .Account.PurgeAt}}</time> your account and everything stored in it will be permanently deleted. Until then, sync is paused and you can cancel.</p>
+{{template "restore-form" .}}
+</section>
+{{- end}}

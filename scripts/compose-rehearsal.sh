@@ -229,8 +229,8 @@ mkdir -p "$data_dir/blobs" "$data_dir/postgres"
 
 # The only divergence from the preserved docker-compose.postgres.yml. A hoster
 # upgrading in place still has the TypeScript-era Compose file on disk, and that
-# one sets LOG_LEVEL — a variable the Go server deliberately drops. Layering it
-# here rehearses the real upgrade and lets us assert the boot warning.
+# one sets LOG_LEVEL. Layering it here rehearses the real upgrade and lets us
+# assert that Go accepts the TypeScript-era value instead of warning about it.
 cat >"$overlay" <<'YAML'
 services:
   server:
@@ -314,11 +314,11 @@ if grep -q 'applied database migrations' <<<"$go_log"; then
   exit 1
 fi
 pass "Go applied zero migrations to the TypeScript-written database"
-if ! grep -q 'LOG_LEVEL is ignored' <<<"$go_log"; then
-  echo "FAIL  Go did not warn about the dropped LOG_LEVEL variable" >&2
+if grep -q 'LOG_LEVEL' <<<"$go_log"; then
+  echo "FAIL  Go warned about the TypeScript-era LOG_LEVEL variable" >&2
   exit 1
 fi
-pass "Go warned that LOG_LEVEL is ignored"
+pass "Go honored the TypeScript-era LOG_LEVEL without a warning"
 
 json_request GET /api/auth 200 "$ts_token"
 assert_eq "TypeScript-issued token still authenticates" "$(jq -er '.user.id' <<<"$RESPONSE")" "$user_id"

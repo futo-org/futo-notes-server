@@ -54,7 +54,7 @@ func TestMigratePostgresToSQLitePreservesApplicationState(t *testing.T) {
 		t.Fatal(err)
 	}
 	createdObject, err := objects.New(source, events.PostgresPublisher{}).Create(ctx,
-		objects.Mutation{UserID: user.ID, CollectionID: collection.ID, MutationID: "migration-create"}, blobKey)
+		objects.Mutation{UserID: user.ID, CollectionID: collection.ID, MutationID: "migration-create"}, objects.StagedBlob(blobKey))
 	if err != nil {
 		t.Fatalf("Create() = %#v, %v", createdObject, err)
 	}

@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "api.regionsConfigMap" . }}
+  labels:
+    {{- include "notes-common.labels" . | nindent 4 }}
+data:
+  regions.json: |
+    {{- include "api.regionsJson" . | nindent 4 }}

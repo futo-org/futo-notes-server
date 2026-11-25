@@ -1,0 +1,138 @@
+# One release per region, each against its own bucket. A region's release
+# sets only `region`: the Deployment, Service and Secret are named
+# notes-storage-<region>, the bucket defaults to notes-<region>, and
+# REGION_ID is injected from it. REGION_ID must match the API's region list
+# and the aud of the tokens it mints, or every request fails with 401.
+region: us-east
+
+# Empty derives notes-storage-<region>: a stable in-cluster name independent
+# of the release name (dev == prod), distinct per region in one namespace.
+fullnameOverride: ""
+# Empty derives notes-<region>, compose's bucket naming.
+s3Bucket: ""
+
+# Stateless S3 front: two replicas + a PDB keep a node drain from cutting
+# every in-flight upload of the region at once.
+replicas: 2
+
+# Never dip below the declared replica count mid-rollout.
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 25%
+    maxUnavailable: 0
+
+# Spread replicas over nodes so one node loss leaves the region serving.
+# nodeTaintsPolicy Honor keeps cordoned and control-plane nodes out of the skew
+# count, or a drain would wedge scheduling; matchLabelKeys spreads each
+# ReplicaSet on its own mid-rollout.
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: DoNotSchedule
+    nodeTaintsPolicy: Honor
+    matchLabelKeys: [pod-template-hash]
+
+# Must exceed DRAIN_DELAY_MS + SHUTDOWN_TIMEOUT_MS (15s + 120s defaults), or
+# the kubelet kills the pod while a 100 MiB blob is still on the wire. It is a
+# ceiling, not a wait: an idle pod exits as soon as the drain delay elapses.
+terminationGracePeriodSeconds: 150
+
+# Bodies stream through to S3 and are never buffered whole, so memory scales
+# with concurrent transfers (64 KiB buffers each), not blob size. Never set a
+# CPU limit: throttling stalls streams mid-transfer.
+resources:
+  requests: { cpu: 100m, memory: 128Mi }
+  limits: { memory: 1Gi }
+
+image:
+  repository: oci.futo.org/futo-notes/notes-storage
+  # Empty defaults to the chart appVersion, which CI sets to the image tag it ships with.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+ports:
+  - name: http
+    containerPort: 3015
+
+service:
+  type: ClusterIP
+
+# Dev-only literals matching compose's MinIO; prod's arrive via an
+# ExternalSecret of the same name (notes-storage-<region>), with secretData
+# nulled in the base HelmRelease. That Secret must also carry API_PUBLIC_KEYS
+# (the API's token verification set, every kid in rotation) and
+# RECEIPT_SIGNING_KEY (this region's key; the API trusts its public half).
+secretData:
+  S3_ACCESS_KEY_ID: minio
+  S3_SECRET_ACCESS_KEY: miniominio
+
+# OPT-IN dev key fixtures: copies of dev/hosted-keys/ (keep them in sync).
+# Rendered into the Secret ONLY when useDevKeys is true (local dev only).
+# Default false: with no keys provided the pod fails loudly instead of trusting
+# tokens anyone can mint with the committed private half of dev-api-1, or
+# signing receipts with a published key.
+useDevKeys: false
+devApiPublicKeys: |
+  -----BEGIN PUBLIC KEY-----
+  kid: dev-api-1
+
+  MCowBQYDK2VwAyEAwRqq/U36E2YmAmAyu6YYW3OLYoG+WcyEbp2BdUq6ITc=
+  -----END PUBLIC KEY-----
+devReceiptSigningKeys:
+  us-east: |
+    -----BEGIN PRIVATE KEY-----
+    kid: dev-us-east-1
+
+    MC4CAQAwBQYDK2VwBCIEIAyoFGx/7a0eOr41dkHggWEfp1wVHKOeHPaEt8gVZRqb
+    -----END PRIVATE KEY-----
+  eu-central: |
+    -----BEGIN PRIVATE KEY-----
+    kid: dev-eu-central-1
+
+    MC4CAQAwBQYDK2VwBCIEIDv0OQuF1Lg329h53kzmURJM3lrC//bbpu5fkqVUnYiO
+    -----END PRIVATE KEY-----
+  ap-southeast: |
+    -----BEGIN PRIVATE KEY-----
+    kid: dev-ap-southeast-1
+
+    MC4CAQAwBQYDK2VwBCIEIIMCLfztZ/VgM2VA39HmWvAXb+DtFTUSJL85u1M6IRDz
+    -----END PRIVATE KEY-----
+
+# REGION_ID and S3_BUCKET are injected from `region` (templates/deployment.yaml).
+env:
+  - name: STORAGE_PORT
+    value: "3015"
+  - name: LOG_LEVEL
+    value: debug
+  # Dev only: the fleet default is 15s, which would make every pod delete sit
+  # for a quarter minute with nothing to drain.
+  - name: DRAIN_DELAY_MS
+    value: "1000"
+  - name: S3_ENDPOINT
+    value: http://minio:9000
+  # MinIO accepts any signing region; real stores need theirs.
+  - name: S3_REGION
+    value: us-east-1
+  # MinIO has no per-bucket DNS names.
+  - name: S3_FORCE_PATH_STYLE
+    value: "true"
+  - name: OTLP_METRICS_ENDPOINT
+    value: victoria-metrics:8428
+  - name: OTLP_METRICS_URL_PATH
+    value: /opentelemetry/v1/metrics
+
+# Appended after the chart Secret (notes-storage-<region>), so a key here wins
+# over it.
+extraEnvFrom: []
+
+startupProbe:
+  tcpSocket: { port: http }
+  periodSeconds: 2
+  failureThreshold: 90
+# HTTP rather than TCP so a draining pod leaves the Service's endpoints before
+# its listener closes. No livenessProbe, deliberately.
+readinessProbe:
+  httpGet: { path: /readyz, port: http }
+  periodSeconds: 2
+  failureThreshold: 2

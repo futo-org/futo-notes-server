@@ -150,17 +150,19 @@ for index in "${!urls[@]}"; do
   # shellcheck disable=SC2029
   logs=$(ssh "${ssh_options[@]}" "root@$host" \
     "runuser -l podman -c 'podman logs --since $soak_start inventory_futo-notes_sync-server'" 2>&1)
-  if rg -q 'level=(ERROR|FATAL)|panic:|fatal error:' <<<"$logs"; then
+  # Matches both LOG_FORMAT=json and the default pretty console format.
+  error_pattern='"level":"(error|fatal|panic)"| (ERR|FTL|PNC) |panic:|fatal error:'
+  if rg -q "$error_pattern" <<<"$logs"; then
     echo "application errors found on $host since $soak_start" >&2
-    rg 'level=(ERROR|FATAL)|panic:|fatal error:' <<<"$logs" >&2
+    rg "$error_pattern" <<<"$logs" >&2
     exit 1
   fi
 
   if [[ $require_jobs == true ]]; then
-    for pattern in 'msg=sessions summary=' 'msg="storage reconciliation" summary=' \
-      'msg="mutation results" summary=' 'msg="blob GC" summary='; do
-      if ! rg -F -q "$pattern" <<<"$logs"; then
-        echo "missing scheduled-job evidence on $host: $pattern" >&2
+    for job in 'sessions' 'storage reconciliation' 'mutation results' 'blob GC'; do
+      if ! rg -F -q "\"job\":\"$job\",\"summary\":" <<<"$logs" &&
+        ! rg -F -q -e "job=$job summary=" -e "job=\"$job\" summary=" <<<"$logs"; then
+        echo "missing scheduled-job evidence on $host: $job" >&2
         exit 1
       fi
     done

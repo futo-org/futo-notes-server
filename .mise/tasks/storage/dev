@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+#MISE description="Run one storage region on the host against compose MinIO: storage:dev [us-east|eu-central|ap-southeast]"
+#MISE dir="{{config_root}}"
+#USAGE arg "[region]" help="Region to run; defaults to $REGION_ID, then us-east"
+# Needs `mise run docker:start` first. Uses the dev key fixtures in
+# dev/hosted-keys/. The compose storage services (profile "services") bind the
+# same host ports, so stop them before running a region here.
+set -euo pipefail
+
+region="${usage_region:-${REGION_ID:-us-east}}"
+case "$region" in
+  us-east) port=3015 ;;
+  eu-central) port=3016 ;;
+  ap-southeast) port=3017 ;;
+  *) echo "unknown region $region (want us-east, eu-central or ap-southeast)" >&2; exit 1 ;;
+esac
+
+export REGION_ID="$region"
+export STORAGE_PORT="${STORAGE_PORT:-$port}"
+export S3_ENDPOINT="${S3_ENDPOINT:-http://localhost:9000}"
+export S3_BUCKET="${S3_BUCKET:-notes-$region}"
+export S3_ACCESS_KEY_ID="${S3_ACCESS_KEY_ID:-minio}"
+export S3_SECRET_ACCESS_KEY="${S3_SECRET_ACCESS_KEY:-miniominio}"
+export S3_FORCE_PATH_STYLE="${S3_FORCE_PATH_STYLE:-true}"
+export API_PUBLIC_KEYS="${API_PUBLIC_KEYS:-$(cat dev/hosted-keys/api.pub.pem)}"
+export RECEIPT_SIGNING_KEY="${RECEIPT_SIGNING_KEY:-$(cat "dev/hosted-keys/$region.key.pem")}"
+export OTLP_METRICS_ENDPOINT="${OTLP_METRICS_ENDPOINT:-localhost:8428}"
+export OTLP_METRICS_URL_PATH="${OTLP_METRICS_URL_PATH:-/opentelemetry/v1/metrics}"
+export DRAIN_DELAY_MS="${DRAIN_DELAY_MS:-0}"
+export LOG_FORMAT="${LOG_FORMAT:-pretty}"
+export LOG_LEVEL="${LOG_LEVEL:-debug}"
+
+go run ./cmd/storage

@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+#MISE description="Run unit tests (Postgres and S3 suites skip without their env)"
+#MISE dir="{{config_root}}"
+set -e
+
+go test ./... "$@"

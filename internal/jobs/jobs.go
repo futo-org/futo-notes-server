@@ -7,11 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/rs/zerolog/log"
 
 	"futo-notes-server/internal/blobs"
 	"futo-notes-server/internal/db"
@@ -32,10 +33,11 @@ const (
 	mutationResultLifetime = 30 * 24 * time.Hour
 	// stagedBlobLifetime is how long a blob stays staged before GC removes it.
 	stagedBlobLifetime = 24 * time.Hour
-	// retainedBlobLifetime is how long a blob stays retained before GC
-	// removes it.
-	retainedBlobLifetime = 365 * 24 * time.Hour
 )
+
+// RetainedBlobLifetime is how long a blob stays retained before GC removes
+// it. The hosted blob GC uses the same rule.
+const RetainedBlobLifetime = 365 * 24 * time.Hour
 
 // SessionReapResult reports what ReapSessions deleted.
 type SessionReapResult struct {
@@ -92,7 +94,7 @@ func ReconcileStorage(ctx context.Context, database *db.DB, store *blobs.Store) 
 		owner, _, ok := strings.Cut(key, "/")
 		if !ok || !ids.IsUUID(owner) {
 			result.Skipped++
-			slog.Info("storage reconciliation: skipping file", "key", key, "reason", "invalid owner")
+			log.Info().Str("key", key).Str("reason", "invalid owner").Msg("storage reconciliation: skipping file")
 			return nil
 		}
 
@@ -110,7 +112,7 @@ func ReconcileStorage(ctx context.Context, database *db.DB, store *blobs.Store) 
 				return err
 			}
 			result.Skipped++
-			slog.Info("storage reconciliation: skipping file", "key", key, "reason", "owner does not exist")
+			log.Info().Str("key", key).Str("reason", "owner does not exist").Msg("storage reconciliation: skipping file")
 			return nil
 		}
 		var inserted int
@@ -137,7 +139,7 @@ func ReconcileStorage(ctx context.Context, database *db.DB, store *blobs.Store) 
 	})
 
 	if errors.Is(err, errReconciliationCap) {
-		slog.Info("storage reconciliation: adoption cap reached", "limit", reconciliationLimit)
+		log.Info().Int("limit", reconciliationLimit).Msg("storage reconciliation: adoption cap reached")
 		return result, nil
 	}
 	if errors.Is(err, os.ErrNotExist) {
@@ -278,7 +280,7 @@ func eligibleBlobKeys(ctx context.Context, database *db.DB) ([]string, error) {
 // blobExpiryCutoffs returns the timestamps before which staged and retained
 // blobs are eligible for garbage collection.
 func blobExpiryCutoffs(now time.Time) (stagedBefore, retainedBefore string) {
-	return db.Timestamp(now.Add(-stagedBlobLifetime)), db.Timestamp(now.Add(-retainedBlobLifetime))
+	return db.Timestamp(now.Add(-stagedBlobLifetime)), db.Timestamp(now.Add(-RetainedBlobLifetime))
 }
 
 // purgeBlobRow deletes key's ledger row if it is still eligible and not locked

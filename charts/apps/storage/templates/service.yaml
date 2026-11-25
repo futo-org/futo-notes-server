@@ -1,0 +1,2 @@
+{{- include "storage.region" . }}
+{{- include "notes-common.service" . }}

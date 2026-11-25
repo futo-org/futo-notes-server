@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+#MISE description="Generate an Ed25519 token key pair: keygen -kid <kid> [-out <prefix>]"
+#MISE dir="{{config_root}}"
+set -e
+
+go run ./cmd/hosted-keygen "$@"

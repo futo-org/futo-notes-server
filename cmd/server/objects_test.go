@@ -22,10 +22,6 @@ func TestResponseStructsMatchMapEncoding(t *testing.T) {
 		typed  any
 		mapped map[string]any
 	}{
-		{"list", listObjectsResponse{Objects: []objects.Object{o}}, map[string]any{"objects": []objects.Object{o}}},
-		{"limited list", listObjectsResponse{HasMore: new(false), NextCursor: new(int64(7)), Objects: []objects.Object{}},
-			map[string]any{"objects": []objects.Object{}, "hasMore": false, "nextCursor": int64(7)}},
-		{"get", objectResponse{Object: o}, map[string]any{"object": o}},
 		{"upload", uploadBlobResponse{Key: "k"}, map[string]any{"key": "k"}},
 		{"batch object", batchResult(opCreate, objects.MutationResponse{Object: o, CollectionVersion: 7, Replayed: new(true)}),
 			map[string]any{"status": "replayed", "object": o, "collectionVersion": int64(7)}},

@@ -7,13 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/rs/zerolog/log"
 
 	// Open selects these drivers by name: "pgx" for Postgres, "sqlite" for SQLite.
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -150,6 +151,9 @@ func (d *DB) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) {
 // PingContext verifies that the database is reachable.
 func (d *DB) PingContext(ctx context.Context) error { return d.db.PingContext(ctx) }
 
+// Stats returns the connection pool statistics.
+func (d *DB) Stats() sql.DBStats { return d.db.Stats() }
+
 // Close closes the underlying connection pool.
 func (d *DB) Close() error { return d.db.Close() }
 
@@ -211,7 +215,7 @@ func (t *Tx) Rollback() error { return t.tx.Rollback() }
 // has no caller to report to, so it is logged.
 func (t *Tx) Discard() {
 	if err := t.tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
-		slog.Warn("rolling back transaction", "err", err)
+		log.Warn().Err(err).Msg("rolling back transaction")
 	}
 }
 

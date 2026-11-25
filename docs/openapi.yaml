@@ -501,7 +501,8 @@ paths:
           content:
             application/json:
               schema:
-                oneOf:
+                # anyOf, not oneOf: a paged body is also a valid ObjectList.
+                anyOf:
                   - $ref: "#/components/schemas/ObjectList"
                   - $ref: "#/components/schemas/PagedObjectList"
         "400":
@@ -568,13 +569,16 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          description: Blob not staged, or Mutation-Id reused for a different intent
+          description: |
+            Blob not staged, Mutation-Id reused for a different intent, or the
+            Mutation-Id's first attempt is still in progress
           content:
             application/json:
               schema:
                 oneOf:
                   - $ref: "#/components/schemas/BlobNotStagedError"
                   - $ref: "#/components/schemas/MutationMismatchError"
+                  - $ref: "#/components/schemas/MutationPendingError"
 
   /api/collections/{cid}/objects/{oid}:
     parameters:
@@ -651,7 +655,9 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          description: Version conflict, blob not staged, or Mutation-Id intent mismatch
+          description: |
+            Version conflict, blob not staged, Mutation-Id intent mismatch, or the
+            Mutation-Id's first attempt is still in progress
           content:
             application/json:
               schema:
@@ -659,6 +665,7 @@ paths:
                   - $ref: "#/components/schemas/VersionConflict"
                   - $ref: "#/components/schemas/BlobNotStagedError"
                   - $ref: "#/components/schemas/MutationMismatchError"
+                  - $ref: "#/components/schemas/MutationPendingError"
     delete:
       operationId: deleteObject
       tags: [objects]
@@ -714,13 +721,16 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          description: Version conflict, or Mutation-Id intent mismatch
+          description: |
+            Version conflict, Mutation-Id intent mismatch, or the Mutation-Id's
+            first attempt is still in progress
           content:
             application/json:
               schema:
                 oneOf:
                   - $ref: "#/components/schemas/VersionConflict"
                   - $ref: "#/components/schemas/MutationMismatchError"
+                  - $ref: "#/components/schemas/MutationPendingError"
 
   /api/collections/{cid}/blob-objects:
     parameters:
@@ -769,11 +779,15 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          description: Mutation-Id reused for a different intent
+          description: |
+            Mutation-Id reused for a different intent, or the Mutation-Id's
+            first attempt is still in progress
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/MutationMismatchError"
+                oneOf:
+                  - $ref: "#/components/schemas/MutationMismatchError"
+                  - $ref: "#/components/schemas/MutationPendingError"
         "413":
           $ref: "#/components/responses/BlobTooLarge"
 
@@ -824,13 +838,16 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          description: Version conflict, or Mutation-Id intent mismatch
+          description: |
+            Version conflict, Mutation-Id intent mismatch, or the Mutation-Id's
+            first attempt is still in progress
           content:
             application/json:
               schema:
                 oneOf:
                   - $ref: "#/components/schemas/VersionConflict"
                   - $ref: "#/components/schemas/MutationMismatchError"
+                  - $ref: "#/components/schemas/MutationPendingError"
         "413":
           $ref: "#/components/responses/BlobTooLarge"
 
@@ -1289,7 +1306,8 @@ components:
       content:
         application/json:
           schema:
-            oneOf:
+            # anyOf, not oneOf: the invalid_session body is also a valid Error.
+            anyOf:
               - $ref: "#/components/schemas/Error"
               - type: object
                 required: [error, code]
@@ -1597,6 +1615,17 @@ components:
         error:
           type: string
           enum: [Mutation-Id reused for different intent]
+
+    MutationPendingError:
+      type: object
+      required: [error]
+      description: |
+        Another request holding this Mutation-Id has not finished. Retry the
+        same request later with the same Mutation-Id.
+      properties:
+        error:
+          type: string
+          enum: [mutation still in progress]
 
     BatchUploadResult:
       oneOf:

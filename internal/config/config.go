@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
+
+	"github.com/rs/zerolog"
 
 	"futo-notes-server/internal/db"
 )
@@ -40,6 +43,8 @@ type Config struct {
 	AllowFreshDatabase bool          // ALLOW_FRESH_DATABASE, overrides the SQLite/blob safety guard
 	DBPoolMax          int           // DB_POOL_MAX, Postgres only
 	DBPoolIdleTimeout  time.Duration // DB_POOL_IDLE_TIMEOUT_MS, Postgres only
+	LogLevel           zerolog.Level // LOG_LEVEL, a zerolog level name; info by default
+	LogPretty          bool          // human-readable console logs (LOG_FORMAT=pretty, the default) instead of JSON
 }
 
 // Load reads the server configuration, applying .env values that the
@@ -74,6 +79,14 @@ func Load() (Config, error) {
 	}
 
 	var err error
+	cfg.LogLevel, _ = logLevel(os.Getenv("LOG_LEVEL"))
+	switch format := getDefault("LOG_FORMAT", "pretty"); format {
+	case "json":
+	case "pretty":
+		cfg.LogPretty = true
+	default:
+		return Config{}, fmt.Errorf("LOG_FORMAT must be json or pretty, got %q", format)
+	}
 	if cfg.Port, err = getInt("PORT", 3005); err != nil {
 		return Config{}, err
 	}
@@ -120,19 +133,41 @@ func DroppedEnvWarnings() []string {
 		{"DB_SSL", "configure pgx TLS with sslmode in DATABASE_URL"},
 		{"DB_SSL_CA", "configure pgx TLS with sslrootcert in DATABASE_URL"},
 		{"DB_SSL_INSECURE", "configure pgx TLS with sslmode in DATABASE_URL"},
-		{"LOG_LEVEL", "the Go server currently uses its built-in log level"},
 		{"MAX_BATCH_BYTES", "the batch limit is fixed at 32 MiB"},
 		{"MAX_BLOB_BYTES", "the upload limit is fixed at 100 MiB"},
 		{"TRUST_PROXY", "forwarded client addresses are not trusted; rate limiting uses the direct peer"},
 	}
 
-	warnings := make([]string, 0, len(replacements))
+	warnings := make([]string, 0, len(replacements)+1)
 	for _, replacement := range replacements {
 		if _, set := os.LookupEnv(replacement.name); set {
 			warnings = append(warnings, fmt.Sprintf("%s is ignored: %s", replacement.name, replacement.message))
 		}
 	}
+	if value := os.Getenv("LOG_LEVEL"); value != "" {
+		if _, ok := logLevel(value); !ok {
+			warnings = append(warnings, fmt.Sprintf("LOG_LEVEL is ignored: %q is not one of trace, debug, info, warn, error, fatal, panic, disabled or silent; logging at info", value))
+		}
+	}
 	return warnings
+}
+
+// logLevel maps LOG_LEVEL to a zerolog level, reporting whether value was
+// recognized. An unset or unrecognized value logs at info rather than failing
+// startup: the TypeScript server's pino levels (including "silent") were once
+// valid here, and an upgrade must not stop a self-hosted server from starting.
+func logLevel(value string) (zerolog.Level, bool) {
+	switch strings.ToLower(value) {
+	case "":
+		return zerolog.InfoLevel, true
+	case "silent":
+		return zerolog.Disabled, true
+	}
+	level, err := zerolog.ParseLevel(value)
+	if err != nil || level == zerolog.NoLevel {
+		return zerolog.InfoLevel, false
+	}
+	return level, true
 }
 
 func getDefault(key, fallback string) string {

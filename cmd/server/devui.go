@@ -7,9 +7,12 @@ import (
 	"html"
 	"net/http"
 
+	"github.com/go-chi/chi/v5"
+
 	"futo-notes-server/internal/blobs"
 	"futo-notes-server/internal/db"
 	"futo-notes-server/internal/jobs"
+	"futo-notes-server/internal/syncapi"
 )
 
 //go:embed devui.html
@@ -31,17 +34,17 @@ func handleDevPanic(http.ResponseWriter, *http.Request) {
 	panic("intentional dev panic")
 }
 
-func registerDevJobHandlers(mux *http.ServeMux, database *db.DB, store *blobs.Store) {
-	mux.HandleFunc("POST /dev/jobs/sessions", handleDevJob(func(ctx context.Context) (jobs.SessionReapResult, error) {
+func registerDevJobHandlers(router chi.Router, database *db.DB, store *blobs.Store) {
+	router.Post("/dev/jobs/sessions", handleDevJob(func(ctx context.Context) (jobs.SessionReapResult, error) {
 		return jobs.ReapSessions(ctx, database)
 	}))
-	mux.HandleFunc("POST /dev/jobs/reconciliation", handleDevJob(func(ctx context.Context) (jobs.ReconciliationResult, error) {
+	router.Post("/dev/jobs/reconciliation", handleDevJob(func(ctx context.Context) (jobs.ReconciliationResult, error) {
 		return jobs.ReconcileStorage(ctx, database, store)
 	}))
-	mux.HandleFunc("POST /dev/jobs/mutation-results", handleDevJob(func(ctx context.Context) (jobs.MutationExpiryResult, error) {
+	router.Post("/dev/jobs/mutation-results", handleDevJob(func(ctx context.Context) (jobs.MutationExpiryResult, error) {
 		return jobs.ExpireMutationResults(ctx, database)
 	}))
-	mux.HandleFunc("POST /dev/jobs/blob-gc", handleDevJob(func(ctx context.Context) (jobs.BlobGCResult, error) {
+	router.Post("/dev/jobs/blob-gc", handleDevJob(func(ctx context.Context) (jobs.BlobGCResult, error) {
 		return jobs.GarbageCollectBlobs(ctx, database, store)
 	}))
 }
@@ -50,12 +53,12 @@ func handleDevJob[T any](run func(context.Context) (T, error)) http.HandlerFunc 
 	return func(w http.ResponseWriter, r *http.Request) {
 		result, err := run(r.Context())
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, struct {
+			syncapi.WriteJSON(w, http.StatusInternalServerError, struct {
 				Result T      `json:"result"`
 				Error  string `json:"error"`
 			}{Result: result, Error: err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, result)
+		syncapi.WriteJSON(w, http.StatusOK, result)
 	}
 }

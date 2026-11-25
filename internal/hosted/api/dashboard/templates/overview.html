@@ -1,0 +1,30 @@
+{{define "title"}}Your account{{end}}
+
+{{define "main" -}}
+{{if .Account.PurgeAt}}{{template "pending-deletion" .}}{{end}}
+<h1>Your account</h1>
+<section class="card" aria-labelledby="profile-heading">
+<h2 id="profile-heading">Profile</h2>
+<dl>
+<dt>Name</dt><dd>{{.Account.User.Name}}</dd>
+<dt>Email</dt><dd>{{.Account.User.Email}}</dd>
+</dl>
+</section>
+<section class="card" aria-labelledby="region-heading">
+<h2 id="region-heading">Region</h2>
+{{with .Region -}}
+<p><strong>{{.Name}}</strong><br><span class="muted">{{.Description}}</span></p>
+<p class="muted">Your notes are stored in this region. It cannot be changed.</p>
+{{- else -}}
+<p>Not chosen yet. <a href="/dashboard/region">Choose a region</a> before syncing.</p>
+{{- end}}
+</section>
+<section class="card" aria-labelledby="usage-heading">
+<h2 id="usage-heading">Usage</h2>
+<dl>
+<dt>Collections</dt><dd>{{.Account.Collections}}</dd>
+<dt>Blobs</dt><dd>{{.Account.Blobs}}</dd>
+<dt>Stored</dt><dd><data value="{{.Account.StoredBytes}}">{{humanBytes .Account.StoredBytes}}</data></dd>
+</dl>
+</section>
+{{- end}}

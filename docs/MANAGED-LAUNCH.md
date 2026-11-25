@@ -134,18 +134,22 @@ makes "one login" actually line up across services. No schema change needed.
   identity (the same user would get a different `sub` in Notes vs Immich). Worth a
   one-line confirm given Zack's intent that accounts line up across services.
 
-## E2EE vault key under SSO (unresolved design decision)
+## E2EE vault key under SSO
 
-The hard, still-open item. Today the client wraps the vault key with a
+**Decided (2026-11-17): a vault passphrase separate from the Zitadel login, plus a
+recovery key and QR device pairing.** After signing in with FUTO, a new device
+unlocks with the passphrase, the recovery key, or a transfer from an already unlocked
+device. The apps already implement all three. The server stores the recovery envelope
+next to the key material and relays pairings. See
+[Hosted launch plan](Hosted%20launch%20plan.md) § B.
+
+Background: today the client wraps the vault key with a
 **PBKDF2-derived key from the user's vault password**; the server stores `key_salt`,
 `key_kdf`, `encrypted_vault_key`. With "Log in with FUTO", **no password ever reaches
 the client** — OIDC authenticates *who you are* but hands the client no key material.
 
-So SSO forces a client-side decision about how the vault key is unlocked: a separate
-vault passphrase (decoupled from login), a passkey-derived key, key escrow, or
-similar. This is entirely client-side and does not block the server work, but it is
-expensive to retrofit. Immich is not E2EE, so the Yucca dev may not have prior art —
-raise with the Notes client team.
+The options weighed were a separate vault passphrase, a passkey-derived key, device
+pairing, and key escrow (which would end end-to-end encryption).
 
 ## Deployment reality
 

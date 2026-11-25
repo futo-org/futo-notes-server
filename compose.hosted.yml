@@ -1,0 +1,125 @@
+# Local infrastructure for the hosted service (cmd/api, cmd/storage). Not for
+# self-hosters: they use docker-compose*.yml. Start with `mise run docker:start`.
+name: futo-notes-hosted
+
+services:
+  database:
+    image: postgres:18.6@sha256:e3d24f6906d0760bf4da0dae872415391ededefad23fd471c47dc53b0ddf3c42
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: notes
+    # 15432, not 5433: the self-hosted dev Postgres already owns 5433.
+    ports:
+      - 15432:5432
+    volumes:
+      - hosted-pg-data:/var/lib/postgresql
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d notes']
+      interval: 1s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  # quay.io/minio and docker.io/minio no longer serve images; Chainguard
+  # builds MinIO from source.
+  minio:
+    image: cgr.dev/chainguard/minio@sha256:1ec745a06a986762f89e68e855fc189f403941eff8c0a5f94767e92c8e39d3f5
+    command: server --console-address :9001 /tmp/data
+    ports:
+      - 9000:9000
+      - 9001:9001
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:-minio}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:-miniominio}
+      _MINIO_DRIVE_ACTIVE_MONITORING: off
+    healthcheck:
+      test: ['CMD', 'mc', 'ready', 'local']
+      interval: 1s
+      timeout: 5s
+      retries: 30
+
+  # One bucket per storage region, named notes-<region>.
+  minio-init:
+    image: cgr.dev/chainguard/minio-client@sha256:1260ca38acf78bf8d2833845fda6636b27388ab919b750d79f2c7167fb45ec74
+    environment:
+      MC_HOST_local: http://${S3_ACCESS_KEY_ID:-minio}:${S3_SECRET_ACCESS_KEY:-miniominio}@minio:9000
+    command: mb --ignore-existing local/notes-us-east local/notes-eu-central local/notes-ap-southeast
+    depends_on:
+      minio:
+        condition: service_healthy
+
+  victoria-metrics:
+    image: victoriametrics/victoria-metrics:v1.156.0@sha256:da8a90ac0912f16589be2b96a6441a2fca4bca415c83783d972d92e3b5b66970
+    ports:
+      - 8428:8428
+
+  mock-oidc:
+    build:
+      context: .
+      dockerfile: cmd/mock-oidc/Dockerfile
+    environment:
+      MOCK_OIDC_ISSUER: http://localhost:8092
+    ports:
+      - 8092:8092
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://localhost:8092/.well-known/openid-configuration > /dev/null']
+      interval: 1s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+  # The hosted services themselves, one storage region each. Profile
+  # "services" keeps them out of `docker:start`; start them with
+  #   docker compose -f compose.hosted.yml --profile services up -d --build
+  # They bind the same host ports as `mise run storage:dev`.
+  storage-us-east: &storage
+    profiles: [services]
+    build:
+      context: .
+      dockerfile: cmd/storage/Dockerfile
+    # The service takes keys from env only; reading the committed dev fixtures
+    # here keeps a single copy of them.
+    entrypoint:
+      - sh
+      - -c
+      - API_PUBLIC_KEYS="$$(cat /keys/api.pub.pem)" RECEIPT_SIGNING_KEY="$$(cat /keys/$$REGION_ID.key.pem)" exec dumb-init storage
+    volumes:
+      - ./dev/hosted-keys:/keys:ro
+    environment: &storage-env
+      REGION_ID: us-east
+      S3_BUCKET: notes-us-east
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-minio}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-miniominio}
+      S3_FORCE_PATH_STYLE: 'true'
+      OTLP_METRICS_ENDPOINT: victoria-metrics:8428
+      OTLP_METRICS_URL_PATH: /opentelemetry/v1/metrics
+      DRAIN_DELAY_MS: '0'
+      LOG_LEVEL: debug
+    ports:
+      - 3015:3015
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+
+  storage-eu-central:
+    <<: *storage
+    environment:
+      <<: *storage-env
+      REGION_ID: eu-central
+      S3_BUCKET: notes-eu-central
+    ports:
+      - 3016:3015
+
+  storage-ap-southeast:
+    <<: *storage
+    environment:
+      <<: *storage-env
+      REGION_ID: ap-southeast
+      S3_BUCKET: notes-ap-southeast
+    ports:
+      - 3017:3015
+
+volumes:
+  hosted-pg-data:

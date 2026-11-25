@@ -40,7 +40,7 @@ type Publisher interface {
 // server's hub.
 func NewPublisher(dialect db.Dialect, hub *Hub) Publisher {
 	if dialect.Engine() == db.SQLite {
-		return SQLitePublisher{Hub: hub}
+		return sqlitePublisher{Hub: hub}
 	}
 	return PostgresPublisher{}
 }
@@ -63,12 +63,12 @@ func (PostgresPublisher) Publish(ctx context.Context, tx *db.Tx, userID, collect
 	return err
 }
 
-// SQLitePublisher publishes directly to an in-process Hub. SQLite has a
+// sqlitePublisher publishes directly to an in-process Hub. SQLite has a
 // single server process, so no cross-process channel is needed.
-type SQLitePublisher struct{ Hub *Hub }
+type sqlitePublisher struct{ Hub *Hub }
 
 // Publish delivers the notification to Hub once tx commits.
-func (p SQLitePublisher) Publish(_ context.Context, tx *db.Tx, userID, collectionID string, currentVersion int64) error {
+func (p sqlitePublisher) Publish(_ context.Context, tx *db.Tx, userID, collectionID string, currentVersion int64) error {
 	notification := Notification{UserID: userID, CollectionID: collectionID, CurrentVersion: currentVersion}
 	tx.AfterCommit(func() { p.Hub.Publish(notification) })
 	return nil

@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>futo-notes hosted api dev</title>
+<style>
+  :root { --bg: #16181d; --card: #1e2128; --border: #2c303a; --text: #d7dae0; --muted: #8a90a0; --accent: #6aa1ff; --ok: #4cc38a; --err: #e5726a; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  header { display: flex; gap: 12px; align-items: center; padding: 14px 20px; border-bottom: 1px solid var(--border); }
+  header h1 { font-size: 15px; margin: 0; }
+  #who { color: var(--muted); margin-left: auto; }
+  main { max-width: 820px; margin: 0 auto; padding: 20px; display: grid; gap: 16px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; }
+  .card h2 { font-size: 13px; margin: 0 0 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 6px 0; }
+  button, select, input, textarea { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px; }
+  button { cursor: pointer; } button:hover { border-color: var(--accent); }
+  input, textarea { flex: 1; min-width: 200px; }
+  a { color: var(--accent); }
+  pre { margin: 0; white-space: pre-wrap; word-break: break-all; max-height: 360px; overflow: auto; }
+  .ok { color: var(--ok); } .err { color: var(--err); } .muted { color: var(--muted); }
+</style>
+</head>
+<body>
+<header><h1>hosted api dev</h1><span id="who">signed out</span></header>
+<main>
+  <section class="card">
+    <h2>Sign in</h2>
+    <p class="muted">Dashboard sign-in sets the session cookie on this origin and lands on the <a href="/dashboard">htmx dashboard</a>
+      (overview, region choice, devices, account deletion); the buttons below then act through the same cookie.
+      App sign-in uses the loopback redirect flow and keeps the bearer token and storage refresh token in this tab:
+      open this page at <code>http://127.0.0.1:&lt;port&gt;/dev</code> for it, since only loopback IPs are allowed redirect targets.
+      Deleting the account needs a sign-in within 10 minutes; "sign in again" sends <code>max_age=0</code> to the provider
+      (the dashboard one refreshes this browser's session and returns to <a href="/dashboard/delete">delete</a>).</p>
+    <div class="row">
+      <a href="/api/auth/oidc/start">Dashboard sign-in</a>
+      <a href="/dashboard">Open dashboard</a>
+      <input id="device-name" placeholder="device name for app sign-in (optional)">
+      <button id="app-login">App sign-in</button>
+      <button id="app-reauth">App sign-in again (reauthenticate)</button>
+      <a href="/api/auth/oidc/start?reauthenticate=true">Dashboard sign-in again</a>
+      <button id="logout">Log out</button>
+      <button id="forget">Forget tab tokens</button>
+    </div>
+  </section>
+  <section class="card">
+    <h2>Account</h2>
+    <div class="row">
+      <button data-get="/">Capability</button>
+      <button data-get="/api/regions">Regions</button>
+      <button data-get="/api/auth">Current user</button>
+      <button data-get="/api/account">Account</button>
+      <button data-get="/api/sessions">Devices</button>
+    </div>
+    <div class="row">
+      <select id="region"></select><button id="choose-region">Choose region</button>
+      <button id="delete-account">Delete account</button>
+      <button id="restore-account">Restore account</button>
+    </div>
+    <div class="row"><input id="session-id" placeholder="session id"><button id="revoke">Revoke device</button></div>
+  </section>
+  <section class="card">
+    <h2>Storage</h2>
+    <div class="row"><button id="storage-token">Exchange refresh token</button><span class="muted" id="refresh-state"></span></div>
+    <p class="muted">Rotation: re-presenting the previous token returns the same successor until that successor is exchanged
+      (a lost response); after that it is reuse and signs the session out. Two concurrent exchanges get one successor.</p>
+    <div class="row">
+      <button id="storage-token-previous">Re-present previous token</button>
+      <button id="storage-token-race">Exchange twice at once</button>
+    </div>
+    <p class="muted">Upload with the access token: <code>curl -H "Authorization: Bearer &lt;access_token&gt;" --data-binary @file &lt;endpoint&gt;/blobs</code>, then paste the receipt below.</p>
+  </section>
+  <section class="card">
+    <h2>Objects</h2>
+    <div class="row"><button id="claim">Claim collection</button><input id="collection" placeholder="collection id"></div>
+    <div class="row"><textarea id="receipt" rows="2" placeholder="receipt JWT"></textarea></div>
+    <div class="row">
+      <button id="create">Create object</button>
+      <input id="object" placeholder="object id"><input id="version" placeholder="next version" style="min-width:90px;flex:0">
+      <button id="update">Update object</button>
+      <button id="list">List objects</button>
+    </div>
+  </section>
+  <section class="card">
+    <h2>Jobs</h2>
+    <p class="muted">Runs a storage job now on this replica, outside its schedule and lock. Reconciliation deletes keys older than 48h
+      that the ledger does not know; <em>now</em> (RFC 3339) shifts its clock, and an empty user means every prefix.</p>
+    <div class="row">
+      <button data-job="/dev/jobs/blob-gc">Blob GC</button>
+      <button data-job="/dev/jobs/account-purge">Account purge</button>
+    </div>
+    <div class="row">
+      <input id="reconcile-user" placeholder="user id (optional)"><input id="reconcile-now" placeholder="now (optional)">
+      <button id="reconcile">Orphan reconciliation</button>
+    </div>
+  </section>
+  <section class="card"><h2>Response</h2><pre id="out" class="muted">nothing yet</pre></section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const store = sessionStorage;
+const show = (status, body) => {
+  $("out").className = status >= 200 && status < 300 ? "ok" : "err";
+  $("out").textContent = status + "\n" + (typeof body === "string" ? body : JSON.stringify(body, null, 2));
+};
+async function call(method, path, body) {
+  const headers = {};
+  const token = store.getItem("token");
+  if (token) headers.Authorization = "Bearer " + token;
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  const res = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), credentials: "same-origin" });
+  const text = await res.text();
+  let parsed = text;
+  try { parsed = JSON.parse(text); } catch {}
+  show(res.status, parsed);
+  return { status: res.status, body: parsed };
+}
+const b64url = (bytes) => btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+async function appLogin(reauthenticate) {
+  const verifier = b64url(crypto.getRandomValues(new Uint8Array(48)));
+  const challenge = b64url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)));
+  const state = b64url(crypto.getRandomValues(new Uint8Array(16)));
+  store.setItem("verifier", verifier);
+  store.setItem("state", state);
+  store.setItem("device-name", $("device-name").value.trim());
+  const redirect = location.origin + "/dev";
+  const params = new URLSearchParams({ redirect_uri: redirect, code_challenge: challenge, code_challenge_method: "S256", state });
+  if (reauthenticate === true) params.set("reauthenticate", "true");
+  // The callback is served at PUBLIC_URL, so start there for its state cookie.
+  location.href = "/api/auth/oidc/start?" + params;
+}
+async function finishAppLogin() {
+  const q = new URLSearchParams(location.search);
+  if (!q.has("code") && !q.has("error")) return;
+  history.replaceState(null, "", "/dev");
+  if (q.get("state") !== store.getItem("state")) return show(400, "state mismatch");
+  if (q.has("error")) return show(400, "sign-in failed: " + q.get("error"));
+  const body = { code: q.get("code"), code_verifier: store.getItem("verifier") };
+  if (store.getItem("device-name")) body.device_name = store.getItem("device-name");
+  const res = await call("POST", "/api/auth/oidc/token", body);
+  if (res.status === 200) { store.setItem("token", res.body.token); store.setItem("refresh", res.body.storage_refresh_token); store.removeItem("refresh-prev"); }
+  refreshWho();
+}
+async function refreshWho() {
+  const headers = store.getItem("token") ? { Authorization: "Bearer " + store.getItem("token") } : {};
+  const res = await fetch("/api/account", { headers });
+  $("who").textContent = res.ok ? (await res.json()).user.email + (store.getItem("token") ? " (bearer)" : " (cookie)") : "signed out";
+  const short = (t) => t ? t.slice(0, 8) + "…" : "none";
+  $("refresh-state").textContent = store.getItem("refresh")
+    ? "current " + short(store.getItem("refresh")) + ", previous " + short(store.getItem("refresh-prev"))
+    : "no refresh token (app sign-in only)";
+}
+async function loadRegions() {
+  const res = await fetch("/api/regions");
+  for (const r of await res.json()) $("region").add(new Option(r.name + " (" + r.id + ")", r.id));
+}
+document.querySelectorAll("[data-get]").forEach((b) => b.onclick = () => call("GET", b.dataset.get));
+document.querySelectorAll("[data-job]").forEach((b) => b.onclick = () => call("POST", b.dataset.job));
+$("reconcile").onclick = () => {
+  const q = new URLSearchParams();
+  if ($("reconcile-user").value) q.set("user", $("reconcile-user").value.trim());
+  if ($("reconcile-now").value) q.set("now", $("reconcile-now").value.trim());
+  call("POST", "/dev/jobs/reconciliation?" + q);
+};
+$("app-login").onclick = () => appLogin(false);
+$("app-reauth").onclick = () => appLogin(true);
+$("logout").onclick = async () => { await call("POST", "/api/auth/logout"); store.clear(); refreshWho(); };
+$("forget").onclick = () => { store.clear(); refreshWho(); };
+$("choose-region").onclick = () => call("PUT", "/api/account/region", { region_id: $("region").value });
+$("delete-account").onclick = () => call("DELETE", "/api/account");
+$("restore-account").onclick = () => call("POST", "/api/account/restore");
+$("revoke").onclick = () => call("DELETE", "/api/sessions/" + encodeURIComponent($("session-id").value));
+const exchange = (token) => call("POST", "/api/storage/token", { refresh_token: token || "" });
+$("storage-token").onclick = async () => {
+  const sent = store.getItem("refresh");
+  const res = await exchange(sent);
+  if (res.status === 200 && res.body.refresh_token !== sent) {
+    store.setItem("refresh-prev", sent);
+    store.setItem("refresh", res.body.refresh_token);
+  }
+  refreshWho();
+};
+$("storage-token-previous").onclick = async () => {
+  const res = await exchange(store.getItem("refresh-prev"));
+  if (res.status === 200) {
+    show(200, { same_successor_as_held: res.body.refresh_token === store.getItem("refresh"), response: res.body });
+  }
+};
+$("storage-token-race").onclick = async () => {
+  const sent = store.getItem("refresh");
+  const opts = (token) => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ refresh_token: token || "" }) });
+  const results = await Promise.all([fetch("/api/storage/token", opts(sent)), fetch("/api/storage/token", opts(sent))]);
+  const bodies = await Promise.all(results.map((r) => r.json()));
+  if (results.every((r) => r.ok)) {
+    store.setItem("refresh-prev", sent);
+    store.setItem("refresh", bodies[0].refresh_token);
+  }
+  show(results.every((r) => r.ok) ? 200 : results.find((r) => !r.ok).status, {
+    statuses: results.map((r) => r.status),
+    same_successor: bodies[0].refresh_token !== undefined && bodies[0].refresh_token === bodies[1].refresh_token,
+    bodies,
+  });
+  refreshWho();
+};
+$("claim").onclick = async () => {
+  const res = await call("POST", "/api/collections");
+  if (res.status < 300) $("collection").value = res.body.collection.id;
+};
+$("create").onclick = async () => {
+  const res = await call("POST", "/api/collections/" + $("collection").value + "/objects", { receipt: $("receipt").value.trim() });
+  if (res.status === 201) { $("object").value = res.body.object.id; $("version").value = Number(res.body.object.version) + 1; }
+};
+$("update").onclick = () => call("PUT", "/api/collections/" + $("collection").value + "/objects/" + $("object").value,
+  { version: Number($("version").value), receipt: $("receipt").value.trim() });
+$("list").onclick = () => call("GET", "/api/collections/" + $("collection").value + "/objects");
+loadRegions();
+finishAppLogin().then(refreshWho);
+</script>
+</body>
+</html>

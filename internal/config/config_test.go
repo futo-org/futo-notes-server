@@ -6,6 +6,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/rs/zerolog"
 )
 
 func TestLoadDotenvSkipsLinesWithoutKey(t *testing.T) {
@@ -46,6 +48,37 @@ func TestBlobGCEnabled(t *testing.T) {
 	}
 	if cfg.BlobGCEnabled {
 		t.Fatal("BlobGCEnabled = true for BLOB_GC_ENABLED=false")
+	}
+}
+
+func TestLogSettings(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("AUTH_MODE", "dev")
+
+	for _, tt := range []struct {
+		level, format string
+		wantLevel     zerolog.Level
+		wantPretty    bool
+		wantError     string
+	}{
+		{wantLevel: zerolog.InfoLevel, wantPretty: true},
+		{level: "debug", format: "json", wantLevel: zerolog.DebugLevel},
+		{level: "WARN", format: "pretty", wantLevel: zerolog.WarnLevel, wantPretty: true},
+		{level: "verbose", wantLevel: zerolog.InfoLevel, wantPretty: true},
+		{level: "silent", wantLevel: zerolog.Disabled, wantPretty: true},
+		{format: "text", wantError: `LOG_FORMAT must be json or pretty, got "text"`},
+	} {
+		t.Setenv("LOG_LEVEL", tt.level)
+		t.Setenv("LOG_FORMAT", tt.format)
+		cfg, err := Load()
+		var gotError string
+		if err != nil {
+			gotError = err.Error()
+		}
+		if gotError != tt.wantError || cfg.LogLevel != tt.wantLevel || cfg.LogPretty != tt.wantPretty {
+			t.Errorf("LOG_LEVEL=%q LOG_FORMAT=%q: Load() = level %v pretty %t error %q; want level %v pretty %t error %q",
+				tt.level, tt.format, cfg.LogLevel, cfg.LogPretty, gotError, tt.wantLevel, tt.wantPretty, tt.wantError)
+		}
 	}
 }
 
@@ -113,9 +146,26 @@ func TestDroppedEnvWarnings(t *testing.T) {
 	}) {
 		t.Fatalf("warnings %q do not explain MAX_BLOB_BYTES replacement", warnings)
 	}
+	t.Setenv("LOG_LEVEL", "info")
+	warnings = DroppedEnvWarnings()
 	if slices.ContainsFunc(warnings, func(warning string) bool {
-		return strings.Contains(warning, "BLOB_GC_ENABLED")
+		return strings.Contains(warning, "BLOB_GC_ENABLED") || strings.Contains(warning, "LOG_LEVEL")
 	}) {
-		t.Fatalf("warnings %q include honored BLOB_GC_ENABLED", warnings)
+		t.Fatalf("warnings %q include an honored setting", warnings)
+	}
+}
+
+func TestUnrecognizedLogLevelWarnsInsteadOfFailing(t *testing.T) {
+	t.Setenv("LOG_LEVEL", "verbose")
+	if !slices.ContainsFunc(DroppedEnvWarnings(), func(warning string) bool {
+		return strings.Contains(warning, `LOG_LEVEL is ignored: "verbose"`)
+	}) {
+		t.Fatalf("warnings %q do not report the unrecognized LOG_LEVEL", DroppedEnvWarnings())
+	}
+	t.Setenv("LOG_LEVEL", "silent")
+	if slices.ContainsFunc(DroppedEnvWarnings(), func(warning string) bool {
+		return strings.Contains(warning, "LOG_LEVEL")
+	}) {
+		t.Fatalf("warnings %q report the recognized LOG_LEVEL silent", DroppedEnvWarnings())
 	}
 }

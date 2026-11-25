@@ -1,0 +1,10 @@
+apiVersion: v2
+name: api
+description: Hosted FUTO Notes API (Go)
+type: application
+version: 0.1.0
+appVersion: "main"
+dependencies:
+  - name: notes-common
+    version: 0.1.0
+    repository: "file://../../lib/notes-common"

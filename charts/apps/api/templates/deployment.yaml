@@ -1,0 +1,24 @@
+{{- /* Settings the chart pins in env (which always beats envFrom) are Helm
+values of their own, so a release overrides them there. */}}
+{{- $_ := set .Values "env" (concat .Values.env (list
+  (dict "name" "PUBLIC_URL" "value" .Values.publicUrl)
+  (dict "name" "OIDC_ISSUER" "value" .Values.oidcIssuer)
+  (dict "name" "OIDC_CLIENT_ID" "value" .Values.oidcClientId)
+  (dict "name" "APP_REDIRECT_SCHEMES" "value" (join "," .Values.appRedirectSchemes))
+  (dict "name" "REGIONS_FILE" "value" "/etc/notes-api/regions.json")
+) (include "api.postgresEnv" . | fromYamlArray)) }}
+{{- /* The chart Secret is first in envFrom and extraEnvFrom last: for
+duplicate keys Kubernetes takes the LAST envFrom source, so extraEnvFrom acts
+as an override. */}}
+{{- $_ := set .Values "envFrom" (concat
+  (list (dict "secretRef" (dict "name" (include "notes-common.fullname" .))))
+  (.Values.extraEnvFrom | default (list))) }}
+{{- $_ := set .Values "volumes" (concat (.Values.volumes | default (list))
+  (list (dict "name" "regions" "configMap" (dict "name" (include "api.regionsConfigMap" .))))) }}
+{{- $_ := set .Values "volumeMounts" (concat (.Values.volumeMounts | default (list))
+  (list (dict "name" "regions" "mountPath" "/etc/notes-api" "readOnly" true))) }}
+{{- /* The regions file is read at startup, so roll the pods when it changes. */}}
+{{- $_ := set .Values "podAnnotations" (merge
+  (dict "notes.futo.org/regions-checksum" (include "api.regionsJson" . | sha256sum))
+  (.Values.podAnnotations | default dict)) }}
+{{- include "notes-common.deployment" . }}

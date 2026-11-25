@@ -27,7 +27,13 @@ func PostgresURL(t testing.TB, envVar string) string {
 // when the test ends.
 func Postgres(t testing.TB, envVar string) *db.DB {
 	t.Helper()
-	databaseURL := PostgresURL(t, envVar)
+	return OpenPostgres(t, PostgresURL(t, envVar))
+}
+
+// OpenPostgres opens and migrates the Postgres database at databaseURL. The
+// database is closed when the test ends.
+func OpenPostgres(t testing.TB, databaseURL string) *db.DB {
+	t.Helper()
 	dialect, err := db.ParseDialect(databaseURL)
 	if err != nil {
 		t.Fatal(err)
