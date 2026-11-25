@@ -288,7 +288,7 @@ Readiness never checks Postgres or S3: an outage would fail every replica at
 once and empty the Service. Startup is a TCP probe with up to 180 s.
 
 **Jobs.** Every API replica runs the scheduler, first one minute after start,
-then hourly (sessions, abandoned logins) and every 6 h (mutation results, blob
+then hourly (sessions, abandoned logins, expired pairings) and every 6 h (mutation results, blob
 GC, orphan reconciliation, account purge). A run takes a Postgres advisory lock
 and is skipped if the job started on any replica within about its interval
 (`hosted_job_runs`). So each job runs once per interval across the deployment.

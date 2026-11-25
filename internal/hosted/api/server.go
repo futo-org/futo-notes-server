@@ -16,6 +16,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"futo-notes-server/internal/auth"
+	"futo-notes-server/internal/collections"
 	"futo-notes-server/internal/db"
 	"futo-notes-server/internal/events"
 	"futo-notes-server/internal/hosted/account"
@@ -136,6 +137,8 @@ func (s *Server) router() chi.Router {
 			})
 		})
 
+		api.Group(s.pairingRoutes)
+
 		api.Group(func(hosted chi.Router) {
 			hosted.Use(s.authenticate(hostedErrors))
 			hosted.Get("/account", s.handleAccount)
@@ -168,8 +171,9 @@ func (s *Server) syncRoutes(r chi.Router) {
 	r.Get("/collections", syncapi.HandleListCollections(s.database))
 	r.Get("/collections/{id}", syncapi.HandleGetCollection(s.database))
 	r.Delete("/collections/{id}", syncapi.HandleDeleteCollection(s.database))
-	r.Get("/collections/{id}/key", syncapi.HandleGetCollectionKey(s.database))
-	r.Put("/collections/{id}/key", strictKeyBody(syncapi.HandlePutCollectionKey(s.database)))
+	keys := collections.Keys{DB: s.database, Recovery: recoveryEnvelopes{}}
+	r.Get("/collections/{id}/key", syncapi.HandleGetCollectionKey(keys))
+	r.Put("/collections/{id}/key", strictKeyBody(syncapi.HandlePutCollectionKey(keys)))
 	r.Get("/collections/{id}/objects", syncapi.HandleListObjects(s.database))
 	r.Post("/collections/{id}/objects", syncapi.HandleCreateObject(s.database, s.publisher, blobs))
 	r.Get("/collections/{id}/objects/{objectId}", syncapi.HandleGetObject(s.database))

@@ -39,10 +39,10 @@ func TestMigratePostgresToSQLitePreservesApplicationState(t *testing.T) {
 		t.Fatalf("Claim() = %#v, %t, %v", collection, created, err)
 	}
 	wantKDF := json.RawMessage(`{"z":1,"a":2,"z":3}`)
-	if _, err := collections.PutKey(ctx, source, user.ID, collection.ID, collections.KeyInput{
+	if _, err := (collections.Keys{DB: source}).Put(ctx, user.ID, collection.ID, collections.KeyInput{
 		KeySalt: "migration-salt", KeyKDF: wantKDF, EncryptedVaultKey: "migration-wrapped-key",
 	}, nil); err != nil {
-		t.Fatalf("PutKey() = %v", err)
+		t.Fatalf("Keys.Put() = %v", err)
 	}
 	token, err := auth.CreateSession(ctx, source, user.ID)
 	if err != nil {
@@ -79,9 +79,9 @@ func TestMigratePostgresToSQLitePreservesApplicationState(t *testing.T) {
 	if session, err := auth.ValidateSession(ctx, target, token); err != nil || session.User.ID != user.ID {
 		t.Fatalf("ValidateSession() = %#v, %v", session, err)
 	}
-	key, claimed, err := collections.GetKey(ctx, target, user.ID, collection.ID)
+	key, claimed, err := (collections.Keys{DB: target}).Get(ctx, user.ID, collection.ID)
 	if err != nil || !claimed {
-		t.Fatalf("GetKey() = %#v, %t, %v", key, claimed, err)
+		t.Fatalf("Keys.Get() = %#v, %t, %v", key, claimed, err)
 	}
 	var wantKDFValue, gotKDFValue any
 	if err := json.Unmarshal(wantKDF, &wantKDFValue); err != nil {

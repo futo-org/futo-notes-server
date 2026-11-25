@@ -5,7 +5,15 @@ The server work that remains before the hosted service can launch, on top of wha
 research passes over the Notes apps (`futo-notes`) and the billing prior art. The client
 half of the plan lives in the apps repo at `docs/plan/hosted-sync-regional.md`.
 
-Status: **planned, not started.** Nothing below is built.
+Status:
+
+| Step | Items | State |
+|---|---|---|
+| S1 | A1–A5, A7 | Done, in MR !34 |
+| S2 | B1, B2, D | Done, in the MR stacked on !34 (`feat/hosted-vault-unlock-test-stack`) |
+| S3 | A6 | Not started |
+| S4 | E | Not started |
+| S5 | C | Not started |
 
 ## Decisions (2026-11-17)
 

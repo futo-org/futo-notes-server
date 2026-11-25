@@ -11,6 +11,7 @@ import (
 
 	"futo-notes-server/internal/hosted/config"
 	"futo-notes-server/internal/hosted/hostedjobs"
+	"futo-notes-server/internal/hosted/pairing"
 	"futo-notes-server/internal/httputil"
 )
 
@@ -19,16 +20,18 @@ var devUIHTML []byte
 
 // handleDevUI serves a page for exercising the hosted API by hand: dashboard
 // and app sign-in, account, region, devices, deletion, storage tokens,
-// receipt-backed object writes and the storage jobs. DEV_UI enables it;
+// receipt-backed object writes, vault key material with its recovery
+// envelope, the pairing relay, and the jobs. DEV_UI enables it;
 // never in production.
 func handleDevUI(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write(devUIHTML)
 }
 
-// devJobRoutes mounts POST /dev/jobs/*, which run a storage job at once on
-// this replica, outside the schedule, its advisory lock and its
-// once-per-interval bookkeeping, as the self-hosted /dev/jobs/* do.
+// devJobRoutes mounts POST /dev/jobs/*, which run a storage job or the
+// pairing sweep at once on this replica, outside the schedule, its advisory
+// lock and its once-per-interval bookkeeping, as the self-hosted /dev/jobs/*
+// do.
 func (s *Server) devJobRoutes(r chi.Router) {
 	r.Post("/dev/jobs/blob-gc", handleDevJob(func(r *http.Request) (hostedjobs.GCResult, error) {
 		return hostedjobs.CollectBlobs(r.Context(), s.database, s.storage)
@@ -37,6 +40,15 @@ func (s *Server) devJobRoutes(r chi.Router) {
 		return hostedjobs.PurgeAccounts(r.Context(), s.database, s.storage)
 	}))
 	r.Post("/dev/jobs/reconciliation", s.handleDevReconciliation)
+	r.Post("/dev/jobs/pairing-sweep", handleDevJob(func(r *http.Request) (pairingSweep, error) {
+		deleted, err := pairing.DeleteExpired(r.Context(), s.database)
+		return pairingSweep{Deleted: deleted}, err
+	}))
+}
+
+// pairingSweep is the result of a pairing sweep run from /dev.
+type pairingSweep struct {
+	Deleted int64 `json:"deleted"`
 }
 
 // handleDevReconciliation runs orphan reconciliation in every region, or

@@ -198,6 +198,46 @@ build:binaries:
       - dist/
     expire_in: never
 
+# Starts the hosted test stack from this pipeline's release artifacts and
+# drives a client through it, as the apps' CI does.
+test:hosted-stack:
+  extends: .skip-soak-schedule
+  stage: build
+  # The image jobs' image, service and TLS setting, so it runs on every runner
+  # they do. Go comes from apk, and GOTOOLCHAIN=auto fetches the version go.mod
+  # asks for.
+  image: docker:29@sha256:4bbc7223f81db790097c6dea42fb93e05b8fead4f0431fbe6ccaba6e8473201c
+  services:
+    - docker:29-dind@sha256:4bbc7223f81db790097c6dea42fb93e05b8fead4f0431fbe6ccaba6e8473201c
+  needs:
+    - job: build:binaries
+      artifacts: true
+  variables:
+    DOCKER_TLS_CERTDIR: /certs
+    GOTOOLCHAIN: auto
+  before_script:
+    - apk add --no-cache bash curl go
+    # Where dind runs, DOCKER_HOST is tcp://docker:... and the launcher reaches
+    # the containers there. Some runners instead mount the host's Docker socket
+    # into every container, which kills the dind service, and the image's
+    # entrypoint falls back to that socket. The stack then shares the host
+    # daemon: it takes a Compose project and ports of this job's own, and the
+    # job joins the stack's network to reach it (the host's firewall drops
+    # traffic to ports published on another network).
+    - |
+      case "${DOCKER_HOST:-unix://}" in
+      unix://*)
+        export HOSTED_STACK_JOIN_CONTAINER=$(sed -n 's|.*/docker/containers/\([0-9a-f]\{64\}\)/.*|\1|p' /proc/self/mountinfo | head -n 1)
+        export COMPOSE_PROJECT_NAME=hosted-stack-$CI_JOB_ID
+        export HOSTED_STACK_POSTGRES_PORT=$((20000 + CI_JOB_ID % 5000))
+        export HOSTED_STACK_MINIO_PORT=$((25000 + CI_JOB_ID % 5000))
+        ;;
+      esac
+    - echo "DOCKER_HOST=${DOCKER_HOST:-unset} HOSTED_STACK_JOIN_CONTAINER=${HOSTED_STACK_JOIN_CONTAINER:-unset}"
+    - docker info --format '{{.ServerVersion}}'
+  script:
+    - ./scripts/hosted-stack-smoke.sh dist "${CI_COMMIT_TAG:-$CI_COMMIT_SHORT_SHA}"
+
 soak:staging:
   stage: test
   image: alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
@@ -365,8 +405,13 @@ publish:binaries:
     - job: build:binaries
       artifacts: true
     - job: test:adoption
+    - job: test:hosted-stack
   script:
     - PACKAGE_URL="$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/futo-notes-server/$CI_COMMIT_TAG"
-    - for file in dist/*; do curl --fail --header "JOB-TOKEN:$CI_JOB_TOKEN" --upload-file "$file" "$PACKAGE_URL/$(basename "$file")"; done
+    - for file in dist/futo-notes-server_*; do curl --fail --header "JOB-TOKEN:$CI_JOB_TOKEN" --upload-file "$file" "$PACKAGE_URL/$(basename "$file")"; done
+    # The hosted binaries and the test-stack bundle are a package of their
+    # own, so the self-hosted one keeps exactly its files.
+    - HOSTED_PACKAGE_URL="$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/futo-notes-hosted/$CI_COMMIT_TAG"
+    - for file in dist/hosted/*; do curl --fail --header "JOB-TOKEN:$CI_JOB_TOKEN" --upload-file "$file" "$HOSTED_PACKAGE_URL/$(basename "$file")"; done
   rules:
     - if: $CI_COMMIT_TAG

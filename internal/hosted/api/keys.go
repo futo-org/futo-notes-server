@@ -13,7 +13,8 @@ import (
 )
 
 // keyFields are the fields the hosted PUT /api/collections/{id}/key accepts.
-var keyFields = []string{"key_salt", "key_kdf", "encrypted_vault_key", "previous_key_updated_at"}
+var keyFields = []string{"key_salt", "key_kdf", "encrypted_vault_key", "previous_key_updated_at",
+	"recovery_key_salt", "recovery_key_kdf", "recovery_encrypted_vault_key"}
 
 // maxKeyBody bounds the key body, which strictKeyBody reads whole.
 const maxKeyBody = 64 << 10

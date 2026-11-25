@@ -23,6 +23,7 @@ import (
 
 	"futo-notes-server/internal/auth"
 	"futo-notes-server/internal/blobs"
+	"futo-notes-server/internal/collections"
 	"futo-notes-server/internal/config"
 	"futo-notes-server/internal/db"
 	"futo-notes-server/internal/events"
@@ -82,8 +83,8 @@ func routes(cfg config.Config, database *db.DB, blobStore *blobs.Store, eventHub
 	handleGet(endpoints, "/collections", syncapi.HandleListCollections(database))
 	handleGet(endpoints, "/collections/{id}", syncapi.HandleGetCollection(database))
 	endpoints.Delete("/collections/{id}", syncapi.HandleDeleteCollection(database))
-	handleGet(endpoints, "/collections/{id}/key", syncapi.HandleGetCollectionKey(database))
-	endpoints.Put("/collections/{id}/key", syncapi.HandlePutCollectionKey(database))
+	handleGet(endpoints, "/collections/{id}/key", syncapi.HandleGetCollectionKey(collections.Keys{DB: database}))
+	endpoints.Put("/collections/{id}/key", syncapi.HandlePutCollectionKey(collections.Keys{DB: database}))
 	handleGet(endpoints, "/collections/{id}/objects", syncapi.HandleListObjects(database))
 	endpoints.Post("/collections/{id}/objects", syncapi.HandleCreateObject(database, publisher, stagedBlobs{}))
 	handleGet(endpoints, "/collections/{id}/objects/{objectId}", syncapi.HandleGetObject(database))

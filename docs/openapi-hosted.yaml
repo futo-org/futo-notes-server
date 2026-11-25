@@ -29,9 +29,13 @@ info:
       slide: every authenticated request extends them, and a request
       authenticated by the session cookie gets the cookie re-issued when it
       slides.
+    - **Recovery envelope.** Vault key material also carries an optional
+      second wrapping of the vault key, under a recovery key
+      (`recovery_key_salt`, `recovery_key_kdf`,
+      `recovery_encrypted_vault_key`). See `putCollectionKey`.
     - **Pending deletion.** Between `DELETE /api/account` and the purge 30
-      days later, every sync operation except logout, and
-      `POST /api/storage/token`, answer
+      days later, every sync operation except logout, the pairing relay,
+      and `POST /api/storage/token`, answer
       `403 {"code": "account_pending_deletion", "error": "account pending deletion"}`.
       Account, session and restore operations keep working.
 
@@ -48,7 +52,8 @@ info:
       methods (`405`) answer this shape too, on every path.
 
     The exception is the `403` for a pending deletion, which keeps the sync
-    shape on `POST /api/storage/token` as well, so clients handle it once.
+    shape on `POST /api/storage/token` and the pairing relay as well, so
+    clients handle it once.
 
     **Branch on `code`, never on the message.** Codes are stable and listed
     in the `ErrorCode` schema; messages are for people and may change. Each
@@ -88,6 +93,7 @@ x-internal-routes:
   - POST /dashboard/sign-out
   - POST /dev/jobs/account-purge
   - POST /dev/jobs/blob-gc
+  - POST /dev/jobs/pairing-sweep
   - POST /dev/jobs/reconciliation
 
 servers:
@@ -108,6 +114,8 @@ tags:
     description: Account, region and deletion
   - name: sessions
     description: Signed-in devices
+  - name: pairing
+    description: The relay that hands the vault key from an unlocked device to a new one
   - name: sync
     description: The self-hosted sync contract, with receipts in place of staged blobs
 
@@ -724,6 +732,170 @@ paths:
         "500":
           $ref: "#/components/responses/HostedServerError"
 
+  /api/pairings:
+    post:
+      operationId: createPairing
+      tags: [pairing]
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      summary: Open a pairing (the new device)
+      description: |
+        A signed-in device without the vault key opens a pairing with a
+        one-time public key, then shows the pairing id, the public key and
+        its own name and platform as a QR code. An unlocked device of the
+        same account scans it, seals the vault key to the public key and
+        posts it (`deliverPairingKey`); this device polls
+        `collectPairing` until it arrives.
+
+        The pairing lives **5 minutes from creation**; posting the key does
+        not extend it. The three fields are stored and never served. The
+        body is at most 8 KiB and each field at most 1024 characters.
+
+        Not gated on a subscription: a lapsed account still sets up devices
+        to read. Blocked while a deletion is pending.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [public_key, device_name, platform]
+              properties:
+                public_key:
+                  type: string
+                  minLength: 1
+                  maxLength: 1024
+                  description: The new device's one-time public key, opaque to the server
+                device_name:
+                  type: string
+                  minLength: 1
+                  maxLength: 1024
+                platform:
+                  type: string
+                  minLength: 1
+                  maxLength: 1024
+      responses:
+        "201":
+          description: Pairing opened
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, expires_at]
+                additionalProperties: false
+                properties:
+                  id:
+                    type: string
+                    format: uuid
+                  expires_at:
+                    type: string
+                    format: date-time
+                    description: Five minutes after creation
+        "400":
+          $ref: "#/components/responses/PairingInvalidRequest"
+        "401":
+          $ref: "#/components/responses/HostedUnauthorized"
+        "403":
+          $ref: "#/components/responses/PendingDeletion"
+        "413":
+          $ref: "#/components/responses/PairingTooLarge"
+        "500":
+          $ref: "#/components/responses/HostedServerError"
+
+  /api/pairings/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PairingId"
+    get:
+      operationId: collectPairing
+      tags: [pairing]
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      summary: Poll for the sealed key, collecting it once (the new device)
+      description: |
+        `202` until a key is posted. The `200` that returns the key deletes
+        the pairing in the same transaction, so of two devices polling at
+        once exactly one gets it and the other gets the `404`.
+      responses:
+        "200":
+          description: The sealed vault key. The pairing is gone.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ciphertext]
+                additionalProperties: false
+                properties:
+                  ciphertext:
+                    type: string
+        "202":
+          description: No key posted yet; poll again. No body.
+        "401":
+          $ref: "#/components/responses/HostedUnauthorized"
+        "403":
+          $ref: "#/components/responses/PendingDeletion"
+        "404":
+          $ref: "#/components/responses/PairingNotFound"
+        "500":
+          $ref: "#/components/responses/HostedServerError"
+
+  /api/pairings/{id}/key:
+    parameters:
+      - $ref: "#/components/parameters/PairingId"
+    post:
+      operationId: deliverPairingKey
+      tags: [pairing]
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      summary: Post the sealed vault key (the unlocked device)
+      description: |
+        Stores the vault key, sealed to the pairing's public key, for the new
+        device to collect. The server cannot open it and never logs it. A
+        sealed box is not deterministic, so a retry is not recognized as one:
+        a second post answers `409`, and a client unsure whether its post
+        landed opens a new pairing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ciphertext]
+              properties:
+                ciphertext:
+                  type: string
+                  minLength: 1
+                  maxLength: 1024
+      responses:
+        "204":
+          description: Key stored
+        "400":
+          $ref: "#/components/responses/PairingInvalidRequest"
+        "401":
+          $ref: "#/components/responses/HostedUnauthorized"
+        "403":
+          $ref: "#/components/responses/PendingDeletion"
+        "404":
+          $ref: "#/components/responses/PairingNotFound"
+        "409":
+          description: "`pairing_already_keyed`: a key was already posted to this pairing"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostedError"
+        "413":
+          $ref: "#/components/responses/PairingTooLarge"
+        "500":
+          $ref: "#/components/responses/HostedServerError"
+
   /api/auth:
     get:
       operationId: getCurrentUser
@@ -894,7 +1066,8 @@ paths:
         "200":
           description: |
             The stored material, or `{"key": null}` when the collection exists
-            but no key has been claimed yet.
+            but no key has been claimed yet. The recovery envelope's three
+            fields are present when one is stored and absent otherwise.
           content:
             application/json:
               schema:
@@ -905,7 +1078,7 @@ paths:
                     type: object
                     nullable: true
                     allOf:
-                      - $ref: "openapi.yaml#/components/schemas/KeyMaterial"
+                      - $ref: "#/components/schemas/HostedKeyMaterial"
         "401":
           $ref: "#/components/responses/SyncUnauthorized"
         "403":
@@ -931,6 +1104,23 @@ paths:
         (`400` `invalid_request`) rather than dropped, so a client never
         believes part of an envelope was saved when it was not. The body is
         at most 64 KiB.
+
+        **Recovery envelope** (hosted only): the same vault key wrapped a
+        second time, under a recovery key, in `recovery_key_salt`,
+        `recovery_key_kdf` and `recovery_encrypted_vault_key`.
+
+        - **All three or none.** A body with some but not all of them
+          answers `400` `invalid_request`. A `null` counts as absent.
+        - **A `PUT` replaces both envelopes.** A write without the recovery
+          fields **deletes the stored recovery envelope**. Changing the vault
+          password re-wraps the same vault key, so a client doing it must
+          send the recovery envelope again in the same request, or the
+          recovery key stops working.
+        - **One revision.** Both envelopes share one `key_updated_at`, so
+          issuing a new recovery key is a rotation like any other.
+        - A claim of an already claimed key returns the stored material,
+          recovery envelope included; a stale rotation's `currentKey`
+          carries it too.
       requestBody:
         required: true
         content:
@@ -956,6 +1146,31 @@ paths:
                   description: |
                     Opaque revision token from a prior GET/PUT. Required for
                     rotation, omitted for a first claim.
+                recovery_key_salt:
+                  type: string
+                  minLength: 1
+                  nullable: true
+                  description: |
+                    Recovery envelope, with `recovery_key_kdf` and
+                    `recovery_encrypted_vault_key`: all three or none.
+                    Leaving all three out **deletes the stored recovery
+                    envelope**.
+                recovery_key_kdf:
+                  type: object
+                  nullable: true
+                  additionalProperties: true
+                  description: |
+                    The recovery key's KDF parameters, any JSON object.
+                    Leaving the recovery fields out **deletes the stored
+                    recovery envelope**.
+                recovery_encrypted_vault_key:
+                  type: string
+                  minLength: 1
+                  nullable: true
+                  description: |
+                    The vault key wrapped under the recovery key. Leaving the
+                    recovery fields out **deletes the stored recovery
+                    envelope**.
       responses:
         "200":
           description: Material stored, or the authoritative material adopted
@@ -966,7 +1181,7 @@ paths:
                 required: [key]
                 properties:
                   key:
-                    $ref: "openapi.yaml#/components/schemas/KeyMaterial"
+                    $ref: "#/components/schemas/HostedKeyMaterial"
         "400":
           description: |
             As self-hosted: `invalid json`, `key_salt is required`,
@@ -974,7 +1189,8 @@ paths:
             `previous_key_updated_at must be non-empty when present`, or a
             rotation with no key to rotate (`no existing key to rotate`).
             Hosted only, with code `invalid_request`: a field outside the
-            schema (`unknown field "<name>"`), or a body over 64 KiB.
+            schema (`unknown field "<name>"`), a body over 64 KiB, some but
+            not all of the recovery fields, or an empty or mistyped one.
           content:
             application/json:
               schema:
@@ -999,7 +1215,7 @@ paths:
                     type: string
                     enum: [key conflict]
                   currentKey:
-                    $ref: "openapi.yaml#/components/schemas/KeyMaterial"
+                    $ref: "#/components/schemas/HostedKeyMaterial"
         "500":
           $ref: "#/components/responses/SyncServerError"
 
@@ -1411,6 +1627,13 @@ components:
         cookie is checked before the `Authorization` header.
 
   parameters:
+    PairingId:
+      name: id
+      in: path
+      required: true
+      description: The pairing id from `createPairing`. Anything else is a `404`.
+      schema:
+        type: string
     CollectionId:
       name: id
       in: path
@@ -1451,6 +1674,38 @@ components:
         type: string
 
   responses:
+    PairingNotFound:
+      description: |
+        `not_found`: the pairing is unknown, expired, already collected or
+        another account's. All four get the same answer as an unknown route,
+        apart from `requestId`, so a pairing id cannot be probed.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/HostedError"
+    PairingInvalidRequest:
+      description: |
+        `invalid_request`: the body is not JSON, or a field is missing, not a
+        non-empty string, or over 1024 characters
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/HostedError"
+    PairingTooLarge:
+      description: "`payload_too_large`: the body is over 8 KiB"
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/HostedError"
     Account:
       description: The caller's account
       content:
@@ -1613,6 +1868,22 @@ components:
           type: string
           enum: [invalid receipt]
 
+    HostedKeyMaterial:
+      description: |
+        The self-hosted key material, plus the recovery envelope when one is
+        stored: its three fields are present together or not at all.
+      allOf:
+        - $ref: "openapi.yaml#/components/schemas/KeyMaterial"
+        - type: object
+          properties:
+            recovery_key_salt:
+              type: string
+            recovery_key_kdf:
+              type: object
+              additionalProperties: true
+            recovery_encrypted_vault_key:
+              type: string
+
     ErrorCode:
       type: string
       description: |
@@ -1635,7 +1906,9 @@ components:
         | `region_already_chosen` | 409 | The region is fixed |
         | `purge_started` | 409 | The account can no longer be restored |
         | `reauthentication_required` | 403 | Sign in again with `reauthenticate=true` first |
-        | `not_found` | 404 | No such route or session |
+        | `not_found` | 404 | No such route, session or pairing |
+        | `pairing_already_keyed` | 409 | A key was already posted to this pairing |
+        | `payload_too_large` | 413 | The request body is over the operation's limit |
         | `method_not_allowed` | 405 | The route does not take this method |
         | `internal_error` | 500 | An internal failure |
       enum:
@@ -1655,6 +1928,8 @@ components:
         - purge_started
         - reauthentication_required
         - not_found
+        - pairing_already_keyed
+        - payload_too_large
         - method_not_allowed
         - internal_error
 

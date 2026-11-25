@@ -63,6 +63,13 @@ Removed on hosted (bytes go to storage instead): `POST /api/blobs`, `GET|DELETE
 Changed: object create and update take `"receipt": "<jwt>"` in place of a staged `blob_key`. The
 receipt names the key and the size. `size_bytes` in responses comes from the receipt.
 
+Changed: vault key material (`GET|PUT /api/collections/{id}/key`) also carries an optional
+**recovery envelope**, the vault key wrapped under a recovery key: `recovery_key_salt`,
+`recovery_key_kdf` and `recovery_encrypted_vault_key`. They come all three or none (a partial set
+is a 400), and a `PUT` replaces both envelopes, so **a `PUT` without them deletes the stored
+recovery envelope**. Both envelopes share one `key_updated_at`. Self-hosted neither stores nor
+returns them.
+
 Capability (`GET /`, still the JSON document): `auth_mode: "oidc"`, `signup: "open"`, `billing: false`.
 
 New endpoints:
@@ -80,9 +87,19 @@ New endpoints:
 | `GET /api/sessions` | session | Lists devices: created, last used, user agent, which one is current |
 | `DELETE /api/sessions/{id}` | session | Revokes a device and its storage refresh token |
 | `POST /api/storage/token` | refresh token | Returns `{access_token, expires_at, region: {id, endpoint}}` |
+| `POST /api/pairings` | session | A new device opens a pairing with a one-time public key: `201 {id, expires_at}` |
+| `POST /api/pairings/{id}/key` | session | An unlocked device posts the vault key sealed to it: `204`, or `409 pairing_already_keyed` on a second post |
+| `GET /api/pairings/{id}` | session | The new device polls: `202` until the key is posted, then `200 {ciphertext}` once, deleting the pairing |
+
+The pairing relay is scoped to the caller's account. A pairing lives 5 minutes from creation.
+Unknown, expired, collected and other accounts' pairings all get the same `404 not_found`. Bodies
+are capped at 8 KiB (`413 payload_too_large`) and each field at 1024 characters (`400`). The
+ciphertext is never logged. Pairing is blocked while a deletion is pending, but will not be gated
+on a subscription.
 
 While a deletion is pending, sync and storage-token endpoints return `403 {"error":"account
-pending deletion"}`. Only account, session, restore and logout keep working.
+pending deletion"}`, and so does the pairing relay. Only account, session, restore and logout keep
+working.
 
 ### Dashboard (htmx)
 
@@ -107,6 +124,9 @@ The dashboard uses the session cookie and CSRF tokens on state-changing requests
   - session device fields (created, last used, user agent)
   - `storage_refresh_tokens` (hash, `session_id` with cascade delete, created and rotated times)
   - OIDC logins in flight and one-time app codes
+  - `collection_recovery_envelopes`: each collection's recovery envelope, written in the key's
+    transaction
+  - `pairings`: open pairings and the sealed keys posted to them
   - `hosted_job_runs` (below)
 - Migrations run in an `api migrate` subcommand, as a Helm **pre**-install/pre-upgrade hook Job.
   Backups uses post-*, but here that would deadlock: the API refuses to start while migrations are
@@ -130,6 +150,7 @@ so a job runs at most once per interval across the deployment.
 | Job | What it does |
 |---|---|
 | session reaping | as today |
+| pairing sweep | Hourly: deletes pairings past their 5-minute window, so an uncollected sealed key is gone within the hour |
 | mutation result expiry | as today |
 | blob GC | Deletes expired and purgeable ledger rows, then deletes their keys through the region's internal storage endpoint |
 | orphan reconciliation | Lists each region's keys older than 48h (receipts expire after 24h, which leaves a margin) and deletes keys the ledger doesn't know |
@@ -212,7 +233,8 @@ client changes, tracked separately:
 - direct upload and download
 - passing the receipt on create/update
 - unlocking the E2EE vault key under SSO: passphrase, recovery key and QR pairing (decided; the
-  server half is in `docs/Hosted launch plan.md`)
+  server half, the recovery envelope and the pairing relay, is built: `docs/Hosted launch plan.md`
+  B1 and B2)
 
 ## Confirmed defaults
 
