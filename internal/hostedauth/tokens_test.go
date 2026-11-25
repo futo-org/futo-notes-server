@@ -109,11 +109,33 @@ func TestMintAccessVerifies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}
-	if got != (AccessToken{UserID: testUser}) {
-		t.Errorf("got %+v, want user %s", got, testUser)
+	if got != (AccessToken{UserID: testUser, Write: true}) {
+		t.Errorf("got %+v, want user %s with write", got, testUser)
 	}
 	if claims := unverifiedClaims(t, token); !claims.ExpiresAt.Equal(testNow.Add(accessTokenTTL)) {
 		t.Errorf("exp %v, want %v", claims.ExpiresAt, testNow.Add(accessTokenTTL))
+	}
+}
+
+func TestMintReadAccessVerifiesWithoutWrite(t *testing.T) {
+	key := mustKey(t, "api-1")
+	token, _, err := NewMinter(key, fixedClock(testNow)).MintReadAccess(testRegion, testUser)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	var claims scopedClaims
+	if _, _, err := jwt.NewParser().ParseUnverified(token, &claims); err != nil || claims.Scope != "blobs.read" {
+		t.Errorf("scope %q (%v), want blobs.read", claims.Scope, err)
+	}
+	got, err := mustVerifier(t, mustKeySet(t, key), testNow.Add(time.Hour)).VerifyAccess(token)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if got != (AccessToken{UserID: testUser}) {
+		t.Errorf("got %+v, want user %s without write", got, testUser)
+	}
+	if err := mustVerifier(t, mustKeySet(t, key), testNow).VerifyAdmin(token); !errors.Is(err, ErrInvalidToken) {
+		t.Errorf("read access token as admin: got %v, want ErrInvalidToken", err)
 	}
 }
 

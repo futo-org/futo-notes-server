@@ -48,7 +48,7 @@ macOS, not Windows.
    stdout, and the same lines again from `hosted-stack.sh env`:
 
    ```
-   HOSTED_STACK_API_URL=http://127.0.0.1:3105
+   HOSTED_STACK_API_URL=http://127.0.0.1:3125
    HOSTED_STACK_ISSUER=http://127.0.0.1:8192
    HOSTED_STACK_REGIONS=us-east,eu-central,ap-southeast
    HOSTED_STACK_STORAGE_URL_US_EAST=http://127.0.0.1:3115
@@ -61,31 +61,52 @@ macOS, not Windows.
    `HOSTED_STACK_POSTGRES_PORT` and `HOSTED_STACK_MINIO_PORT` move them.
    `HOSTED_STACK_DIR` holds the state and `logs/<service>.log`. The API accepts
    app redirects on `tech.futo.notes` and `tech.futo.notes.dev`, and on
-   loopback. Under Docker-in-Docker (`DOCKER_HOST=tcp://docker:2376`) the
+   loopback. Anyone can sign up unless `HOSTED_STACK_ALLOWED_EMAIL_DOMAINS`
+   (comma-separated, empty by default) sets the API's
+   `ALLOWED_EMAIL_DOMAINS`: then a new account needs a verified email at one
+   of those domains, and is otherwise refused with
+   `error=signup_not_allowed` on the redirect back to the app. Under Docker-in-Docker (`DOCKER_HOST=tcp://docker:2376`) the
    launcher reaches the containers at that host.
 3. **Sign in.** The app points at `HOSTED_STACK_API_URL` and starts an app
    sign-in at `/api/auth/oidc/start`, with its `redirect_uri`, PKCE challenge
    and `state`. That redirects to `HOSTED_STACK_ISSUER/authorize?...`, which
    shows a form. A test does not fill it in. It replaces the path with
    `/test/authorize`, keeps the query, and adds `sub=<test user>` (and
-   optionally `email=` and `name=`). Then it follows the redirects with a
+   optionally `email=`, `name=`, and `email_verified=false` to play an
+   unverified address). Then it follows the redirects with a
    cookie jar, back through the API's callback to the app's `redirect_uri`,
    which carries the one-time `code`. The app swaps it at
    `POST /api/auth/oidc/token`. Every new `sub` is a new account. The next
    steps are choosing a region, getting a storage token, uploading, and
    creating objects with the receipt, as in `docs/openapi-hosted.yaml`.
    `TestReleasedStack` in `e2e/hosted/released_test.go` walks them in Go.
-4. **Down.** `hosted-stack.sh down`, with the same `HOSTED_STACK_DIR`. It stops
+4. **Subscribe.** Billing is on (`"billing": true` in `GET /`), with the mock
+   web payment provider, so a new account reads but cannot write: writes
+   answer `402 subscription_required` and storage tokens are read-only
+   (uploads get `403 write_not_allowed`). To subscribe a test user,
+   `POST /api/billing/checkout` with its session and then `POST` the `url`
+   it returns, as is: the mock completes the checkout and tells the API
+   through its signed webhook, as a real provider would. Exchange the
+   storage refresh token again afterwards for a token that may upload.
+   `GET /api/billing` shows the subscription. The API also runs with
+   `DEV_UI`, whose `/dev/billing/*` routes lapse, expire or refund it and
+   move the lapse clock (see `/dev`).
+5. **Down.** `hosted-stack.sh down`, with the same `HOSTED_STACK_DIR`. It stops
    the processes `up` started (only if they still run the binary it started)
    and removes the Compose project `futo-notes-hosted-stack` with its data. A
    failed `up` cleans up after itself, after printing each service's log tail.
 
-Only one stack per machine runs at a time: the Compose project name is fixed.
+Several stacks can run on one machine: give each its own
+`HOSTED_STACK_PROJECT`, `HOSTED_STACK_DIR` and ports.
+The API defaults to port 3125, clear of 3005 and of the 3105 this repo's
+comparison harness uses.
 
 ## In this repo
 
-`mise run hosted-stack:smoke` builds a release into a temporary directory,
-runs `scripts/hosted-stack-smoke.sh` on it (verify checksums, unpack, `up`,
+`mise run hosted-stack:smoke` builds a release for this machine only
+(`FUTO_RELEASE_HOST_ONLY=1 scripts/build-release.sh <version>`, which a client
+repo can also use to test against an unreleased server) into a temporary
+directory, runs `scripts/hosted-stack-smoke.sh` on it (verify checksums, unpack, `up`,
 `TestReleasedStack`, `down`), and leaves nothing running. CI's
 `test:hosted-stack` job does the same with the pipeline's `build:binaries`
 artifacts, and `publish:binaries` waits for it. The bundle's sources are

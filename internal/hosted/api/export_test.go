@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -31,4 +32,11 @@ func (s *Server) HandlerWithPanic() http.Handler {
 	r := s.router()
 	r.Get("/test-panic", func(http.ResponseWriter, *http.Request) { panic("test panic") })
 	return s.Wrap(r)
+}
+
+// HandlerWithSyncPing is Handler with sync event streams pinging, and
+// rechecking their session, every interval.
+func (s *Server) HandlerWithSyncPing(interval time.Duration) http.Handler {
+	s.syncPing = interval
+	return s.Handler()
 }

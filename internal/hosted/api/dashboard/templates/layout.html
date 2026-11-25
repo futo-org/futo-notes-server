@@ -11,6 +11,11 @@
 <title>{{template "title" .}} · FUTO Notes</title>
 <link rel="stylesheet" href="/dashboard/static/dashboard.css">
 <script src="/dashboard/static/htmx-2.0.4.min.js" defer></script>
+{{- with .CheckoutHost}}
+<meta name="checkout-host" content="embedded">
+<script src="{{.ScriptURL}}" defer></script>
+{{- end}}
+<script src="/dashboard/static/checkout.js" defer></script>
 </head>
 <body hx-target="#page"{{with .HXHeaders}} hx-headers="{{.}}"{{end}}>
 <a class="skip" href="#main">Skip to content</a>
@@ -53,6 +58,21 @@
 {{- end}}
 
 {{define "alert"}}<p class="alert">{{.}}</p>{{end}}
+
+{{define "notice" -}}
+{{with .Notice}}<p class="notice" role="status">{{.}}</p>{{end}}
+{{- with .PendingURL}}
+<p class="muted" hx-get="{{.}}" hx-trigger="load delay:5s" hx-target="#page">Checking again in a few seconds…</p>
+{{- end}}
+{{- end}}
+
+{{define "checkout-panel" -}}
+<div class="checkout" data-checkout data-publishable-key="{{.PublishableKey}}" data-session-url="{{.SessionURL}}" data-page-url="{{.PageURL}}">
+<p class="muted" data-checkout-status role="status">Loading the secure checkout…</p>
+<div data-checkout-mount></div>
+<noscript><p>The checkout needs JavaScript.</p></noscript>
+</div>
+{{- end}}
 
 {{define "csrf-field"}}<input type="hidden" name="csrf_token" value="{{.CSRF}}">{{end}}
 

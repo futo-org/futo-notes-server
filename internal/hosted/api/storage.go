@@ -32,7 +32,8 @@ type storageTokenRegion struct {
 
 // handleStorageToken serves POST /api/storage/token: a device spends its
 // storage refresh token for a 24h access token to its region's storage
-// service and the refresh token that replaces it. Spending it again before
+// service, read-only for an account without a subscription while billing
+// is on, and the refresh token that replaces it. Spending it again before
 // the replacement is used returns the same replacement.
 func (s *Server) handleStorageToken(w http.ResponseWriter, r *http.Request) {
 	var body struct {
@@ -58,7 +59,11 @@ func (s *Server) handleStorageToken(w http.ResponseWriter, r *http.Request) {
 		return
 	case errors.Is(err, account.ErrPendingDeletion):
 		s.metrics.refresh(r.Context(), "pending_deletion")
-		writePendingDeletion(w)
+		var purgeAt *time.Time
+		if pending, ok := errors.AsType[*account.PendingDeletionError](err); ok {
+			purgeAt = &pending.PurgeAt
+		}
+		writePendingDeletion(w, purgeAt)
 		return
 	case errors.Is(err, account.ErrNoRegion):
 		s.metrics.refresh(r.Context(), "no_region")
@@ -80,7 +85,13 @@ func (s *Server) handleStorageToken(w http.ResponseWriter, r *http.Request) {
 		serverError(w, r, "minting storage token", fmt.Errorf("user's region %q is not configured", exchange.RegionID))
 		return
 	}
-	accessToken, expiresAt, err := s.minter.MintAccess(region.ID, exchange.UserID)
+	// An account without a subscription keeps reading its blobs but may not
+	// upload more.
+	mint := s.minter.MintAccess
+	if !exchange.Entitled && s.providers.Any() {
+		mint = s.minter.MintReadAccess
+	}
+	accessToken, expiresAt, err := mint(region.ID, exchange.UserID)
 	if err != nil {
 		serverError(w, r, "minting storage token", err)
 		return

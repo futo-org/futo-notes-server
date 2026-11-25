@@ -1,5 +1,6 @@
 // Package auth checks the Bearer tokens the API mints for the storage
-// service: access tokens on /blobs, admin tokens on /internal.
+// service: access tokens on /blobs, admin tokens on /internal. Uploads also
+// need an access token's write scope.
 package auth
 
 import (
@@ -37,7 +38,23 @@ type contextKey struct{}
 // UserID returns the user the request's access token names. It panics outside
 // an Access-protected route, which would be a routing bug.
 func UserID(ctx context.Context) string {
-	return ctx.Value(contextKey{}).(string)
+	return ctx.Value(contextKey{}).(hostedauth.AccessToken).UserID
+}
+
+// codeWriteNotAllowed answers an upload with a read-only access token: the
+// account has no subscription, so it may read its blobs but not add any.
+const codeWriteNotAllowed = "write_not_allowed"
+
+// RequireWrite refuses requests whose access token may only read. It must
+// run inside Access.
+func RequireWrite(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !r.Context().Value(contextKey{}).(hostedauth.AccessToken).Write {
+			httputil.WriteError(w, r, http.StatusForbidden, codeWriteNotAllowed, "This access token may only read")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // Access admits requests carrying a valid access token for this region and
@@ -60,7 +77,7 @@ func Access(v *hostedauth.Verifier, onFailure OnFailure) func(http.Handler) http
 			hlog.FromRequest(r).UpdateContext(func(c zerolog.Context) zerolog.Context {
 				return c.Str("user_id", access.UserID)
 			})
-			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), contextKey{}, access.UserID)))
+			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), contextKey{}, access)))
 		})
 	}
 }

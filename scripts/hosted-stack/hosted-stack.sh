@@ -20,22 +20,32 @@
 #   HOSTED_STACK_API_BIN, HOSTED_STACK_STORAGE_BIN, HOSTED_STACK_MOCK_OIDC_BIN
 # Ports, all optional. The defaults stay clear of 3005, which the apps keep
 # for themselves, and of the server repo's own dev ports:
-#   HOSTED_STACK_API_PORT       3105
+#   HOSTED_STACK_API_PORT       3125
 #   HOSTED_STACK_STORAGE_PORT   3115; the three regions take it and the next two
 #   HOSTED_STACK_OIDC_PORT      8192
 #   HOSTED_STACK_POSTGRES_PORT  15532
 #   HOSTED_STACK_MINIO_PORT     19000
+# The API runs with DEV_UI and the mock web payment provider, so billing is
+# on: a test user writes only once subscribed, through the mock checkout
+# (POST /api/billing/checkout, then POST the URL it returns).
+# HOSTED_STACK_ALLOWED_EMAIL_DOMAINS, optional and empty by default, is the
+# API's ALLOWED_EMAIL_DOMAINS: the comma-separated email domains new accounts
+# may sign up with. Empty lets anyone sign up.
 # HOSTED_STACK_DIR holds the stack's state and its service logs
 # (logs/<service>.log), by default $TMPDIR/futo-notes-hosted-stack. Give every
 # command the same one.
+# HOSTED_STACK_PROJECT names the stack's containers, by default
+# futo-notes-hosted-stack. Two stacks run side by side with different
+# projects, directories and ports.
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 keys=$here/test-only-keys
 tmp=${TMPDIR:-/tmp}
 state=${HOSTED_STACK_DIR:-${tmp%/}/futo-notes-hosted-stack}
+project=${HOSTED_STACK_PROJECT:-futo-notes-hosted-stack}
 
-api_port=${HOSTED_STACK_API_PORT:-3105}
+api_port=${HOSTED_STACK_API_PORT:-3125}
 storage_port=${HOSTED_STACK_STORAGE_PORT:-3115}
 oidc_port=${HOSTED_STACK_OIDC_PORT:-8192}
 export HOSTED_STACK_POSTGRES_PORT=${HOSTED_STACK_POSTGRES_PORT:-15532}
@@ -63,7 +73,7 @@ die() {
 }
 
 compose() {
-  docker compose -f "$here/compose.yml" "$@" >&2
+  docker compose -p "$project" -f "$here/compose.yml" "$@" >&2
 }
 
 # HOSTED_STACK_JOIN_CONTAINER is the id of a container this launcher runs in,
@@ -73,8 +83,8 @@ compose() {
 # reaches Postgres and MinIO there, on their own ports.
 join_stack_network() {
   local postgres minio network
-  postgres=$(docker compose -f "$here/compose.yml" ps -q postgres)
-  minio=$(docker compose -f "$here/compose.yml" ps -q minio)
+  postgres=$(docker compose -p "$project" -f "$here/compose.yml" ps -q postgres)
+  minio=$(docker compose -p "$project" -f "$here/compose.yml" ps -q minio)
   network=$(docker inspect -f '{{range $name, $_ := .NetworkSettings.Networks}}{{$name}}{{end}}' "$postgres")
   echo "$network" >"$state/network"
   docker network connect "$network" "$HOSTED_STACK_JOIN_CONTAINER"
@@ -245,10 +255,14 @@ up() {
     OIDC_CLIENT_ID=notes-test
     OIDC_CLIENT_SECRET=notes-test-secret
     APP_REDIRECT_SCHEMES="tech.futo.notes,tech.futo.notes.dev"
+    ALLOWED_EMAIL_DOMAINS="${HOSTED_STACK_ALLOWED_EMAIL_DOMAINS:-}"
     REGIONS_FILE="$state/regions.json"
     API_SIGNING_KEY="$(cat "$keys/api.key.pem")"
     STORAGE_REFRESH_ROTATION_KEY="$(cat "$keys/storage-refresh-rotation.key")"
     COOKIE_SECURE=false
+    DEV_UI=true
+    BILLING_WEB_PROVIDER=mock
+    BILLING_MOCK_WEBHOOK_SECRET=test-only-mock-webhook-secret
     DRAIN_DELAY_MS=0
     LOG_LEVEL=debug
   )

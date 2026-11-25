@@ -8,6 +8,7 @@ import (
 	"uuid"
 
 	"futo-notes-server/internal/auth"
+	"futo-notes-server/internal/hosted/billing"
 	"futo-notes-server/internal/ids"
 )
 
@@ -32,6 +33,11 @@ type Principal struct {
 	// RegionID is "" until the user chooses a region.
 	RegionID            string
 	DeletionRequestedAt *time.Time
+	// PurgeAt is when a pending deletion purges the account.
+	PurgeAt *time.Time
+	// Entitled reports that the account has a subscription that lets it
+	// write (billing.EntitledSQL).
+	Entitled bool
 	// AuthenticatedAt is when the session's user last proved who they are
 	// to the identity provider.
 	AuthenticatedAt time.Time
@@ -107,11 +113,11 @@ func (s *Store) Authenticate(ctx context.Context, token string) (Principal, erro
 	var expiresAt, lastUsedAt time.Time
 	var region sql.NullString
 	err := s.database.QueryRowContext(ctx, `SELECT s.id, s.expires_at, s.last_used_at, s.authenticated_at,
-			u.id, u.email, u.name, u.region_id, u.deletion_requested_at
+			u.id, u.email, u.name, u.region_id, u.deletion_requested_at, u.purge_at, `+billing.EntitledSQL("u.id")+`
 		FROM sessions s JOIN users u ON u.id = s.user_id
 		WHERE s.access_token_hash = $1`, auth.HashToken(token)).
 		Scan(&p.Session.ID, &expiresAt, &lastUsedAt, &p.AuthenticatedAt,
-			&p.Session.User.ID, &p.Session.User.Email, &p.Session.User.Name, &region, &p.DeletionRequestedAt)
+			&p.Session.User.ID, &p.Session.User.Email, &p.Session.User.Name, &region, &p.DeletionRequestedAt, &p.PurgeAt, &p.Entitled)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Principal{}, auth.ErrNoSession
 	}
@@ -141,6 +147,16 @@ func (s *Store) Authenticate(ctx context.Context, token string) (Principal, erro
 		p.Slid = n > 0
 	}
 	return p, nil
+}
+
+// SessionLive reports whether sessionID is unexpired and its account is not
+// pending deletion: whether a sync event stream it opened may stay open.
+func (s *Store) SessionLive(ctx context.Context, sessionID string) (bool, error) {
+	var live bool
+	err := s.database.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1
+		FROM sessions s JOIN users u ON u.id = s.user_id
+		WHERE s.id = $1 AND s.expires_at > $2 AND u.deletion_requested_at IS NULL)`, sessionID, s.now()).Scan(&live)
+	return live, err
 }
 
 // DeviceSession is one of a user's sessions, as the device list shows it.

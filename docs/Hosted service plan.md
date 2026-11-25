@@ -23,7 +23,7 @@ Operators: see [Hosted deployment](Hosted%20deployment.md). Local development:
 | Blob proof | Storage returns a **receipt signed by its region** with each upload. The device passes the receipt to the API when an object claims the blob. The API checks it offline. |
 | JWT keys | Ed25519. Keys are listed by `kid` in static config (Secret/ConfigMap), so rotation needs no downtime. Storage never calls the API. |
 | Account deletion | A 30-day grace period during which the user can cancel. After that, everything is purged. |
-| Quotas, billing | Out of scope for v1. |
+| Quotas, billing | Quotas are out of scope for v1. Billing came later, in [Hosted launch plan](Hosted%20launch%20plan.md) § C. |
 | Logging / HTTP | zerolog and chi across the **whole repo**, the self-hosted server included. |
 | Metrics | OTLP push (OTel SDK, `otlpmetrichttp`) to VictoriaMetrics, as in backups. |
 | Tooling | mise tasks, compose for local dev, and `k8s:validate` in CI. No k3d/Tilt/Flux tree. |
@@ -80,7 +80,8 @@ is a 400), and a `PUT` replaces both envelopes, so **a `PUT` without them delete
 recovery envelope**. Both envelopes share one `key_updated_at`. Self-hosted neither stores nor
 returns them.
 
-Capability (`GET /`, still the JSON document): `auth_mode: "oidc"`, `signup: "open"`, `billing: false`.
+Capability (`GET /`, still the JSON document): `auth_mode: "oidc"`, `signup: "open"`, `billing: false`
+(`true` once a payment provider is configured; launch plan § C).
 
 New endpoints:
 
@@ -166,7 +167,9 @@ so a job runs at most once per interval across the deployment.
 | orphan reconciliation | Lists each region's keys older than 48h (receipts expire after 24h, which leaves a margin) and deletes keys the ledger doesn't know |
 | account purge | After the 30-day grace: purges the user's storage prefix, then deletes their rows. Both are idempotent, and the account stays due until both succeed. |
 
-SSE works across replicas through the existing Postgres LISTEN/NOTIFY.
+SSE works across replicas through the existing Postgres LISTEN/NOTIFY. A stream ends with its
+session or when its account goes pending deletion: hosted triggers announce both on
+`notes_session_ends` to every replica, and each stream rechecks its session on every ping.
 
 ## Storage service (`cmd/storage`)
 

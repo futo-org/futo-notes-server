@@ -15,6 +15,18 @@ import (
 // server processes.
 const Channel = "notes_changes"
 
+// SessionsChannel is the Postgres NOTIFY channel on which the hosted schema
+// announces that streams must end: a session ended, or an account went
+// pending deletion. Self-hosted databases never notify on it.
+const SessionsChannel = "notes_session_ends"
+
+// SessionEnd is the payload sent on SessionsChannel. SessionID is "" when
+// every stream of the user must end.
+type SessionEnd struct {
+	UserID    string `json:"userId"`
+	SessionID string `json:"sessionId"`
+}
+
 // Notification is the payload sent through Postgres. UserID is used only for
 // routing and is omitted from the client-facing SSE event by the HTTP handler.
 type Notification struct {
@@ -88,20 +100,22 @@ func NewHub() *Hub {
 // Subscription coalesces pending changes by collection. The wake channel has
 // capacity one because it signals state, rather than carrying every event.
 type Subscription struct {
-	mu      sync.Mutex
-	userID  string
-	pending map[string]int64
-	wake    chan struct{}
-	closed  bool
+	mu        sync.Mutex
+	userID    string
+	sessionID string
+	pending   map[string]int64
+	wake      chan struct{}
+	closed    bool
 }
 
-// Subscribe registers a subscription for userID's notifications. The caller
-// must Unsubscribe it when done.
-func (h *Hub) Subscribe(userID string) *Subscription {
+// Subscribe registers a subscription for userID's notifications, held by
+// sessionID. The caller must Unsubscribe it when done.
+func (h *Hub) Subscribe(userID, sessionID string) *Subscription {
 	sub := &Subscription{
-		userID:  userID,
-		pending: make(map[string]int64),
-		wake:    make(chan struct{}, 1),
+		userID:    userID,
+		sessionID: sessionID,
+		pending:   make(map[string]int64),
+		wake:      make(chan struct{}, 1),
 	}
 	h.mu.Lock()
 	if h.subscribers[userID] == nil {
@@ -150,6 +164,28 @@ func (h *Hub) CloseAll() {
 		for sub := range subscribers {
 			sub.close()
 		}
+	}
+}
+
+// End terminates the subscriptions end names: those of its session, or every
+// one of its user's when it names no session.
+func (h *Hub) End(end SessionEnd) {
+	var ended []*Subscription
+	h.mu.Lock()
+	subscribers := h.subscribers[end.UserID]
+	for sub := range subscribers {
+		if end.SessionID == "" || sub.sessionID == end.SessionID {
+			delete(subscribers, sub)
+			ended = append(ended, sub)
+		}
+	}
+	if len(subscribers) == 0 {
+		delete(h.subscribers, end.UserID)
+	}
+	h.mu.Unlock()
+
+	for _, sub := range ended {
+		sub.close()
 	}
 }
 

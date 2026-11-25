@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/rs/zerolog/hlog"
 
@@ -34,9 +35,26 @@ const (
 	codePayloadTooLarge        = "payload_too_large"
 	// codePairingAlreadyKeyed answers a second key posted to a pairing.
 	codePairingAlreadyKeyed = "pairing_already_keyed"
+	// codeSignupNotAllowed refuses a new account whose email
+	// ALLOWED_EMAIL_DOMAINS does not admit; the app gets it as its redirect's
+	// error.
+	codeSignupNotAllowed = "signup_not_allowed"
 	// codeReauthenticationRequired asks the client to sign in again with
 	// reauthenticate=true before deleting the account.
 	codeReauthenticationRequired = "reauthentication_required"
+	// codeSubscriptionRequired answers a write from an account without a
+	// subscription, in the sync shape.
+	codeSubscriptionRequired = "subscription_required"
+	// Billing failures.
+	codeBillingUnavailable         = "billing_unavailable"
+	codeAlreadySubscribed          = "already_subscribed"
+	codeManagedByStore             = "managed_by_store"
+	codeStoreSubscriptionElsewhere = "store_subscription_owned_elsewhere"
+	codeInvalidPurchase            = "invalid_purchase"
+	codeInvalidDelivery            = "invalid_delivery"
+	// codeCheckoutLinkExpired answers an app's checkout link that is
+	// forged, expired or already used.
+	codeCheckoutLinkExpired = "checkout_link_expired"
 )
 
 // serverError logs an internal failure and answers with a hosted 500.
@@ -62,6 +80,20 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 
 // writePendingDeletion answers the 403 for an account scheduled for
 // deletion, in the sync contract's shape with its code, wherever it occurs.
-func writePendingDeletion(w http.ResponseWriter) {
-	syncapi.WriteCodedError(w, http.StatusForbidden, codeAccountPendingDeletion, account.ErrPendingDeletion.Error())
+func writePendingDeletion(w http.ResponseWriter, purgeAt *time.Time) {
+	if purgeAt != nil {
+		utc := purgeAt.UTC()
+		purgeAt = &utc
+	}
+	syncapi.WriteJSON(w, http.StatusForbidden, pendingDeletionResponse{
+		Code: codeAccountPendingDeletion, Error: account.ErrPendingDeletion.Error(), PurgeAt: purgeAt,
+	})
+}
+
+// pendingDeletionResponse is the sync-shaped 403 of an account pending
+// deletion, with when it will be purged.
+type pendingDeletionResponse struct {
+	Code    string     `json:"code"`
+	Error   string     `json:"error"`
+	PurgeAt *time.Time `json:"purge_at,omitempty"`
 }

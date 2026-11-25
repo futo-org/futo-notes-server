@@ -10,6 +10,8 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"futo-notes-server/internal/db"
+	"futo-notes-server/internal/hosted/billing"
+	"futo-notes-server/internal/hosted/mail"
 	"futo-notes-server/internal/hosted/storageclient"
 	"futo-notes-server/internal/hostedauth"
 	"futo-notes-server/internal/ids"
@@ -210,21 +212,23 @@ type PurgeResult struct {
 	BlobsDeleted int
 }
 
-// PurgeAccounts purges every account whose deletion grace period is over:
-// first the user's prefix in their region (skipped when they never chose
-// one), then every row of theirs in one transaction. Both steps are
-// idempotent, so an account that fails stays due and the next run finishes
-// it.
-func PurgeAccounts(ctx context.Context, database *db.DB, storage *storageclient.Client) (PurgeResult, error) {
+// PurgeAccounts purges every account whose purge is due: a deletion grace
+// period that is over, or a lapse the lapse job claimed. Each purge first
+// deletes the user's prefix in their region (skipped when they never chose
+// one) and stops their web and Play subscriptions renewing, then deletes
+// every row of theirs in one transaction. A lapsed account loses its notes,
+// then gets the purged email, then loses its row. Every step is idempotent,
+// so an account that fails stays due and the next run finishes it.
+func PurgeAccounts(ctx context.Context, b Billing) (PurgeResult, error) {
 	var result PurgeResult
-	due, err := dueAccounts(ctx, database)
+	due, err := dueAccounts(ctx, b.Database)
 	if err != nil {
 		return result, err
 	}
 	result.Due = len(due)
 	var errs []error
 	for _, userID := range due {
-		blobs, purged, err := purgeAccount(ctx, database, storage, userID)
+		blobs, purged, err := purgeAccount(ctx, b, userID)
 		result.BlobsDeleted += blobs
 		switch {
 		case err != nil:
@@ -258,22 +262,38 @@ func dueAccounts(ctx context.Context, database *db.DB) ([]string, error) {
 
 // purgeAccount purges one due account and reports how many blobs storage
 // deleted and whether the account's rows are gone.
-func purgeAccount(ctx context.Context, database *db.DB, storage *storageclient.Client, userID string) (int, bool, error) {
-	region, due, err := claimPurge(ctx, database, userID)
+func purgeAccount(ctx context.Context, b Billing, userID string) (int, bool, error) {
+	claim, due, err := claimPurge(ctx, b.Database, userID)
 	if err != nil || !due {
 		return 0, false, err
 	}
 	blobs := 0
-	if region != "" {
-		if blobs, err = storage.PurgeUser(ctx, region, userID); err != nil {
+	if claim.region != "" {
+		if blobs, err = b.Storage.PurgeUser(ctx, claim.region, userID); err != nil {
+			return blobs, false, err
+		}
+	}
+	// A subscription still renewing would go on charging for an account
+	// that no longer exists.
+	if err := b.Providers.CancelRenewals(ctx, b.Store, userID); err != nil {
+		return blobs, false, err
+	}
+	if claim.lapsedAt != nil {
+		// The purged email says the notes are gone, so they go first; its
+		// stamp lives on the users row, so the row goes last.
+		if _, err := b.Database.ExecContext(ctx, `DELETE FROM collections WHERE user_id = $1`, userID); err != nil {
+			return blobs, false, err
+		}
+		if _, err := b.Notifier.SendOnce(ctx, userID, mail.Purged, claim.lapsedAt.Add(billing.PurgeAfter)); err != nil && !errors.Is(err, mail.ErrNoAddress) {
 			return blobs, false, err
 		}
 	}
 	// Everything the user owns references users with ON DELETE CASCADE:
 	// sessions and their storage refresh tokens, collections and their
-	// objects, ledger rows, mutation results and one-time codes. This one
-	// statement removes them all atomically.
-	result, err := database.ExecContext(ctx, `DELETE FROM users WHERE id = $1 AND purge_at IS NOT NULL`, userID)
+	// objects, ledger rows, mutation results, one-time codes and
+	// entitlements, whose store subscriptions are then free to bind to
+	// another account. This one statement removes them all atomically.
+	result, err := b.Database.ExecContext(ctx, `DELETE FROM users WHERE id = $1 AND purge_at IS NOT NULL`, userID)
 	if err != nil {
 		return blobs, false, err
 	}
@@ -281,27 +301,36 @@ func purgeAccount(ctx context.Context, database *db.DB, storage *storageclient.C
 	return blobs, n == 1, err
 }
 
+// purgeClaim is what purging a claimed account needs to know about it.
+type purgeClaim struct {
+	// region is "" when the user never chose one.
+	region string
+	// lapsedAt is set when the purge ends a lapse rather than a deletion
+	// the user asked for, and the purged email is due.
+	lapsedAt *time.Time
+}
+
 // claimPurge locks the user's row and reports, by the database clock, whether
-// the purge is due, and the user's region ("" if none). Restore updates the
-// same row under the same clock, so the two serialize: a restore that won
+// the purge is due, and what it must know about the account. Restore updates
+// the same row under the same clock, so the two serialize: a restore that won
 // leaves purge_at NULL here, and one that comes after this finds the grace
 // period over and refuses. Once claimed, an account stays due until purged.
-func claimPurge(ctx context.Context, database *db.DB, userID string) (string, bool, error) {
+func claimPurge(ctx context.Context, database *db.DB, userID string) (purgeClaim, bool, error) {
 	tx, err := database.BeginTx(ctx, nil)
 	if err != nil {
-		return "", false, err
+		return purgeClaim{}, false, err
 	}
 	defer tx.Discard()
-	var region string
-	err = tx.QueryRowContext(ctx, `SELECT coalesce(region_id, '') FROM users
-		WHERE id = $1 AND purge_at <= clock_timestamp() FOR UPDATE`, userID).Scan(&region)
+	var claim purgeClaim
+	err = tx.QueryRowContext(ctx, `SELECT coalesce(region_id, ''), CASE WHEN deletion_requested_at IS NULL THEN lapsed_at END
+		FROM users WHERE id = $1 AND purge_at <= clock_timestamp() FOR UPDATE`, userID).Scan(&claim.region, &claim.lapsedAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", false, nil
+		return purgeClaim{}, false, nil
 	}
 	if err != nil {
-		return "", false, err
+		return purgeClaim{}, false, err
 	}
-	return region, true, tx.Commit()
+	return claim, true, tx.Commit()
 }
 
 func blobGC(database *db.DB, storage *storageclient.Client, metrics *Metrics) jobs.Job {
@@ -339,10 +368,10 @@ func orphanReconciliation(database *db.DB, storage *storageclient.Client, region
 	}}
 }
 
-func accountPurge(database *db.DB, storage *storageclient.Client, metrics *Metrics) jobs.Job {
+func accountPurge(b Billing, metrics *Metrics) jobs.Job {
 	const name = "account purge"
 	return jobs.Job{Name: name, Run: func(ctx context.Context) (string, error) {
-		result, err := PurgeAccounts(ctx, database, storage)
+		result, err := PurgeAccounts(ctx, b)
 		metrics.add(ctx, name, map[string]int{
 			itemsProcessed: result.Due, itemsDeleted: result.Purged, itemsFailed: result.Failed,
 		})

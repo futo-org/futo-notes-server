@@ -171,10 +171,13 @@ func TestHostedScenario(t *testing.T) {
 	resp = phone.do(request{method: http.MethodGet, url: foreign.Region.Endpoint + "/blobs/" + up1.Key, bearer: grant.AccessToken})
 	phone.expect("download from another region", resp, http.StatusUnauthorized)
 
-	// A revoked device loses its session and its refresh token.
+	// A revoked device loses its session, its refresh token and its open
+	// event stream.
 	tablet := s.login(t, sub, "e2e tablet")
 	tabletSession := currentSession(tablet)
+	tabletStream := tablet.subscribe()
 	phone.expect("revoke tablet", phone.api(http.MethodDelete, "/api/sessions/"+tabletSession, nil, ""), http.StatusNoContent)
+	tabletStream.ended("revoking the tablet")
 	tablet.expect("revoked device's refresh token", tablet.exchange(tablet.refresh), http.StatusUnauthorized)
 	tablet.expect("revoked device's session", tablet.api(http.MethodGet, "/api/auth", nil, ""), http.StatusUnauthorized)
 
@@ -250,6 +253,7 @@ func TestHostedScenario(t *testing.T) {
 		t.Fatalf("account deletion %+v, want a purge about 30 days out", account.Deletion)
 	}
 	laptop.expect("other device after account deletion", laptop.api(http.MethodGet, "/api/auth", nil, ""), http.StatusUnauthorized)
+	stream.ended("deleting the account from another device")
 	resp = phone.api(http.MethodGet, "/api/collections", nil, "")
 	phone.expect("sync while deletion is pending", resp, http.StatusForbidden)
 	if !strings.Contains(string(resp.body), "account pending deletion") {

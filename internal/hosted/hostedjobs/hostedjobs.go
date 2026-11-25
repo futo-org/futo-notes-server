@@ -6,7 +6,8 @@
 // The self-hosted filesystem jobs (internal/jobs ReconcileStorage and
 // GarbageCollectBlobs) must never run here: the API holds no blob files.
 // Blob GC, orphan reconciliation and account purge act on the regional
-// storage services instead.
+// storage services instead. The billing jobs reconcile subscriptions with
+// their providers and move lapsed accounts toward their purge.
 package hostedjobs
 
 import (
@@ -19,7 +20,6 @@ import (
 	"futo-notes-server/internal/db"
 	"futo-notes-server/internal/hosted/account"
 	"futo-notes-server/internal/hosted/pairing"
-	"futo-notes-server/internal/hosted/storageclient"
 	"futo-notes-server/internal/jobs"
 )
 
@@ -49,14 +49,20 @@ func Sessions(database *db.DB, accounts *account.Store) []jobs.Job {
 	}
 }
 
-// Maintenance is the slower job group: mutation result expiry, then the jobs
-// that act on the storage services of regions (every configured region id).
-func Maintenance(database *db.DB, storage *storageclient.Client, regions []string, metrics *Metrics) []jobs.Job {
+// Maintenance is the slower job group, every 6 hours: mutation result
+// expiry, the jobs that act on the storage services of regions (every
+// configured region id), and billing: entitlement reconciliation, then the
+// lapse job, which purges the lapsed accounts it claims, then the account
+// purge, which finishes any it could not, and delivery log pruning.
+func Maintenance(b Billing, regions []string, metrics *Metrics) []jobs.Job {
 	return []jobs.Job{
-		jobs.MutationResultExpiry(database),
-		blobGC(database, storage, metrics),
-		orphanReconciliation(database, storage, regions, metrics),
-		accountPurge(database, storage, metrics),
+		jobs.MutationResultExpiry(b.Database),
+		blobGC(b.Database, b.Storage, metrics),
+		orphanReconciliation(b.Database, b.Storage, regions, metrics),
+		entitlementReconciliation(b, metrics),
+		subscriptionLapses(b, metrics),
+		accountPurge(b, metrics),
+		deliveryPruning(b, metrics),
 	}
 }
 

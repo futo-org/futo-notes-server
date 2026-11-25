@@ -64,6 +64,32 @@ func appSession(t *testing.T, store *account.Store, user auth.User) account.AppS
 	return session
 }
 
+func TestUpdateUserNeverCreates(t *testing.T) {
+	database := hostedtest.Postgres(t)
+	store := account.New(database, rotationKey)
+	sub := "update-" + uuid.NewV7().String()
+	dbtest.CleanupExec(t, database, `DELETE FROM users WHERE sub = $1`, sub)
+	if _, err := store.UpdateUser(t.Context(), account.Identity{Subject: sub, Email: sub + "@example.test", Name: "None"}); !errors.Is(err, account.ErrNoUser) {
+		t.Fatalf("UpdateUser of an unknown subject = %v, want ErrNoUser", err)
+	}
+	var users int
+	if err := database.QueryRowContext(t.Context(), `SELECT count(*) FROM users WHERE sub = $1`, sub).Scan(&users); err != nil || users != 0 {
+		t.Fatalf("users with the subject = %d, %v", users, err)
+	}
+
+	first, err := store.UpsertUser(t.Context(), account.Identity{Subject: sub, Email: "a-" + sub + "@example.test", Name: "First"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.UpdateUser(t.Context(), account.Identity{Subject: sub, Email: "b-" + sub + "@example.test", Name: "Second"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.ID != first.ID || second.Name != "Second" || second.Email != "b-"+sub+"@example.test" {
+		t.Fatalf("update = %#v, first = %#v", second, first)
+	}
+}
+
 func TestUpsertUserBySubRefreshesProfile(t *testing.T) {
 	database := hostedtest.Postgres(t)
 	store := account.New(database, rotationKey)

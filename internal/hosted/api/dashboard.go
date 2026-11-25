@@ -23,6 +23,7 @@ import (
 
 	"futo-notes-server/internal/auth"
 	"futo-notes-server/internal/hosted/account"
+	"futo-notes-server/internal/hosted/billing"
 	"futo-notes-server/internal/hosted/config"
 	"futo-notes-server/internal/syncapi"
 )
@@ -47,8 +48,9 @@ const (
 
 	dashboardCSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; " +
 		"connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
-	htmxAsset = "htmx-2.0.4.min.js"
-	cssAsset  = "dashboard.css"
+	htmxAsset     = "htmx-2.0.4.min.js"
+	cssAsset      = "dashboard.css"
+	checkoutAsset = "checkout.js"
 )
 
 //go:embed dashboard/templates dashboard/static
@@ -77,7 +79,7 @@ func parseDashboardPages() map[string]*template.Template {
 	}
 	layout := template.Must(template.New("").Funcs(funcs).ParseFS(dashboardFiles, "dashboard/templates/layout.html"))
 	pages := map[string]*template.Template{}
-	for _, name := range []string{"sign-in", "region", "overview", "devices", "delete", "error"} {
+	for _, name := range []string{"sign-in", "region", "overview", "devices", "delete", "error", "checkout"} {
 		pages[name] = template.Must(template.Must(layout.Clone()).ParseFS(dashboardFiles, "dashboard/templates/"+name+".html"))
 	}
 	return pages
@@ -118,6 +120,22 @@ type dashboardView struct {
 	// Reauthenticate asks the user to sign in again before deleting.
 	Reauthenticate bool
 	ReauthPath     string
+	// Billing is the account's billing state; nil while billing is off.
+	Billing *billing.State
+	// WebPayments reports that a web provider is configured.
+	WebPayments bool
+	// EmbeddedCheckout reports that the web provider's checkout mounts in
+	// our pages, so Subscribe opens it in place.
+	EmbeddedCheckout bool
+	// CheckoutHost makes the page able to mount embedded checkout: it
+	// loads the provider's script and is served checkoutCSP.
+	CheckoutHost *checkoutHost
+	// Checkout is the embedded checkout panel to show.
+	Checkout *checkoutPanel
+	// Notice confirms what just happened.
+	Notice string
+	// PendingURL is reloaded every few seconds while a payment clears.
+	PendingURL string
 }
 
 type dashboardDevice struct {
@@ -140,6 +158,8 @@ func (s *Server) dashboardActions() []dashboardAction {
 		{deletePath, "DELETE /api/account", s.handleDashboardDelete},
 		{dashboardPath + "/restore", "POST /api/account/restore", s.handleDashboardRestore},
 		{dashboardPath + "/sign-out", "POST /api/auth/logout", s.handleDashboardSignOut},
+		{dashboardPath + "/billing/checkout", "POST /api/billing/checkout", s.handleDashboardCheckout},
+		{dashboardPath + "/billing/portal", "GET /api/billing/portal", s.handleDashboardPortal},
 	}
 }
 
@@ -149,9 +169,14 @@ func (s *Server) dashboardRoutes(r chi.Router) {
 		d.Use(dashboardHeaders)
 		d.Get(dashboardPath+"/static/{name}", handleDashboardAsset)
 		d.Get(signInPath, handleDashboardSignIn)
+		d.Get(checkoutLinkPath+"/{token}", s.handleCheckoutLinkPage)
+		d.Post(checkoutLinkPath+"/{token}/session", s.handleCheckoutLinkSession)
+		d.Get(checkoutLinkReturnPath, s.handleCheckoutLinkReturn)
 		d.Group(func(signed chi.Router) {
 			signed.Use(s.dashboardSession)
 			signed.Get(dashboardPath, s.handleDashboardOverview)
+			signed.Get(subscribePath, s.handleDashboardSubscribe)
+			signed.Get(checkoutReturnPath, s.handleDashboardCheckoutReturn)
 			signed.Get(regionPath, s.handleDashboardRegion)
 			signed.Get(devicesPath, s.handleDashboardDevices)
 			signed.Get(deletePath, s.handleDashboardDeletePage)
@@ -187,7 +212,7 @@ func handleDashboardAsset(w http.ResponseWriter, r *http.Request) {
 	switch name {
 	case htmxAsset:
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-	case cssAsset:
+	case cssAsset, checkoutAsset:
 		w.Header().Set("Cache-Control", "no-cache")
 	default:
 		http.NotFound(w, r)
@@ -281,8 +306,12 @@ func view(r *http.Request, nav string) dashboardView {
 }
 
 // renderDashboard answers 200 with page: the whole document, or for htmx
-// just the part inside #page.
+// just the part inside #page. A page that hosts embedded checkout is served
+// checkoutCSP instead of the strict policy.
 func renderDashboard(w http.ResponseWriter, r *http.Request, page string, v dashboardView) {
+	if v.CheckoutHost != nil {
+		w.Header().Set("Content-Security-Policy", checkoutCSP)
+	}
 	name := "layout"
 	if isHTMX(r) {
 		name = "fragment"
@@ -341,9 +370,14 @@ func handleDashboardSignIn(w http.ResponseWriter, r *http.Request) {
 	renderDashboard(w, r, "sign-in", dashboardView{})
 }
 
-// handleDashboardOverview serves the account overview, sending a user who
-// has not chosen a region to choose one first.
+// handleDashboardOverview serves the account overview.
 func (s *Server) handleDashboardOverview(w http.ResponseWriter, r *http.Request) {
+	s.overviewWith(w, r)
+}
+
+// overviewWith serves the account overview, changed by each of extra,
+// sending a user who has not chosen a region to choose one first.
+func (s *Server) overviewWith(w http.ResponseWriter, r *http.Request, extra ...func(*dashboardView)) {
 	a, err := s.accounts.Account(r.Context(), principalFrom(r).Session.User.ID)
 	if err != nil {
 		dashboardServerError(w, r, "reading account", err)
@@ -353,16 +387,85 @@ func (s *Server) handleDashboardOverview(w http.ResponseWriter, r *http.Request)
 		redirectDashboard(w, r, regionPath)
 		return
 	}
-	s.renderOverview(w, r, a)
+	s.renderOverview(w, r, a, extra...)
 }
 
-func (s *Server) renderOverview(w http.ResponseWriter, r *http.Request, a account.Account) {
+func (s *Server) renderOverview(w http.ResponseWriter, r *http.Request, a account.Account, extra ...func(*dashboardView)) {
 	v := view(r, "overview")
 	v.Account = a
 	if region, ok := s.regions[a.RegionID]; ok {
 		v.Region = &region
 	}
+	if s.providers.Any() {
+		state, err := s.billing.State(r.Context(), a.User.ID)
+		if err != nil {
+			dashboardServerError(w, r, "reading billing state", err)
+			return
+		}
+		v.Billing = &state
+		v.WebPayments = s.providers.Web != nil
+		if s.embedded() != nil && !state.Entitled {
+			v.EmbeddedCheckout = true
+			hostCheckout(&v)
+		}
+	}
+	for _, change := range extra {
+		change(&v)
+	}
 	renderDashboard(w, r, "overview", v)
+}
+
+// handleDashboardCheckout is the dashboard's POST /api/billing/checkout. An
+// embedded checkout's panel calls it for the session it mounts; otherwise it
+// sends the browser to the web checkout.
+func (s *Server) handleDashboardCheckout(w http.ResponseWriter, r *http.Request) {
+	userID := principalFrom(r).Session.User.ID
+	if s.embedded() != nil {
+		s.writeCheckoutSession(w, r, userID, s.cfg.PublicURL+checkoutReturnPath+"?session_id="+checkoutSessionID)
+		return
+	}
+	target, err := s.checkoutURL(r.Context(), userID)
+	if err != nil {
+		dashboardBillingError(w, r, "creating checkout", err)
+		return
+	}
+	redirectAway(w, r, target)
+}
+
+// handleDashboardPortal is the dashboard's GET /api/billing/portal: it sends
+// the browser to the web provider's subscription page.
+func (s *Server) handleDashboardPortal(w http.ResponseWriter, r *http.Request) {
+	target, err := s.portalURL(r.Context(), principalFrom(r).Session.User.ID)
+	if err != nil {
+		dashboardBillingError(w, r, "creating portal session", err)
+		return
+	}
+	redirectAway(w, r, target)
+}
+
+func dashboardBillingError(w http.ResponseWriter, r *http.Request, action string, err error) {
+	switch {
+	case errors.Is(err, errBillingUnavailable):
+		renderDashboardError(w, r, http.StatusServiceUnavailable, "Paying on the web is not available yet. Subscribe in the app instead.")
+	case errors.Is(err, errAlreadySubscribed):
+		renderDashboardError(w, r, http.StatusConflict, "You already have an active subscription.")
+	case errors.Is(err, errManagedByStore):
+		renderDashboardError(w, r, http.StatusConflict, "Your subscription was bought in an app store. Manage it in that store's subscription settings.")
+	default:
+		dashboardServerError(w, r, action, err)
+	}
+}
+
+// redirectAway sends the browser to a payment provider's page. htmx gets
+// HX-Redirect, a full page load that the CSP's form-action does not govern;
+// a form posted without JavaScript gets a 303.
+func redirectAway(w http.ResponseWriter, r *http.Request, target string) {
+	if isHTMX(r) {
+		w.Header().Set("HX-Redirect", target)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	http.Redirect(w, r, target, http.StatusSeeOther)
 }
 
 // showOverview renders the caller's current overview after an action.
@@ -500,6 +603,7 @@ func (s *Server) handleDashboardDelete(w http.ResponseWriter, r *http.Request) {
 		dashboardServerError(w, r, "requesting account deletion", err)
 		return
 	}
+	s.cancelSubscriptions(r.Context(), principalFrom(r).Session.User.ID)
 	s.showOverview(w, r)
 }
 

@@ -66,6 +66,27 @@ func TestResendSendsTheEmail(t *testing.T) {
 	}
 }
 
+func TestResendSendsTheIdempotencyKey(t *testing.T) {
+	var keys []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		keys = append(keys, r.Header.Get("Idempotency-Key"))
+		_, _ = io.WriteString(w, `{"id":"49a3999c-0ce1-4ea6-ab68-afcd6dc2e794"}`)
+	}))
+	defer server.Close()
+
+	resend := mail.NewResend(mail.Config{APIKey: "re_test", APIURL: server.URL, From: "noreply@example.test"})
+	keyed := testMessage
+	keyed.IdempotencyKey = "lapse-email/u/lapsed/1"
+	for _, m := range []mail.Message{testMessage, keyed} {
+		if err := resend.Send(t.Context(), m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(keys) != 2 || keys[0] != "" || keys[1] != "lapse-email/u/lapsed/1" {
+		t.Fatalf("Idempotency-Key headers = %q, want none then the message's key", keys)
+	}
+}
+
 func TestResendMapsErrorResponses(t *testing.T) {
 	for name, tc := range map[string]struct {
 		status        int

@@ -8,7 +8,7 @@ import (
 
 func TestHubCoalescesNewestVersionPerCollection(t *testing.T) {
 	hub := NewHub()
-	sub := hub.Subscribe("user-1")
+	sub := hub.Subscribe("user-1", "session-1")
 	defer hub.Unsubscribe(sub)
 
 	hub.Publish(Notification{UserID: "user-1", CollectionID: "collection-b", CurrentVersion: 1})
@@ -42,8 +42,8 @@ func TestHubCoalescesNewestVersionPerCollection(t *testing.T) {
 
 func TestHubIsolatesUsers(t *testing.T) {
 	hub := NewHub()
-	first := hub.Subscribe("user-1")
-	second := hub.Subscribe("user-2")
+	first := hub.Subscribe("user-1", "session-1")
+	second := hub.Subscribe("user-2", "session-2")
 	defer hub.Unsubscribe(first)
 	defer hub.Unsubscribe(second)
 
@@ -62,7 +62,7 @@ func TestHubIsolatesUsers(t *testing.T) {
 
 func TestHubCloseAllEndsCurrentSubscriptionsOnly(t *testing.T) {
 	hub := NewHub()
-	old := hub.Subscribe("user-1")
+	old := hub.Subscribe("user-1", "session-1")
 	hub.CloseAll()
 
 	select {
@@ -77,7 +77,7 @@ func TestHubCloseAllEndsCurrentSubscriptionsOnly(t *testing.T) {
 		t.Fatalf("Drain() = %#v, %v after close", changes, open)
 	}
 
-	fresh := hub.Subscribe("user-1")
+	fresh := hub.Subscribe("user-1", "session-1")
 	defer hub.Unsubscribe(fresh)
 	hub.Publish(Notification{UserID: "user-1", CollectionID: "collection", CurrentVersion: 4})
 	select {
@@ -87,9 +87,41 @@ func TestHubCloseAllEndsCurrentSubscriptionsOnly(t *testing.T) {
 	}
 }
 
+func TestHubEndClosesTheNamedSessionOrUser(t *testing.T) {
+	hub := NewHub()
+	phone := hub.Subscribe("user-1", "phone")
+	phoneAgain := hub.Subscribe("user-1", "phone")
+	laptop := hub.Subscribe("user-1", "laptop")
+	stranger := hub.Subscribe("user-2", "phone")
+	defer hub.Unsubscribe(laptop)
+	defer hub.Unsubscribe(stranger)
+
+	hub.End(SessionEnd{UserID: "user-1", SessionID: "phone"})
+	for _, sub := range []*Subscription{phone, phoneAgain} {
+		if _, open := sub.Drain(); open {
+			t.Fatal("the ended session's stream is still open")
+		}
+	}
+	for _, sub := range []*Subscription{laptop, stranger} {
+		if _, open := sub.Drain(); !open {
+			t.Fatal("ending a session closed another session's stream")
+		}
+	}
+	hub.Unsubscribe(phone)
+
+	hub.End(SessionEnd{UserID: "user-1"})
+	if _, open := laptop.Drain(); open {
+		t.Fatal("ending the user left its stream open")
+	}
+	if _, open := stranger.Drain(); !open {
+		t.Fatal("ending a user closed another user's stream")
+	}
+	hub.Publish(Notification{UserID: "user-1", CollectionID: "collection", CurrentVersion: 1})
+}
+
 func TestUnsubscribeIsIdempotent(t *testing.T) {
 	hub := NewHub()
-	sub := hub.Subscribe("user-1")
+	sub := hub.Subscribe("user-1", "session-1")
 	hub.Unsubscribe(sub)
 	hub.Unsubscribe(sub)
 	hub.Publish(Notification{UserID: "user-1", CollectionID: "collection", CurrentVersion: 1})

@@ -50,6 +50,7 @@ p { color: #666; }
 <label>Subject (sub) <input name="sub" required autofocus value="dev-user"></label>
 <label>Email <input name="email" type="email" placeholder="dev-user@example.test"></label>
 <label>Name <input name="name" placeholder="dev-user"></label>
+<label><input name="email_verified" type="checkbox" value="false" style="width: auto"> Email not verified</label>
 <button type="submit">Sign in</button>
 </form>
 </body>

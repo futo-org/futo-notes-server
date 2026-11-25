@@ -63,10 +63,13 @@ plain-http cookies). Every prod release sets the following.
 | `oidcIssuer` | the Zitadel instance URL, exactly as its discovery document's `issuer` |
 | `oidcClientId` | the Zitadel application's client id |
 | `appRedirectSchemes` | the custom URL schemes the apps sign in through: `[tech.futo.notes]` (the release apps, and the chart default) in prod, `[tech.futo.notes, tech.futo.notes.dev]` in staging so dev builds can sign in too. Loopback `http://127.0.0.1:<port>` and `http://[::1]:<port>` are always allowed (desktop); `http` and `https` are refused, so claimed `https` app links are not accepted. |
+| `allowedEmailDomains` | renders `ALLOWED_EMAIL_DOMAINS`: the email domains a **new** account may sign up with, e.g. `[futo.org, futo.tech]`; `[]` (the chart default) lets anyone sign up. See Sign-up restriction below. |
 | `regions` | the regions file (format below) |
 | `resendApiUrl` | `https://api.resend.com` (the default; `RESEND_API_URL`) |
 | `emailFromAddress` | the `From` of every email (`EMAIL_FROM_ADDRESS`). The default, `FUTO Notes <noreply@notes.futo.cloud>`, is a **placeholder**: confirm the sending domain, verify it in Resend, then set this. |
 | `postgresClusterName` | `notes-db` |
+| `stripe.priceId` | the $5/month plan's Stripe price id; turns Stripe on (see Billing: web provider) |
+| `stripe.publishableKey` | `pk_live_...` in prod, `pk_test_...` in staging |
 | `secretData` | `null` |
 | `env` | replaces the whole list: `API_PORT=3005`, `LOG_LEVEL=info`, `OTLP_METRICS_ENDPOINT`, `OTLP_METRICS_URL_PATH`. Drop the dev entries `COOKIE_SECURE=false` and `DRAIN_DELAY_MS=1000`: the defaults are a `Secure` cookie and 15 s. Never set `DEV_UI` (it serves `/dev`, which runs storage jobs on demand). |
 
@@ -83,6 +86,8 @@ keys are committed.
 | | `API_SIGNING_KEY` | One Ed25519 private key PEM (with `kid`): signs storage access and admin tokens. |
 | | `STORAGE_REFRESH_ROTATION_KEY` | 32 random bytes, base64 (`openssl rand -base64 32`): derives each storage refresh token's successor, `base64url(HMAC-SHA256(key, token))`, so an exchange whose response was lost can be repeated. The API refuses to start without it. |
 | | `RESEND_API_KEY` | A Resend API key with sending access for the `emailFromAddress` domain. Without it the API logs and skips every email (the lapse and purge notices), and starts anyway. |
+| | `STRIPE_SECRET_KEY` | With Stripe: the secret key (`sk_live_...`), or a restricted key (`rk_...`) with write access to Customers, Checkout Sessions, Subscriptions and Customer Portal sessions. Staging uses the sandbox's `sk_test_...`. The API refuses a live key while `DEV_UI` is on. |
+| | `STRIPE_WEBHOOK_SECRET` | With Stripe: the webhook endpoint's signing secret (`whsec_...`). |
 | `notes-storage-<region>` | `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | Credentials for the region's bucket: get, put, list and delete objects. |
 | | `API_PUBLIC_KEYS` | The public half of the API signing key, one PEM block per `kid` (several during rotation). Same value in every region. |
 | | `RECEIPT_SIGNING_KEY` | This region's Ed25519 private key PEM (with `kid`): signs upload receipts. |
@@ -95,6 +100,125 @@ names the key and its generation, for example `api-2026-11` or
 
 Pods read Secrets only at startup. After changing one, restart the Deployment
 (`kubectl rollout restart deployment/<name>`).
+
+## Billing: web provider
+
+Billing is on when any payment provider is configured: the capability
+document says `"billing": true`, writes from an account without a
+subscription answer `402 subscription_required`, and its storage tokens are
+read-only (`blobs.read`). With no provider, billing is off and nothing is
+gated. The App Store and Play providers have their own settings (below).
+
+The web provider is **Stripe**, selling one plan at $5/month.
+
+| Variable | Where | What |
+|---|---|---|
+| `BILLING_WEB_PROVIDER` | rendered by the chart | `stripe` when `stripe.priceId` is set. Empty (the default) for none. `mock` is the dev and test-stack mock, whose checkout and portal are `/dev/billing` pages; the API refuses to start with it unless `DEV_UI=true`, so it never runs in production. |
+| `STRIPE_PRICE_ID` | `stripe.priceId` | The plan's price (`price_...`). Required with `stripe`. |
+| `STRIPE_PUBLISHABLE_KEY` | `stripe.publishableKey` | Mounts the embedded checkout in the browser; not secret. Must be the same mode (live or test) as the secret key. Required with `stripe`. |
+| `STRIPE_SECRET_KEY` | Secret | **Secret.** See Secrets. Required with `stripe`. |
+| `STRIPE_WEBHOOK_SECRET` | Secret | **Secret.** See Secrets. Required with `stripe`. |
+| `STRIPE_API_URL` | tests only | Replaces `https://api.stripe.com`. Never in a chart. |
+| `BILLING_MOCK_WEBHOOK_SECRET` | dev and test stack only | With `mock`: the secret (16 characters or more) the mock signs its webhook deliveries with. Never in a chart. |
+
+How it works:
+
+- **Accounts are Stripe Customers keyed by OIDC `sub`.** The first checkout
+  finds the account's Customer by `metadata.sub` (Stripe's customer search)
+  or creates one. Every Checkout Session carries `client_reference_id` and
+  `subscription_data.metadata.sub` set to the `sub`, and webhooks and
+  refreshes find the account from the subscription's `metadata.sub`, or
+  else its Customer's. Nothing is ever matched by email; the email is only
+  copied onto the Customer for receipts.
+- **Checkout is embedded, never a redirect.** The dashboard's Subscribe
+  opens Stripe's embedded checkout inside the overview. The apps'
+  `POST /api/billing/checkout` answers a one-time link,
+  `<publicUrl>/billing/checkout/<token>` (HMAC-signed, names the account,
+  15 minutes, opens one checkout), to a page of ours that mounts the same
+  checkout without a dashboard session. The token key is derived from
+  `STRIPE_SECRET_KEY`, so rotating that key also voids outstanding links.
+- **Entitlement does not wait for the webhook.** When the checkout
+  completes, the page asks the server to confirm it: the server fetches the
+  Checkout Session, checks it is the caller's (`sub`), and applies its
+  subscription at once. Every later change (renewal, failed payment,
+  cancellation, deletion) arrives by webhook.
+- **The pages that host checkout** (the overview while unsubscribed, its
+  subscribe view, and `/billing/checkout/<token>`) load Stripe.js from
+  `js.stripe.com`, which Stripe forbids self-hosting, and are served a
+  Content-Security-Policy widened by exactly what Stripe documents for
+  Stripe.js and Checkout: `script-src` `js.stripe.com`, `*.js.stripe.com`,
+  `checkout.stripe.com`; `frame-src` the same plus `hooks.stripe.com`;
+  `connect-src` `api.stripe.com`, `checkout.stripe.com`; `img-src`
+  `*.stripe.com`. Every other page keeps the strict policy.
+- **The portal** (Manage subscription) is a Stripe Customer Portal session
+  that returns to `/dashboard`.
+
+Subscription states map to entitlements as follows:
+
+| Stripe `status` | Entitlement | Entitles |
+|---|---|---|
+| `active`, `trialing` | `active` until the period ends | yes |
+| `past_due` | `grace` until the current period ends | yes |
+| `unpaid`, `paused`, `incomplete` | `on_hold` | no |
+| `canceled`, `incomplete_expired` | `expired` | no |
+
+The period end is the subscription item's `current_period_end` (at the
+pinned API version, `2026-10-28.endive`, it lives on the items). A
+subscription renews unless `cancel_at_period_end` is set or `cancel_at`
+falls at or before the period's end.
+
+Providers notify the API at `POST <publicUrl>/api/billing/webhooks/{web,app_store,play}`.
+These routes skip session auth and are authenticated by each provider's
+signature, so the ingress must admit them from the provider (see Network
+paths). Each delivery's id is kept 30 days to drop retries.
+
+### Stripe dashboard setup
+
+Do this once per account (live for prod, the sandbox for staging):
+
+1. **Product and price.** A product "FUTO Notes Sync" with one recurring
+   price, $5.00 USD per month. Put the price id in `stripe.priceId`. A dev
+   copy, "FUTO Notes Sync (dev)" with lookup key
+   `futo-notes-sync-dev-monthly`, exists in the sandbox; the sandbox test
+   reuses it.
+2. **Webhook endpoint.** Developers, Webhooks, Add endpoint:
+   `https://notes.futo.cloud/api/billing/webhooks/web` (staging:
+   `https://notes-staging.apps.futo.network/api/billing/webhooks/web`),
+   listening to exactly `customer.subscription.created`,
+   `customer.subscription.updated` and `customer.subscription.deleted`. Its
+   signing secret goes in the Secret as `STRIPE_WEBHOOK_SECRET`. The
+   payload version does not matter: the server reads only the event id,
+   type and subscription id, and fetches the subscription itself.
+3. **Customer Portal.** Settings, Billing, Customer portal: allow cancelling
+   subscriptions (at the end of the period) and updating payment methods;
+   do **not** allow switching plans or changing quantities. Save it, which
+   also creates the default configuration the API's portal sessions use.
+4. **Checkout.** Embedded checkout needs nothing more. Turn Adaptive Pricing
+   off (Settings, Payments) if the plan should be charged in USD only; the
+   sandbox shows local currencies by default.
+5. **Tax.** Stripe Tax is out of scope for now: no tax is calculated or
+   collected.
+
+### Local development with the Stripe CLI
+
+See [DEVELOPMENT.md](DEVELOPMENT.md#stripe-sandbox): `stripe listen`
+forwards sandbox webhooks to `api:dev`.
+
+The billing jobs run in the 6-hourly maintenance group, under the job lock:
+
+- `entitlement reconciliation` asks providers about live subscriptions that
+  end within a day or have had no news for a week.
+- `subscription lapses` records when an account stops being entitled
+  (`users.lapsed_at`), emails it then, warns it 83 days later, and purges it
+  90 days later through the account purge. Resubscribing at any point
+  before the purge clears the lapse and its email stamps.
+- `account purge`, before deleting an account (requested or lapsed), stops
+  its web and Play subscriptions renewing. App Store subscriptions cannot be
+  cancelled from the server. `DELETE /api/account` does the same at once.
+- `billing delivery pruning` drops delivery ids older than 30 days.
+
+Each email carries a Resend `Idempotency-Key` made of the user, the email and
+the lapse, so a send whose stamp failed to save is not delivered twice.
 
 ## Regions file
 
@@ -162,6 +286,137 @@ directly.
   would give the same person a different account in each service (see
   [MANAGED-LAUNCH.md](MANAGED-LAUNCH.md)). Email is not unique on hosted: the
   identity provider owns it, and an address can move between accounts.
+- `email_verified` must be in the ID token (the same **User Info inside ID
+  Token** setting) whenever `allowedEmailDomains` is set; without it every
+  new account is refused.
+
+## Sign-up restriction
+
+`ALLOWED_EMAIL_DOMAINS` (chart value `allowedEmailDomains`) limits who can
+create an account. It is a comma-separated list such as
+`futo.org,futo.tech`; entries are trimmed and lowercased, and the API
+refuses to start on one containing `@`, `*` or a space, or without a dot.
+Empty or unset, the default, lets anyone sign up.
+
+- It applies only when a sign-in would **create** an account, that is, no
+  account has the ID token's `sub` yet. **Existing users are never locked
+  out**: an account that exists signs in even if its domain was removed from
+  the list or its email changed to another domain.
+- A new account needs `email_verified: true` in the ID token and an email
+  whose domain, the part after the last `@`, is exactly one listed, in any
+  case. Subdomains are not implied: list `eng.futo.org` to admit it.
+- A refused dashboard sign-in gets a `403` page, "Sign-ups are limited to
+  approved email domains.", and an app's sign-in returns to its
+  `redirect_uri` with `error=signup_not_allowed`. Neither creates an account
+  or a session, and neither names the allowed domains. `auth.logins` counts
+  them as `outcome=signup_not_allowed`.
+- The capability document's `signup` stays `"open"`.
+- To try it locally, set `ALLOWED_EMAIL_DOMAINS` for `mise run api:dev`
+  (`HOSTED_STACK_ALLOWED_EMAIL_DOMAINS` for the hosted test stack); `/dev`
+  shows whether sign-up is restricted, and mock-oidc's sign-in form has an
+  "Email not verified" box (`email_verified=false` on `/test/authorize`).
+
+## App Store and Google Play
+
+Store billing is optional per store. A store is **on** when every one of its
+required variables is set, **off** when none is, and the API refuses to start
+when only some are. The chart sets the non-secret ones from its `appStore` and
+`play` values, but only when `appStore.bundleId` or `play.packageName` is set.
+The keys come from the `notes-api` Secret.
+
+| Variable | Chart value or Secret key | What it is |
+|---|---|---|
+| `APPLE_BUNDLE_ID` | `appStore.bundleId` | `tech.futo.notes` |
+| `APPLE_APP_APPLE_ID` | `appStore.appAppleId` | The app's numeric Apple ID (App Store Connect, App Information). Production notifications must carry it. |
+| `APPLE_ISSUER_ID`, `APPLE_KEY_ID` | `appStore.issuerId`, `appStore.keyId` | The In-App Purchase key's issuer and key id. |
+| `APPLE_PRIVATE_KEY` | Secret | **Secret.** The In-App Purchase key's `.p8` file, as is (PKCS #8 PEM, P-256). |
+| `APPLE_SUBSCRIPTION_PRODUCT_IDS` | `appStore.subscriptionProductIds` | The auto-renewable subscription product ids that entitle, comma-separated. |
+| `APPLE_ACCEPT_SANDBOX` | `appStore.acceptSandbox` | Optional. `true` in prod and staging (the chart default): App Review and TestFlight purchases are sandbox transactions in the release build. The API's own default is `false`. Sandbox rows are stored with `environment = sandbox`. |
+| `PLAY_PACKAGE_NAME` | `play.packageName` | `tech.futo.notes` |
+| `PLAY_SERVICE_ACCOUNT_JSON` | Secret | **Secret.** The Play API service account's JSON key file. |
+| `PLAY_SUBSCRIPTION_PRODUCT_IDS` | `play.subscriptionProductIds` | The subscription product ids that entitle, comma-separated. |
+| `PLAY_RTDN_AUDIENCE` | `play.rtdnAudience` | The audience of the push subscription's OIDC token. |
+| `PLAY_RTDN_SERVICE_ACCOUNT` | `play.rtdnServiceAccount` | The service account email the push subscription authenticates as. |
+
+### Webhooks and network paths
+
+| From | To | Why |
+|---|---|---|
+| Apple | `<publicUrl>/api/billing/webhooks/app_store` (POST) | App Store Server Notifications V2. Authenticated by the JWS inside the body. |
+| Pub/Sub | `<publicUrl>/api/billing/webhooks/play` (POST) | Play real-time developer notifications (RTDN). Authenticated by a Google-signed OIDC bearer token. |
+| API pods | `api.storekit.itunes.apple.com`, `api.storekit-sandbox.itunes.apple.com` (HTTPS) | App Store Server API: a subscription's status when the app submits a purchase, and at reconciliation. |
+| API pods | `androidpublisher.googleapis.com` (HTTPS) | Play Developer API: `subscriptionsv2.get`, acknowledge and cancel. |
+| API pods | `oauth2.googleapis.com` (HTTPS) | Access tokens for the Play service account (its key file's `token_uri`). |
+| API pods | `www.googleapis.com` (HTTPS, `/oauth2/v3/certs`) | Google's keys for the push tokens. Cached, and fetched again only for an unknown `kid`. |
+
+The ingress must let the two webhook routes through without any other
+authentication. A delivery that fails verification gets `400`.
+
+Apple's signatures are checked offline: the `x5c` chain must lead to Apple Root
+CA - G3 (embedded in the binary), carry Apple's App Store marker extensions, and
+be valid at the payload's `signedDate`. No OCSP request is made.
+
+### App Store Connect
+
+1. **Subscription.** Create the auto-renewable subscription in a subscription
+   group, with **Family Sharing off**. A family-shared transaction never
+   entitles. Put its product id in `appStore.subscriptionProductIds`.
+2. **In-App Purchase key.** Users and Access, Integrations, In-App Purchase:
+   generate a key. Download the `.p8`, which can be downloaded only once, into
+   the Secret as `APPLE_PRIVATE_KEY`. The key id goes in `appStore.keyId`, and
+   the issuer id shown on that page in `appStore.issuerId`.
+3. **Server notifications.** App Information, App Store Server Notifications.
+   Choose **Version 2** for both URLs:
+
+   | Field | URL |
+   |---|---|
+   | Production Server URL | `https://notes.futo.cloud/api/billing/webhooks/app_store` |
+   | Sandbox Server URL | `https://notes.futo.cloud/api/billing/webhooks/app_store` |
+
+   Sandbox points at prod too, because TestFlight and App Review use the
+   release build, which talks to prod. One app record has one URL of each
+   kind, so staging receives no notifications. It still learns of purchases
+   when the app submits them, and from reconciliation.
+
+Apple retries a notification that does not get a `200`. `TEST` notifications
+are answered `200` and change nothing.
+
+### Google Play
+
+1. **Subscription.** Play Console, Monetize, Subscriptions. Put the
+   subscription's product id in `play.subscriptionProductIds`.
+2. **API service account.** In the Google Cloud project, enable the *Google
+   Play Android Developer API* and create a service account, for example
+   `play-api@<project>.iam.gserviceaccount.com`. Create a JSON key for it, into
+   the Secret as `PLAY_SERVICE_ACCOUNT_JSON`. In Play Console, Users and
+   permissions, invite the service account's email with these permissions on
+   the app: **View financial data** and **Manage orders and subscriptions**.
+3. **RTDN topic.** Create a Pub/Sub topic, for example `play-rtdn`. Grant
+   `google-play-developer-notifications@system.gserviceaccount.com` the
+   **Pub/Sub Publisher** role on it. In Play Console, Monetization setup,
+   Real-time developer notifications, enter
+   `projects/<project>/topics/play-rtdn` and choose to receive subscriptions
+   and voided purchases. **Send test notification** should get a `200`.
+4. **Push subscription.** Create a push subscription on the topic:
+   - endpoint `https://notes.futo.cloud/api/billing/webhooks/play`;
+   - **Enable authentication**, with a service account of its own, for example
+     `rtdn-push@<project>.iam.gserviceaccount.com`. That email goes in
+     `play.rtdnServiceAccount`;
+   - an explicit **audience**, for example the endpoint URL. That goes in
+     `play.rtdnAudience`;
+   - exponential-backoff retry.
+
+   If the project predates April 2021, also grant the Pub/Sub service agent
+   (`service-<project-number>@gcp-sa-pubsub.iam.gserviceaccount.com`) the
+   **Service Account Token Creator** role on the push service account. Staging
+   gets a second push subscription on the same topic, pointing at its own
+   origin and with its own audience.
+
+Notifications only name a purchase token. The API always fetches its state
+with `subscriptionsv2.get`, and never trusts the message. A purchase the app
+submits, or one a notification reports, is acknowledged at once while it
+entitles and carries the account id the app sets, because Play refunds one
+left unacknowledged for three days. License testers' purchases are stored with `environment = sandbox`.
 
 ## Key rotation
 
@@ -245,6 +500,9 @@ track (bookkeeping table `hosted_migrations`). The chart runs it as a Helm
 | API pods | each region's `endpoint`, path `/internal/*` | blob GC, orphan reconciliation and account purge. The API calls the same `endpoint` clients use. If the ingress restricts `/internal/*`, it must still admit the API's egress. These routes require an admin JWT either way. |
 | API pods | Zitadel issuer | discovery, code exchange and JWKS |
 | API pods | `resendApiUrl` (HTTPS, `POST /emails`) | lapse and purge emails, when `RESEND_API_KEY` is set |
+| API pods | `api.stripe.com` (HTTPS) | Stripe: customers, checkout and portal sessions, subscriptions |
+| browsers | `js.stripe.com`, `*.js.stripe.com`, `checkout.stripe.com`, `api.stripe.com`, `hooks.stripe.com` | Stripe.js and the embedded checkout, on the pages that host it |
+| payment providers | API `publicUrl`, path `/api/billing/webhooks/*` | subscription notifications; authenticated by the provider's signature, not a session. Stripe posts to `/api/billing/webhooks/web` from [its webhook IPs](https://docs.stripe.com/ips) |
 | API pods | `notes-db-rw` | Postgres, including `LISTEN/NOTIFY` for SSE across replicas |
 | storage pods | the region's S3 | blob bytes |
 | all pods | OTLP endpoint | metrics |
@@ -271,11 +529,11 @@ Metrics worth alerting on:
 | Metric | Service | Watch for |
 |---|---|---|
 | `http.server.request.errors`, `.duration` (by `route`) | both | 5xx rate and p99 latency |
-| `jobs.runs` (`job`, `outcome`) and `jobs.items` | api | any failed run, and no successful `account purge` or `blob GC` run for more than 12 h |
+| `jobs.runs` (`job`, `outcome`) and `jobs.items` | api | any failed run, and no successful `account purge`, `blob GC`, `entitlement reconciliation` or `subscription lapses` run for more than 12 h |
 | `storage_client.errors` (`region`, `operation`) | api | a region's internal endpoint failing |
 | `tokens.refreshes` (`outcome=reuse_detected`) | api | a spike means stolen refresh tokens or a client bug |
 | `receipts.verification_failures` (`reason`) | api | `invalid` after a receipt key change means step 2 was missed |
-| `auth.logins` (`outcome`) | api | `provider_error` means Zitadel is down or misconfigured |
+| `auth.logins` (`outcome`) | api | `provider_error` means Zitadel is down or misconfigured; `signup_not_allowed` counts new accounts `ALLOWED_EMAIL_DOMAINS` refused |
 | `db.pool.waits`, `db.pool.connections` | api | pool exhaustion (`DB_POOL_MAX`, default 10 per pod) |
 | `sse.streams` | api | open sync streams per pod |
 | `auth.failures` (`kind`, `reason`) | storage | a rise in `invalid` 401s, e.g. tokens for another region or a kid the region does not trust after a rotation |
@@ -316,6 +574,13 @@ next run retries by itself.
 3. Due accounts: `SELECT id, region_id, purge_at FROM users WHERE purge_at <=
    now();`. A user whose `region_id` no longer exists in the regions file
    cannot be purged until it is restored there.
+4. A purge also stops the account's web and Play subscriptions renewing first,
+   and stays due while a provider refuses (`cancelling <source> subscription`
+   in the log). A subscription whose provider is no longer configured blocks
+   it the same way: restore the provider's configuration, or cancel the
+   subscription at the provider and set its row's `will_renew` to false.
+   A lapsed account's purge also waits for the purged email unless the user
+   has no address; check `RESEND_API_KEY` and Resend's status.
 
 ### A storage region is down
 

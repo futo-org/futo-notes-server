@@ -14,6 +14,13 @@ info:
     are Ed25519 JWTs signed by the API, with `aud` = the region id; see
     `internal/hostedauth`.
 
+    An access token's `scope` says what it may do. `blobs` reads and
+    writes. `blobs.read` only reads: the API mints it for an account
+    without a subscription, which keeps its notes readable while it cannot
+    add to them. Uploads (`POST /blobs`, `POST /blobs/batch-upload`) with a
+    `blobs.read` token answer `403 write_not_allowed` and store nothing;
+    reads accept either scope.
+
     Every upload returns a **receipt**: a JWT signed by this region
     (`iss` = region id, `aud` = `notes-api`, `sub`, `key`, `size`, 24h) that
     the client hands to the API when an object claims the blob.
@@ -101,6 +108,8 @@ paths:
                 $ref: "#/components/schemas/Error"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/WriteNotAllowed"
         "411":
           description: "`length_required`: no `Content-Length` (for example a chunked body)"
           content:
@@ -324,6 +333,8 @@ paths:
                 $ref: "#/components/schemas/Error"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/WriteNotAllowed"
         "413":
           description: "`payload_too_large`: a body over 32 MiB"
           content:
@@ -499,7 +510,8 @@ components:
       bearerFormat: JWT
       description: |
         API-signed access token: `iss` = `notes-api`, `aud` = this region,
-        `scope` = `blobs`, `sub` = user id, 24h.
+        `scope` = `blobs` (read and write) or `blobs.read` (read only),
+        `sub` = user id, 24h.
     adminToken:
       type: http
       scheme: bearer
@@ -542,6 +554,15 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
+    WriteNotAllowed:
+      description: |
+        `write_not_allowed`: the access token's scope is `blobs.read`, so it
+        may only read. The account has no subscription; once it has one, a
+        new token from `POST /api/storage/token` carries the write scope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
     NotFound:
       description: "`not_found`"
       content:
@@ -580,6 +601,7 @@ components:
         | `invalid_request` | 400 | The request is malformed |
         | `unauthorized` | 401 | No Bearer token |
         | `invalid_token` | 401 | The token is expired, for another region, of the wrong kind, or invalid |
+        | `write_not_allowed` | 403 | The access token may only read (`scope` `blobs.read`) |
         | `not_found` | 404 | No such blob or route |
         | `method_not_allowed` | 405 | The route does not take this method |
         | `length_required` | 411 | No `Content-Length` |
@@ -591,6 +613,7 @@ components:
         - invalid_request
         - unauthorized
         - invalid_token
+        - write_not_allowed
         - not_found
         - method_not_allowed
         - length_required

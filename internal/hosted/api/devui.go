@@ -23,15 +23,29 @@ var devUIHTML []byte
 // handleDevUI serves a page for exercising the hosted API by hand: dashboard
 // and app sign-in, account, region, devices, deletion, storage tokens,
 // receipt-backed object writes, batch upload and claim, vault key material
-// with its recovery envelope, the pairing relay, the jobs, and the lapse
+// with its recovery envelope, the pairing relay, billing (mock checkout,
+// synthetic subscription events, the lapse clock), the jobs, and the lapse
 // emails. DEV_UI enables it; never in production.
 func handleDevUI(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write(devUIHTML)
 }
 
+// devSignup is whether ALLOWED_EMAIL_DOMAINS restricts who can sign up. It
+// leaves the domains out, as the refusal does.
+type devSignup struct {
+	Restricted bool `json:"restricted"`
+}
+
+// handleDevSignup serves GET /dev/signup, for /dev to show whether a new
+// account can be refused.
+func (s *Server) handleDevSignup(w http.ResponseWriter, r *http.Request) {
+	httputil.WriteJSON(w, r, http.StatusOK, devSignup{Restricted: len(s.cfg.AllowedEmailDomains) > 0})
+}
+
 // devJobRoutes mounts POST /dev/jobs/*, which run a storage job or the
-// pairing sweep at once on this replica, outside the schedule, its advisory
+// pairing sweep (and, in devBillingRoutes, a billing job) at once on this
+// replica, outside the schedule, its advisory
 // lock and its once-per-interval bookkeeping, as the self-hosted /dev/jobs/*
 // do.
 func (s *Server) devJobRoutes(r chi.Router) {
@@ -39,7 +53,7 @@ func (s *Server) devJobRoutes(r chi.Router) {
 		return hostedjobs.CollectBlobs(r.Context(), s.database, s.storage)
 	}))
 	r.Post("/dev/jobs/account-purge", handleDevJob(func(r *http.Request) (hostedjobs.PurgeResult, error) {
-		return hostedjobs.PurgeAccounts(r.Context(), s.database, s.storage)
+		return hostedjobs.PurgeAccounts(r.Context(), s.JobBilling())
 	}))
 	r.Post("/dev/jobs/reconciliation", s.handleDevReconciliation)
 	r.Post("/dev/jobs/pairing-sweep", handleDevJob(func(r *http.Request) (pairingSweep, error) {

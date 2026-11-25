@@ -37,7 +37,20 @@ var (
 	// ErrReauthenticationRequired reports that the session's sign-in is
 	// older than ReauthWindow, too old to delete the account.
 	ErrReauthenticationRequired = errors.New("reauthentication required")
+	// ErrNoUser reports that no user has the identity's subject.
+	ErrNoUser = errors.New("no user with this subject")
 )
+
+// PendingDeletionError is ErrPendingDeletion with when the account will be
+// purged, so a client need not ask for its account to show it.
+type PendingDeletionError struct {
+	PurgeAt time.Time
+}
+
+func (e *PendingDeletionError) Error() string { return ErrPendingDeletion.Error() }
+
+// Unwrap makes errors.Is(err, ErrPendingDeletion) hold.
+func (e *PendingDeletionError) Unwrap() error { return ErrPendingDeletion }
 
 // ReauthWindow is how recent a session's sign-in must be to delete the
 // account.
@@ -69,6 +82,8 @@ type Identity struct {
 	Subject string
 	Email   string
 	Name    string
+	// EmailVerified is the ID token's email_verified.
+	EmailVerified bool
 	// AuthTime is when the user last authenticated to the provider, from the
 	// ID token's auth_time; zero when the token has none.
 	AuthTime time.Time
@@ -81,6 +96,18 @@ func (s *Store) UpsertUser(ctx context.Context, id Identity) (auth.User, error) 
 	err := s.database.QueryRowContext(ctx, `INSERT INTO users (id, sub, email, name) VALUES ($1, $2, $3, $4)
 		ON CONFLICT (sub) DO UPDATE SET email = EXCLUDED.email, name = EXCLUDED.name
 		RETURNING id, email, name`, uuid.NewV7().String(), id.Subject, id.Email, id.Name).Scan(&u.ID, &u.Email, &u.Name)
+	return u, err
+}
+
+// UpdateUser is UpsertUser for an existing user only: it returns ErrNoUser,
+// and creates nothing, when no user has the identity's subject.
+func (s *Store) UpdateUser(ctx context.Context, id Identity) (auth.User, error) {
+	var u auth.User
+	err := s.database.QueryRowContext(ctx, `UPDATE users SET email = $2, name = $3 WHERE sub = $1
+		RETURNING id, email, name`, id.Subject, id.Email, id.Name).Scan(&u.ID, &u.Email, &u.Name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return auth.User{}, ErrNoUser
+	}
 	return u, err
 }
 

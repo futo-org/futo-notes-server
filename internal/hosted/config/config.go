@@ -18,10 +18,13 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/rs/zerolog"
 
 	"futo-notes-server/internal/hosted/account"
+	"futo-notes-server/internal/hosted/billing/appstore"
+	"futo-notes-server/internal/hosted/billing/play"
 	hostedmail "futo-notes-server/internal/hosted/mail"
 	"futo-notes-server/internal/hostedauth"
 	"futo-notes-server/internal/hostedenv"
@@ -53,7 +56,10 @@ type Config struct {
 	// AppRedirectSchemes are the custom URL schemes an app may name as its
 	// redirect_uri, besides loopback http.
 	AppRedirectSchemes []string
-	Regions            []Region
+	// AllowedEmailDomains are the lowercase email domains a new account may
+	// sign up with (ALLOWED_EMAIL_DOMAINS); empty lets anyone sign up.
+	AllowedEmailDomains []string
+	Regions             []Region
 	// SigningKey signs the access tokens storage services accept.
 	SigningKey hostedauth.SigningKey
 	// RefreshRotationKey derives each storage refresh token's successor
@@ -61,7 +67,9 @@ type Config struct {
 	RefreshRotationKey []byte
 	// Email is how the API sends email; without RESEND_API_KEY it logs and
 	// skips every send.
-	Email        hostedmail.Config
+	Email hostedmail.Config
+	// WebBilling is the web payment provider; none when its Provider is "".
+	WebBilling   WebBilling
 	CookieSecure bool
 	DevUI        bool
 	// DrainDelay is how long readiness fails before the listener closes, and
@@ -72,6 +80,11 @@ type Config struct {
 	OTLPMetricsEndpoint string
 	OTLPMetricsURLPath  string
 	OTLPMetricsInterval time.Duration
+
+	// AppStore and Play are the store billing providers, nil while their
+	// APPLE_* or PLAY_* variables are unset (stores.go).
+	AppStore *appstore.Config
+	Play     *play.Config
 }
 
 // OIDC is the identity provider the API signs users in with, as a
@@ -133,6 +146,9 @@ func Load(getenv Getenv) (Config, error) {
 	if cfg.AppRedirectSchemes, err = redirectSchemes(getenv("APP_REDIRECT_SCHEMES")); err != nil {
 		return Config{}, err
 	}
+	if cfg.AllowedEmailDomains, err = emailDomains(getenv("ALLOWED_EMAIL_DOMAINS")); err != nil {
+		return Config{}, err
+	}
 	path := getenv("REGIONS_FILE")
 	if path == "" {
 		return Config{}, errors.New("REGIONS_FILE is required")
@@ -163,6 +179,9 @@ func Load(getenv Getenv) (Config, error) {
 	if cfg.DevUI, err = hostedenv.Bool(getenv, "DEV_UI", false); err != nil {
 		return Config{}, err
 	}
+	if cfg.WebBilling, err = loadWebBilling(getenv, cfg.DevUI, cfg.PublicURL); err != nil {
+		return Config{}, err
+	}
 	if cfg.DrainDelay, err = hostedenv.Millis(getenv, "DRAIN_DELAY_MS", 15*time.Second, 0); err != nil {
 		return Config{}, err
 	}
@@ -174,6 +193,9 @@ func Load(getenv Getenv) (Config, error) {
 	// Well under vmagent's one-minute idle timeout, which a once-a-minute
 	// export races.
 	if cfg.OTLPMetricsInterval, err = hostedenv.Millis(getenv, "OTLP_METRICS_INTERVAL_MS", 15*time.Second, 1); err != nil {
+		return Config{}, err
+	}
+	if err := loadStores(getenv, &cfg); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
@@ -349,4 +371,21 @@ func redirectSchemes(value string) ([]string, error) {
 		schemes = append(schemes, scheme)
 	}
 	return schemes, nil
+}
+
+// emailDomains parses ALLOWED_EMAIL_DOMAINS: domains matched exactly, so no
+// wildcards, and a subdomain is listed on its own.
+func emailDomains(value string) ([]string, error) {
+	var domains []string
+	for domain := range strings.SplitSeq(value, ",") {
+		domain = strings.ToLower(strings.TrimSpace(domain))
+		if domain == "" {
+			continue
+		}
+		if strings.ContainsAny(domain, "@*") || strings.ContainsFunc(domain, unicode.IsSpace) || !strings.Contains(domain, ".") {
+			return nil, fmt.Errorf("ALLOWED_EMAIL_DOMAINS: %q is not a domain such as futo.org (no @, wildcards or spaces; list each subdomain itself)", domain)
+		}
+		domains = append(domains, domain)
+	}
+	return domains, nil
 }

@@ -124,6 +124,16 @@ func (e *env) access(userID string) string {
 	return token
 }
 
+// readAccess mints an access token for userID that may only read.
+func (e *env) readAccess(userID string) string {
+	e.t.Helper()
+	token, _, err := e.minter.MintReadAccess(testRegion, userID)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	return token
+}
+
 func (e *env) admin() string {
 	e.t.Helper()
 	token, err := e.minter.MintAdmin(testRegion)

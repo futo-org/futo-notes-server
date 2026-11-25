@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 	"uuid"
@@ -69,6 +70,8 @@ func TestSendOnceSendsThenStamps(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			// Without a lapse recorded, the purge date names the cycle.
+			want.IdempotencyKey = fmt.Sprintf("lapse-email/%s/%s/%d", userID, tmpl, purgeAt.UnixMicro())
 			if len(mailer.sent) != 1 || mailer.sent[0] != want {
 				t.Fatalf("sent %#v\nwant %#v", mailer.sent, want)
 			}
@@ -158,5 +161,45 @@ func TestSendOnceRefuses(t *testing.T) {
 	}
 	if len(mailer.sent) != 0 {
 		t.Fatalf("sent %d emails, want none", len(mailer.sent))
+	}
+}
+
+// TestSendOnceKeysEachLapse checks the idempotency key: the same for every
+// send about one lapse, so the provider drops a repeat whose stamp was
+// lost, and new for the next lapse.
+func TestSendOnceKeysEachLapse(t *testing.T) {
+	database := hostedtest.Postgres(t)
+	mailer := &recordingMailer{}
+	notifier := mail.NewNotifier(database, mailer, "https://notes.example.test")
+	userID := newUser(t, database, "keyed@example.test")
+	lapsed := time.Date(2027, time.January, 2, 3, 4, 5, 600000000, time.UTC)
+	setLapse := func(at time.Time) {
+		t.Helper()
+		if _, err := database.ExecContext(t.Context(), `UPDATE users SET lapsed_at = $2, lapse_notified_at = NULL WHERE id = $1`, userID, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	purgeAt := lapsed.Add(90 * 24 * time.Hour)
+
+	setLapse(lapsed)
+	for range 2 {
+		if _, err := notifier.SendOnce(t.Context(), userID, mail.Lapsed, purgeAt); err != nil {
+			t.Fatal(err)
+		}
+		setLapse(lapsed) // the stamp was lost
+	}
+	next := lapsed.Add(200 * 24 * time.Hour)
+	setLapse(next)
+	if _, err := notifier.SendOnce(t.Context(), userID, mail.Lapsed, next.Add(90*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprintf("lapse-email/%s/lapsed/%d", userID, lapsed.UnixMicro())
+	if len(mailer.sent) != 3 || mailer.sent[0].IdempotencyKey != want || mailer.sent[1].IdempotencyKey != want ||
+		mailer.sent[2].IdempotencyKey != fmt.Sprintf("lapse-email/%s/lapsed/%d", userID, next.UnixMicro()) {
+		var keys []string
+		for _, m := range mailer.sent {
+			keys = append(keys, m.IdempotencyKey)
+		}
+		t.Fatalf("keys = %q, want %q twice then the next lapse's", keys, want)
 	}
 }

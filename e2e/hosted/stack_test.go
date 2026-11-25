@@ -54,8 +54,9 @@ type stack struct {
 }
 
 // startStack builds and starts every service, or skips the test when the
-// environment does not name a database and an S3 endpoint.
-func startStack(t *testing.T) *stack {
+// environment does not name a database and an S3 endpoint. apiEnv is added
+// to the API's environment.
+func startStack(t *testing.T, apiEnv ...string) *stack {
 	t.Helper()
 	databaseURL := os.Getenv("HOSTED_E2E_DATABASE_URL")
 	s3Endpoint := os.Getenv("S3_TEST_ENDPOINT")
@@ -178,7 +179,7 @@ func startStack(t *testing.T) *stack {
 	if pgPort == "" {
 		pgPort = "5432"
 	}
-	apiEnv := []string{
+	apiEnv = append([]string{
 		fmt.Sprintf("API_PORT=%d", apiPort),
 		"PUBLIC_URL=" + s.apiURL,
 		"POSTGRES_HOST=" + pg.Hostname(),
@@ -196,7 +197,7 @@ func startStack(t *testing.T) *stack {
 		"DEV_UI=true",
 		"DRAIN_DELAY_MS=0",
 		"LOG_LEVEL=debug",
-	}
+	}, apiEnv...)
 	migrate := exec.Command(filepath.Join(bin, "api"), "migrate")
 	migrate.Env = apiEnv
 	if out, err := migrate.CombinedOutput(); err != nil {

@@ -11,15 +11,23 @@ import (
 	"futo-notes-server/internal/events"
 )
 
-const syncPingInterval = 25 * time.Second
+// SyncPingInterval is how often a sync event stream pings.
+const SyncPingInterval = 25 * time.Second
 
 // HandleSyncEvents serves GET /api/sync/events, the server-sent event stream
 // of the caller's collection changes.
 func HandleSyncEvents(hub *events.Hub) http.HandlerFunc {
-	return handleSyncEventsWithInterval(hub, syncPingInterval)
+	return handleSyncEvents(hub, SyncPingInterval, nil)
 }
 
-func handleSyncEventsWithInterval(hub *events.Hub, pingInterval time.Duration) http.HandlerFunc {
+// HandleSyncEventsWhile is HandleSyncEvents pinging every pingInterval, for
+// streams that must end with their session: alive is asked before every
+// ping, and false ends the stream instead.
+func HandleSyncEventsWhile(hub *events.Hub, pingInterval time.Duration, alive func(*http.Request) bool) http.HandlerFunc {
+	return handleSyncEvents(hub, pingInterval, alive)
+}
+
+func handleSyncEvents(hub *events.Hub, pingInterval time.Duration, alive func(*http.Request) bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
@@ -27,7 +35,8 @@ func handleSyncEventsWithInterval(hub *events.Hub, pingInterval time.Duration) h
 
 		// Subscribe before sending ready so a mutation cannot land between the
 		// client's initial pull and registration with the hub.
-		sub := hub.Subscribe(SessionFrom(r).User.ID)
+		session := SessionFrom(r)
+		sub := hub.Subscribe(session.User.ID, session.ID)
 		defer hub.Unsubscribe(sub)
 
 		controller := http.NewResponseController(w)
@@ -67,6 +76,9 @@ func handleSyncEventsWithInterval(hub *events.Hub, pingInterval time.Duration) h
 					}
 				}
 			case <-ticker.C:
+				if alive != nil && !alive(r) {
+					return
+				}
 				if err := writeEmptyEvent(w, "ping"); err != nil {
 					return
 				}

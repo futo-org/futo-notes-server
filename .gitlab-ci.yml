@@ -228,7 +228,7 @@ test:hosted-stack:
       case "${DOCKER_HOST:-unix://}" in
       unix://*)
         export HOSTED_STACK_JOIN_CONTAINER=$(sed -n 's|.*/docker/containers/\([0-9a-f]\{64\}\)/.*|\1|p' /proc/self/mountinfo | head -n 1)
-        export COMPOSE_PROJECT_NAME=hosted-stack-$CI_JOB_ID
+        export HOSTED_STACK_PROJECT=hosted-stack-$CI_JOB_ID
         export HOSTED_STACK_POSTGRES_PORT=$((20000 + CI_JOB_ID % 5000))
         export HOSTED_STACK_MINIO_PORT=$((25000 + CI_JOB_ID % 5000))
         ;;

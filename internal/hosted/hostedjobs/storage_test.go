@@ -18,9 +18,11 @@ import (
 	"futo-notes-server/internal/dbtest"
 	"futo-notes-server/internal/events"
 	"futo-notes-server/internal/hosted/account"
+	"futo-notes-server/internal/hosted/billing"
 	"futo-notes-server/internal/hosted/config"
 	"futo-notes-server/internal/hosted/hostedjobs"
 	"futo-notes-server/internal/hosted/hostedtest"
+	"futo-notes-server/internal/hosted/mail"
 	"futo-notes-server/internal/hosted/storageclient"
 	"futo-notes-server/internal/hostedauth"
 	"futo-notes-server/internal/objects"
@@ -89,6 +91,15 @@ type storageEnv struct {
 	database *db.DB
 	store    *testStorage
 	client   *storageclient.Client
+}
+
+// billing is what the account purge acts through: this env's database and
+// storage, no payment providers, and email that is only logged.
+func (e *storageEnv) billing() hostedjobs.Billing {
+	return hostedjobs.Billing{
+		Database: e.database, Storage: e.client, Store: billing.NewStore(e.database),
+		Notifier: mail.NewNotifier(e.database, mail.Disabled{}, "https://notes.example.test"),
+	}
 }
 
 func newStorageEnv(t *testing.T) *storageEnv {
@@ -409,7 +420,7 @@ func TestAccountPurgeEmptiesStorageAndRowsAndResumes(t *testing.T) {
 	// Storage fails after deleting two of the user's blobs: nothing of theirs
 	// leaves the database, so the next run starts over.
 	e.store.deleteBudget.Store(2)
-	result, err := hostedjobs.PurgeAccounts(ctx, e.database, e.client)
+	result, err := hostedjobs.PurgeAccounts(ctx, e.billing())
 	if err == nil || result.Failed < 1 || !strings.Contains(err.Error(), due) {
 		t.Fatalf("purge with storage failing = %+v, %v", result, err)
 	}
@@ -425,7 +436,7 @@ func TestAccountPurgeEmptiesStorageAndRowsAndResumes(t *testing.T) {
 
 	e.store.deleteBudget.Store(-1)
 	for run := range 2 {
-		if result, err := hostedjobs.PurgeAccounts(ctx, e.database, e.client); err != nil {
+		if result, err := hostedjobs.PurgeAccounts(ctx, e.billing()); err != nil {
 			t.Fatalf("purge run %d = %+v, %v", run, result, err)
 		}
 		if rows(due) != 0 || storedFor(due) != 0 {

@@ -88,7 +88,7 @@ func TestSQLiteApplicationLifecycle(t *testing.T) {
 
 	hub := events.NewHub()
 	publisher := events.NewPublisher(database.Dialect(), hub)
-	subscription := hub.Subscribe(user.ID)
+	subscription := hub.Subscribe(user.ID, "session")
 	defer hub.Unsubscribe(subscription)
 	rolledBack, err := database.BeginTx(ctx, nil)
 	if err != nil {

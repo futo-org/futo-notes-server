@@ -77,6 +77,11 @@ oidcClientId: notes-dev
 # http: the release apps' tech.futo.notes. Staging adds the dev builds'
 # tech.futo.notes.dev (docs/Hosted deployment.md); prod must not.
 appRedirectSchemes: [tech.futo.notes]
+# Email domains new accounts may sign up with, matched exactly (list each
+# subdomain itself), e.g. [futo.org, futo.tech]; a new account also needs a
+# verified email. Empty lets anyone sign up. Existing users always sign in
+# (docs/Hosted deployment.md).
+allowedEmailDomains: []
 
 # Where and as whom the API sends email (the lapse and purge notices). Without
 # RESEND_API_KEY in the Secret every send is logged and skipped, as in dev.
@@ -122,6 +127,41 @@ regions:
       MCowBQYDK2VwAyEABlGLcn59vhOW49esdpWbmgkkQf82tNnUvmYDUKYUgJQ=
       -----END PUBLIC KEY-----
 
+# App Store and Google Play billing (docs/Hosted deployment.md, "App Store and
+# Google Play"). Each store is off while its bundleId or packageName is empty,
+# and the API refuses to start on a store that is only partly set. A store
+# that is on also needs its key in the Secret: APPLE_PRIVATE_KEY (the In-App
+# Purchase key's .p8 file) or PLAY_SERVICE_ACCOUNT_JSON (the service account's
+# key file).
+appStore:
+  bundleId: ""
+  # The app's numeric Apple ID (App Store Connect, App Information).
+  appAppleId: 0
+  # App Store Connect, Users and Access, Integrations, In-App Purchase.
+  issuerId: ""
+  keyId: ""
+  subscriptionProductIds: []
+  # App Review and TestFlight purchases are sandbox transactions in the
+  # release build, so prod accepts them (the API's own default is false).
+  acceptSandbox: true
+play:
+  packageName: ""
+  subscriptionProductIds: []
+  # The push subscription's OIDC audience and service account.
+  rtdnAudience: ""
+  rtdnServiceAccount: ""
+
+# Stripe, the web payment provider (docs/Hosted deployment.md, "Billing: web
+# provider"). Off while priceId is empty. On, the chart sets
+# BILLING_WEB_PROVIDER=stripe, and the Secret must hold STRIPE_SECRET_KEY and
+# STRIPE_WEBHOOK_SECRET. The publishable key is not secret: Stripe.js gets it
+# in the page.
+stripe:
+  # The $5/month plan's price id (price_...).
+  priceId: ""
+  # pk_live_... in prod, pk_test_... in staging (same mode as the secret key).
+  publishableKey: ""
+
 # Dev-only literal: the mock issuer's client secret. Prod's Secret (same name,
 # notes-api) arrives via an ExternalSecret with secretData nulled in the base
 # HelmRelease; it must hold OIDC_CLIENT_SECRET, API_SIGNING_KEY (the Ed25519
@@ -130,7 +170,8 @@ regions:
 # `openssl rand -base64 32`), which derives each storage refresh token's
 # successor; see docs/Hosted deployment.md for rotating it. It may also hold
 # RESEND_API_KEY (a Resend sending key for emailFromAddress's domain); without
-# it the API sends no email.
+# it the API sends no email. With stripe.priceId set it must also hold
+# STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET.
 secretData:
   OIDC_CLIENT_SECRET: notes-dev-secret
 

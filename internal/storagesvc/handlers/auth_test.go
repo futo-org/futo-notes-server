@@ -147,3 +147,38 @@ func TestAdminEndpointsRejectEverythingButAnAdminToken(t *testing.T) {
 		}
 	}
 }
+
+// TestReadOnlyAccessReadsButCannotUpload checks the scope an account without
+// a subscription gets: uploads answer 403 write_not_allowed and store
+// nothing, while reads of what the account already has keep working.
+func TestReadOnlyAccessReadsButCannotUpload(t *testing.T) {
+	e := newEnv(t)
+	var stored UploadResponse
+	e.upload(e.access(userA), []byte("kept")).json(t, &stored)
+	readOnly := "Bearer " + e.readAccess(userA)
+
+	for _, ep := range blobEndpoints() {
+		if ep.path != "/blobs" && ep.path != "/blobs/batch-upload" {
+			continue
+		}
+		resp := e.call(ep, readOnly)
+		if resp.status != http.StatusForbidden {
+			t.Fatalf("%s %s with a read-only token: status %d: %s", ep.method, ep.path, resp.status, resp.body)
+		}
+		if code := resp.errorCode(t); code != "write_not_allowed" {
+			t.Fatalf("%s %s with a read-only token: code %q, want write_not_allowed", ep.method, ep.path, code)
+		}
+	}
+	if keys := e.store.keys(); len(keys) != 1 || keys[0] != stored.Key {
+		t.Fatalf("stored keys after refused uploads = %v, want only %s", keys, stored.Key)
+	}
+
+	get := e.call(endpoint{http.MethodGet, "/blobs/" + stored.Key, "", ""}, readOnly)
+	if get.status != http.StatusOK || string(get.body) != "kept" {
+		t.Fatalf("GET with a read-only token = %d %q", get.status, get.body)
+	}
+	batch := e.call(endpoint{http.MethodPost, "/blobs/batch", `{"keys":["` + stored.Key + `"]}`, ""}, readOnly)
+	if batch.status != http.StatusOK {
+		t.Fatalf("POST /blobs/batch with a read-only token = %d %s", batch.status, batch.body)
+	}
+}

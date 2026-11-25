@@ -632,6 +632,41 @@ func TestDashboardParity(t *testing.T) {
 			viaAPI.expect(http.MethodPost, "/api/auth/logout", nil, http.StatusNoContent)
 			expectRedirect(t, viaAPI.do(http.MethodGet, "/dashboard", nil), "/dashboard/sign-in")
 		}},
+		{"POST /dashboard/billing/checkout", "POST /api/billing/checkout", func(t *testing.T) {
+			b := newBillingHarness(t)
+			viaDashboard := b.regionBrowser()
+			res := viaDashboard.submit("/dashboard/billing/checkout", nil)
+			checkout, err := url.Parse(res.header.Get("Location"))
+			if res.status != http.StatusSeeOther || err != nil || checkout.Path != "/dev/billing/checkout" {
+				t.Fatalf("dashboard checkout = %d %v", res.status, res.header)
+			}
+			viaDashboard.postForm(checkout.Path, checkout.Query())
+			if !viaDashboard.billing().Entitled {
+				t.Fatal("API sees no subscription")
+			}
+			expectHostedError(t, viaDashboard.do(http.MethodPost, "/api/billing/checkout", nil), http.StatusConflict, "already_subscribed")
+
+			viaAPI := b.regionBrowser()
+			viaAPI.subscribe()
+			expectContains(t, viaAPI.expect(http.MethodGet, "/dashboard", nil, http.StatusOK), `data-billing-status="active"`)
+			expectRenderedError(t, viaAPI.submit("/dashboard/billing/checkout", nil), http.StatusConflict)
+		}},
+		{"POST /dashboard/billing/portal", "GET /api/billing/portal", func(t *testing.T) {
+			b := newBillingHarness(t)
+			browser := b.regionBrowser()
+			browser.subscribe()
+			var portal struct {
+				URL string `json:"url"`
+			}
+			browser.expect(http.MethodGet, "/api/billing/portal", nil, http.StatusOK).json(t, &portal)
+			expectRedirect(t, browser.submit("/dashboard/billing/portal", nil), portal.URL)
+
+			store := b.regionBrowser()
+			token, _ := b.appStore.sell(store.billing().StoreAccountToken)
+			store.expect(http.MethodPost, "/api/billing/app-store/transactions", map[string]string{"signed_transaction": token}, http.StatusOK)
+			expectHostedError(t, store.do(http.MethodGet, "/api/billing/portal", nil), http.StatusConflict, "managed_by_store")
+			expectRenderedError(t, store.submit("/dashboard/billing/portal", nil), http.StatusConflict)
+		}},
 	}
 
 	// The table covers exactly the dashboard's actions, and each one's API

@@ -13,7 +13,8 @@ Status:
 | S2 | B1, B2, D | Done, in the MR stacked on !34 (`feat/hosted-vault-unlock-test-stack`) |
 | S3 | A6 | Done, in the MR stacked on S2 (`feat/hosted-batch-and-mail`). Storage batch upload is `POST /blobs/batch-upload`, next to batch fetch at `POST /blobs/batch` |
 | S4 | E | Done, in the same MR: the sender, templates, stamps and dev stack. Billing (S5) calls it. |
-| S5 | C | Not started |
+| S5 | C | Done, in the MR stacked on S3/S4 (`feat/hosted-billing`): the model, gating, endpoints, webhooks, the mock web provider, the lapse and purge jobs, the emails, the dashboard, `/dev`, and the App Store and Play providers. |
+| S7 | C2 (web) | Done, stacked on S5: the Stripe web provider, embedded checkout, matching by OIDC `sub` |
 
 ## Decisions (2026-11-17)
 
@@ -22,12 +23,17 @@ Status:
 | Vault unlock under SSO | A **vault passphrase**, separate from the Zitadel login, **plus a recovery key and QR device pairing**. The apps already implement all three. The server adds what the recovery key and pairing need (B1, B2). |
 | Redirect scheme | Release apps sign in through `tech.futo.notes`, dev builds through `tech.futo.notes.dev`. Desktop uses a loopback redirect (always allowed). |
 | Hostnames | Prod `https://notes.futo.cloud`, staging `https://notes-staging.apps.futo.network`. |
-| Payment providers | **Pluggable.** The web provider (FUTOpay, Polar or Stripe) is not chosen yet. App Store and Play are providers behind the same interface. |
+| Payment providers | **Pluggable.** The web provider is **Stripe**. App Store and Play are providers behind the same interface. |
+| Web customer matching | Each FUTO account is a Stripe Customer carrying `metadata.sub`, its OIDC `sub`; checkouts and subscriptions carry the same `sub`. **Never matched by email.** |
+| Web checkout | **Embedded** in our pages (Stripe embedded Checkout), never a redirect to a Stripe-hosted page. |
 | Store rails | Web, App Store and Play subscriptions **all ship at launch**. |
 | Price | One flat plan: **$5/month** on the web, **$5.75/month** in the App Store and Play. |
 | Lapse | The account turns **read-only** (writes get 402) and is **purged 90 days** after it lapses. |
 | Lapse and purge emails | Sent by a new mail sender with a **Resend** driver (E). |
 | Family Sharing | **Off** for the App Store subscription. |
+| Store product id | `com.futo.notes.sync.monthly`, the same on the App Store and Play. |
+| Privacy policy | `https://docs.futo.cloud/legal/privacy`. |
+| Sign-up restriction | `ALLOWED_EMAIL_DOMAINS` (comma-separated, exact domain match, empty = open) limits **new** accounts to a verified email at a listed domain. **Existing users always sign in.** Refusals: a dashboard 403 page or the app redirect's `error=signup_not_allowed`; the capability's `signup` stays `"open"`. |
 | Account deletion | Requires a **recent sign-in** (A7). |
 | One store account, two FUTO accounts | The subscription stays with the account it was bought under (C1). |
 | Client CI | The server **releases the hosted binaries plus a compose bundle** the apps' test harness can start. |
@@ -195,9 +201,10 @@ GET  /api/pairings/{id}                                             → 202 | 20
       second one to that store account.
     - Submitting it, or "Restore Purchases", answers `409`
       `store_subscription_owned_elsewhere`. The server never moves it.
-    - The app says: "This Apple ID's (Google account's) subscription belongs to
-      another FUTO account. Sign in with that account, or subscribe on the web."
-      It does not name the other account.
+    - The app says: "This store subscription belongs to another FUTO account.
+      Sign in with that account to use it." It does not name the other account,
+      and does not point to the web: outside the US the store rules forbid that
+      (the apps' ADR 0005).
   - **Why not move it automatically.** Moving on restore would let anyone holding
     a shared store login take a subscription away from its owner, and Apple
     cannot change an `appAccountToken` after purchase anyway.
@@ -207,6 +214,26 @@ GET  /api/pairings/{id}                                             → 202 | 20
     - Once the owning account is purged, the binding is released, so the next
       account to submit that subscription gets it.
 - **Dedup.** `billing_deliveries (source, delivery_id)` deduplicates webhooks.
+
+- **As built (S5a).**
+  - `users.store_account_token` and `users.lapsed_at`, the `entitlements` and
+    `billing_deliveries` tables: hosted migration `006_billing.sql`.
+  - An event older than the stored `event_at` is ignored; an equal one is
+    applied again, which changes nothing.
+  - A store event's owner is its row's owner, or else the account its
+    `AccountToken` names. A submission binds an unowned subscription to the
+    submitter unless the token names another live account (`409`).
+  - An App Store transaction without `appAccountToken` (offer-code
+    redemptions, possibly resubscribing from iOS Settings) is accepted with no
+    token (S8). A submission binds it by its row, or else to the submitter; a
+    notification with no row is acknowledged and logged, as for unknown
+    accounts.
+  - Entitled: a row `active` with `expires_at` after `now()`, or `grace` with
+    `grace_until` after `now()`. `Principal.Entitled` comes from the same
+    query as the session.
+  - Applying an event that entitles the account clears `lapsed_at` and the
+    three email stamps in the same transaction, unless the purge already
+    claimed the account.
 
 ### C2. Pluggable providers
 
@@ -228,14 +255,31 @@ type StoreProvider interface {
 }
 ```
 
-- **Web.** One web provider is configured: FUTOpay, Polar or Stripe, each an
-  adapter.
+- **Web.** One web provider is configured: Stripe (decided 2026-11-17).
 - **Stores.** App Store: StoreKit 2 signed transactions, the App Store Server API,
   and Server Notifications v2. Play: the Play Developer API `subscriptionsv2`,
   with acknowledgement within 3 days, and real-time developer notifications over
   Pub/Sub.
 - **Dev mocks.** Every adapter has a mock in the style of `cmd/mock-oidc`, and a
   `/dev` panel grants, lapses, refunds and expires subscriptions.
+
+- **As built (S7).** `internal/hosted/billing/stripe`, raw REST against
+  `api.stripe.com` pinned to API version `2026-10-28.endive`.
+  - **Contract change: web events carry the OIDC `sub`.** `Event.UserID` is
+    now `Event.Subject`; the store resolves it through `users.sub`, and an
+    unknown `sub` is acknowledged and logged. `Customer` gained `Subject`.
+    The mock web provider uses the same scheme.
+  - **Embedded checkout.** An optional `billing.EmbeddedCheckout` interface
+    (`PublishableKey`, `StartCheckout`, `CompleteCheckout`) sits beside
+    `WebProvider.CheckoutURL`, which redirecting providers (the mock) keep;
+    Stripe's `CheckoutURL` answers `ErrNotSupported`. The dashboard mounts
+    the checkout in place; `POST /api/billing/checkout` gives the apps a
+    one-time link to `/billing/checkout/<token>`, our own page.
+  - **Entitlement at completion.** The page confirms the Checkout Session
+    with the server, which checks its `sub` against the caller and applies
+    its subscription at once. Webhooks carry every later change.
+  - Status mapping, config and Stripe setup: `docs/Hosted deployment.md`,
+    "Billing: web provider".
 
 ### C3. Endpoints
 
@@ -250,6 +294,16 @@ type StoreProvider interface {
 
 The capability document's `billing` becomes `true`.
 
+As built (S5a): `GET /api/billing` answers `{entitled, status, source,
+product_id, expires_at, grace_until, will_renew, store_account_token,
+rails: {web, app_store, play}}`. The subscription fields are `null` for an
+account that never subscribed. A rail is `true` when its provider is
+configured; prices come from the stores' own SDKs and the web checkout, not
+from this response. Webhooks answer `200 {"duplicate": bool}`, `400
+invalid_delivery`, `404` for an unconfigured source, and `413` over 1 MiB.
+The web provider is `BILLING_WEB_PROVIDER` (empty, `mock` or `stripe`; the
+mock needs `DEV_UI`). The store providers register in `cmd/api/billing.go`.
+
 ### C4. Gating
 
 - **Writes** answer `402` with code `subscription_required`, in the sync shape the
@@ -260,6 +314,16 @@ The capability document's `billing` becomes `true`.
 - **Storage access tokens** for an unentitled account carry a read-only scope,
   and storage refuses uploads without the write scope.
 - **Precedence:** 401, then 403 (pending deletion), then 402.
+- **As built (S5a).**
+  - The gated writes are the five above plus the batch claim
+    (`POST .../objects/batch`). Claiming a collection (`POST /api/collections`)
+    is not gated.
+  - The 402 body is `{"code":"subscription_required","error":"subscription required"}`.
+  - The read-only scope is `blobs.read`. Storage answers uploads with it
+    `403 write_not_allowed`.
+  - **Gating follows billing.** With no provider configured, `billing` is
+    `false` and nothing is gated, so a deployment with no way to pay stays
+    writable. Production must configure a provider.
 
 ### C5. Lapse and retention
 
@@ -284,9 +348,38 @@ All jobs run under `hostedjobs.locked`:
 - **Delivery-log pruning** after 30 days.
 - **Lapse purge** 90 days after lapse, sending the emails in E on the way.
 
+As built (S5a):
+
+- All three billing jobs run in the 6-hourly maintenance group, in this
+  order: reconciliation, `subscription lapses`, account purge, delivery
+  pruning.
+- Reconciliation refreshes rows that are still live (`active`, `grace`,
+  `on_hold`) and end within 24 h, or have had no update for 7 days. `expired`
+  and `revoked` rows are final. A provider reports a resubscription itself.
+- `subscription lapses` does the following:
+  - It sets `lapsed_at` when an account that has subscribed stops being
+    entitled. The value is when its entitlement ended: the paid period's
+    end, or a refund or hold reported before then.
+  - It sends the lapsed email, the warning at `lapsed_at + 83 days`, and
+    then claims the purge at `lapsed_at + 90 days` (`purge_at = now()`) and
+    purges.
+  - A failed send holds that account's later steps until the next run, so
+    nobody is purged unwarned.
+  - An account without an email address is purged without emails.
+  - Accounts pending a requested deletion are skipped: that purge comes
+    sooner.
+- The purge cancels web and Play renewals before deleting anything, and
+  stays due while a cancellation fails. For a lapsed account, it then
+  deletes the collections, sends the purged email, and deletes the user.
+- The lapse emails carry a Resend `Idempotency-Key`,
+  `lapse-email/<user>/<template>/<lapsed_at>`, and the purge date
+  `lapsed_at + 90 days`, so a repeated send is the same message.
+
 ### C7. Config
 
-- **Web provider:** its kind, plus its URL, key and webhook secret.
+- **Web provider:** its kind, plus its URL, key and webhook secret. As built:
+  `BILLING_WEB_PROVIDER=stripe`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`,
+  `STRIPE_PRICE_ID`, `STRIPE_PUBLISHABLE_KEY`.
 - **Apple:** bundle id, issuer, key id, `.p8` key, product ids, and whether to
   accept sandbox (App Review uses sandbox).
 - **Play:** package name, service account, product ids, and the RTDN audience and
@@ -348,6 +441,5 @@ throughout.
 
 ## Open questions
 
-1. The web provider: FUTOpay, Polar or Stripe. To be decided later; the design does
-   not depend on it.
+1. ~~The web provider.~~ Decided 2026-11-17: Stripe (S7).
 2. The `From` domain for email.

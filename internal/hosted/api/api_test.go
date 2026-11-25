@@ -508,7 +508,11 @@ func TestDeletionGatesSyncAndStorageUntilRestored(t *testing.T) {
 		t.Fatalf("other device after delete = %d %s, want signed out", res.status, res.body)
 	}
 
-	pending := `{"code":"account_pending_deletion","error":"account pending deletion"}` + "\n"
+	purgeAt, err := json.Marshal(account.Deletion.PurgeAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := `{"code":"account_pending_deletion","error":"account pending deletion","purge_at":` + string(purgeAt) + "}\n"
 	for _, req := range []struct{ method, path string }{
 		{http.MethodGet, "/api/auth"},
 		{http.MethodGet, "/api/collections"},

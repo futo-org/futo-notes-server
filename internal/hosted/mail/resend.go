@@ -63,8 +63,9 @@ type resendEmail struct {
 	Tags    []resendTag `json:"tags,omitempty"`
 }
 
-// Send posts m from the configured From address, tagged with its category.
-// It returns a *ResendError when Resend refuses it.
+// Send posts m from the configured From address, tagged with its category,
+// with m's idempotency key as Resend's Idempotency-Key (honoured for 24
+// hours). It returns a *ResendError when Resend refuses it.
 func (r *Resend) Send(ctx context.Context, m Message) error {
 	email := resendEmail{From: r.from, To: []string{m.To}, Subject: m.Subject, HTML: m.HTML, Text: m.Text}
 	if m.Category != "" {
@@ -81,6 +82,9 @@ func (r *Resend) Send(ctx context.Context, m Message) error {
 	req.Header.Set("Authorization", "Bearer "+r.apiKey)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
+	if m.IdempotencyKey != "" {
+		req.Header.Set("Idempotency-Key", m.IdempotencyKey)
+	}
 	res, err := r.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("resend: %w", err)

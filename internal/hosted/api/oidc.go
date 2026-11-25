@@ -157,8 +157,9 @@ func (s *Server) handleOIDCStart(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleOIDCCallback completes a sign-in the identity provider redirected
-// back: it swaps the provider's code, upserts the user by sub, and then sets
-// the dashboard's session cookie or sends the app its one-time code.
+// back: it swaps the provider's code, upserts the user by sub (refusing a
+// new user that ALLOWED_EMAIL_DOMAINS keeps out), and then sets the
+// dashboard's session cookie or sends the app its one-time code.
 func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	state := q.Get("state")
@@ -227,7 +228,19 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 			"The identity provider did not confirm a fresh sign-in")
 		return
 	}
-	user, err := s.accounts.UpsertUser(r.Context(), identity)
+	user, err := s.signInUser(r.Context(), identity)
+	if errors.Is(err, account.ErrNoUser) {
+		s.metrics.login(r.Context(), login.ForApp(), loginSignupNotAllowed)
+		if login.ForApp() {
+			redirectApp(w, r, login, url.Values{"error": {codeSignupNotAllowed}})
+			return
+		}
+		// A person is in a browser here, so they get a page rather than JSON.
+		dashboardHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			renderDashboardError(w, r, http.StatusForbidden, "Sign-ups are limited to approved email domains.")
+		})).ServeHTTP(w, r)
+		return
+	}
 	if err != nil {
 		serverError(w, r, "upserting user", err)
 		return
@@ -277,6 +290,20 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 
 var errNonceMismatch = errors.New("ID token nonce does not match the login")
 
+// signInUser returns the identity's user. It creates one only when signup
+// is open to the identity: with ALLOWED_EMAIL_DOMAINS set, that takes a
+// verified email at a listed domain. Otherwise it returns account.ErrNoUser
+// for a subject with no user yet, while an existing user always signs in.
+func (s *Server) signInUser(ctx context.Context, identity account.Identity) (auth.User, error) {
+	if domains := s.cfg.AllowedEmailDomains; len(domains) > 0 {
+		at := strings.LastIndexByte(identity.Email, '@')
+		if !identity.EmailVerified || at < 0 || !slices.Contains(domains, strings.ToLower(identity.Email[at+1:])) {
+			return s.accounts.UpdateUser(ctx, identity)
+		}
+	}
+	return s.accounts.UpsertUser(ctx, identity)
+}
+
 // identify swaps the provider's authorization code and returns who the
 // verified ID token says signed in.
 func (s *Server) identify(ctx context.Context, code string, login account.Login) (account.Identity, error) {
@@ -304,6 +331,7 @@ func (s *Server) identify(ctx context.Context, code string, login account.Login)
 	}
 	var claims struct {
 		Email             string  `json:"email"`
+		EmailVerified     bool    `json:"email_verified"`
 		Name              string  `json:"name"`
 		PreferredUsername string  `json:"preferred_username"`
 		AuthTime          float64 `json:"auth_time"`
@@ -318,7 +346,7 @@ func (s *Server) identify(ctx context.Context, code string, login account.Login)
 	if name == "" {
 		name, _, _ = strings.Cut(claims.Email, "@")
 	}
-	identity := account.Identity{Subject: idToken.Subject, Email: claims.Email, Name: name}
+	identity := account.Identity{Subject: idToken.Subject, Email: claims.Email, Name: name, EmailVerified: claims.EmailVerified}
 	if claims.AuthTime > 0 {
 		identity.AuthTime = time.Unix(int64(claims.AuthTime), 0)
 	}

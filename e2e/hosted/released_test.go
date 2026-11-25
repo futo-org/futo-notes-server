@@ -12,8 +12,8 @@ import (
 
 // TestReleasedStack is the client smoke test of the test stack a release
 // ships (scripts/hosted-stack): sign in through the mock issuer's
-// /test/authorize, exchange for a storage token, upload, and create an object
-// with the receipt. It runs against a stack `hosted-stack.sh up` started,
+// /test/authorize, subscribe through the mock web checkout, exchange for a
+// storage token, upload, and create an object with the receipt. It runs against a stack `hosted-stack.sh up` started,
 // found through the HOSTED_STACK_* lines it prints, and is skipped otherwise.
 func TestReleasedStack(t *testing.T) {
 	apiURL := os.Getenv("HOSTED_STACK_API_URL")
@@ -43,6 +43,7 @@ func TestReleasedStack(t *testing.T) {
 	}
 	home := ids[0]
 	d.expectJSON(http.MethodPut, "/api/account/region", map[string]string{"region_id": home}, nil)
+	d.buySubscription()
 
 	grant := d.storageToken()
 	if grant.Region.ID != home || grant.Region.Endpoint != s.storage[home] {

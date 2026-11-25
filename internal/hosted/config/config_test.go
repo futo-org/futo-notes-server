@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"bytes"
 	"maps"
 	"os"
 	"path/filepath"
@@ -159,6 +160,34 @@ func TestLoadRedirectSchemes(t *testing.T) {
 	}
 }
 
+func TestLoadAllowedEmailDomains(t *testing.T) {
+	for value, want := range map[string]string{
+		"":                                       "",
+		" , ":                                    "",
+		"futo.org":                               "futo.org",
+		" FUTO.org , futo.tech ,, eng.futo.org ": "futo.org,futo.tech,eng.futo.org",
+	} {
+		env := validEnv(t)
+		env["ALLOWED_EMAIL_DOMAINS"] = value
+		cfg, err := config.Load(getenv(env))
+		if err != nil {
+			t.Fatalf("%q: %v", value, err)
+		}
+		if got := strings.Join(cfg.AllowedEmailDomains, ","); got != want {
+			t.Errorf("%q: domains = %q, want %q", value, got, want)
+		}
+	}
+
+	for _, value := range []string{"user@futo.org", "@futo.org", "*.futo.org", "futo .org", "futo.org,futo\tcom", "localhost", "futo.org,org"} {
+		env := validEnv(t)
+		env["ALLOWED_EMAIL_DOMAINS"] = value
+		_, err := config.Load(getenv(env))
+		if err == nil || !strings.Contains(err.Error(), "ALLOWED_EMAIL_DOMAINS") {
+			t.Errorf("%q: Load error = %v, want one naming ALLOWED_EMAIL_DOMAINS", value, err)
+		}
+	}
+}
+
 func TestLoadBaseNeedsOnlyTheDatabase(t *testing.T) {
 	base, err := config.LoadBase(getenv(map[string]string{
 		"POSTGRES_HOST": "localhost", "POSTGRES_PORT": "15432", "POSTGRES_DATABASE": "notes",
@@ -169,5 +198,101 @@ func TestLoadBaseNeedsOnlyTheDatabase(t *testing.T) {
 	}
 	if base.Database.URL != "postgres://postgres:postgres@localhost:15432/notes" || !base.LogPretty {
 		t.Fatalf("base = %#v", base)
+	}
+}
+
+func TestLoadWebBilling(t *testing.T) {
+	cfg, err := config.Load(getenv(validEnv(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WebBilling.Provider != "" || cfg.WebBilling.MockWebhookSecret != nil {
+		t.Fatalf("web billing defaults = %#v", cfg.WebBilling)
+	}
+
+	env := validEnv(t)
+	maps.Copy(env, map[string]string{
+		"DEV_UI":                      "true",
+		"BILLING_WEB_PROVIDER":        "mock",
+		"BILLING_MOCK_WEBHOOK_SECRET": "dev-mock-webhook-secret",
+	})
+	if cfg, err = config.Load(getenv(env)); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WebBilling.Provider != config.WebProviderMock || string(cfg.WebBilling.MockWebhookSecret) != "dev-mock-webhook-secret" {
+		t.Fatalf("web billing = %#v", cfg.WebBilling)
+	}
+
+	for name, change := range map[string]map[string]string{
+		"mock without DEV_UI": {"DEV_UI": "false"},
+		"mock without secret": {"BILLING_MOCK_WEBHOOK_SECRET": ""},
+		"short mock secret":   {"BILLING_MOCK_WEBHOOK_SECRET": "short"},
+		"unknown provider":    {"BILLING_WEB_PROVIDER": "paypal"},
+	} {
+		bad := maps.Clone(env)
+		maps.Copy(bad, change)
+		if _, err := config.Load(getenv(bad)); err == nil {
+			t.Errorf("%s: Load succeeded, want an error", name)
+		}
+	}
+}
+
+func TestLoadStripe(t *testing.T) {
+	env := validEnv(t)
+	maps.Copy(env, map[string]string{
+		"BILLING_WEB_PROVIDER":   "stripe",
+		"STRIPE_SECRET_KEY":      "sk_live_abc",
+		"STRIPE_PUBLISHABLE_KEY": "pk_live_abc",
+		"STRIPE_WEBHOOK_SECRET":  "whsec_abc",
+		"STRIPE_PRICE_ID":        "price_abc",
+	})
+	cfg, err := config.Load(getenv(env))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := cfg.WebBilling.Stripe
+	if cfg.WebBilling.Provider != config.WebProviderStripe || s == nil || s.SecretKey != "sk_live_abc" || s.PublishableKey != "pk_live_abc" ||
+		string(s.WebhookSecret) != "whsec_abc" || s.PriceID != "price_abc" || s.APIURL != "" || s.PublicURL != cfg.PublicURL {
+		t.Fatalf("stripe config = %#v", cfg.WebBilling)
+	}
+	if len(cfg.WebBilling.CheckoutTokenKey) != 32 || bytes.Contains(cfg.WebBilling.CheckoutTokenKey, []byte("sk_live_abc")) {
+		t.Fatalf("checkout token key = %x", cfg.WebBilling.CheckoutTokenKey)
+	}
+
+	// A test-mode key may run with DEV_UI, against a stand-in API.
+	test := maps.Clone(env)
+	maps.Copy(test, map[string]string{
+		"DEV_UI": "true", "STRIPE_SECRET_KEY": "sk_test_abc", "STRIPE_PUBLISHABLE_KEY": "pk_test_abc",
+		"STRIPE_API_URL": "http://127.0.0.1:12111",
+	})
+	if cfg, err = config.Load(getenv(test)); err != nil || cfg.WebBilling.Stripe.APIURL != "http://127.0.0.1:12111" {
+		t.Fatalf("test-mode stripe config = %#v, %v", cfg.WebBilling, err)
+	}
+	restricted := maps.Clone(env)
+	restricted["STRIPE_SECRET_KEY"] = "rk_live_abc"
+	if _, err := config.Load(getenv(restricted)); err != nil {
+		t.Fatalf("a restricted key: %v", err)
+	}
+
+	for name, change := range map[string]map[string]string{
+		"live key with DEV_UI":        {"DEV_UI": "true"},
+		"live restricted with DEV_UI": {"DEV_UI": "true", "STRIPE_SECRET_KEY": "rk_live_abc"},
+		"no secret key":               {"STRIPE_SECRET_KEY": ""},
+		"publishable as secret":       {"STRIPE_SECRET_KEY": "pk_live_abc"},
+		"bare prefix":                 {"STRIPE_SECRET_KEY": "sk_live_"},
+		"no publishable key":          {"STRIPE_PUBLISHABLE_KEY": ""},
+		"mixed modes":                 {"STRIPE_PUBLISHABLE_KEY": "pk_test_abc"},
+		"secret as publishable":       {"STRIPE_PUBLISHABLE_KEY": "sk_live_abc"},
+		"no webhook secret":           {"STRIPE_WEBHOOK_SECRET": ""},
+		"not a webhook secret":        {"STRIPE_WEBHOOK_SECRET": "abc"},
+		"no price":                    {"STRIPE_PRICE_ID": ""},
+		"product as price":            {"STRIPE_PRICE_ID": "prod_abc"},
+		"bad API URL":                 {"STRIPE_API_URL": "ftp://stripe"},
+	} {
+		bad := maps.Clone(env)
+		maps.Copy(bad, change)
+		if _, err := config.Load(getenv(bad)); err == nil {
+			t.Errorf("%s: Load succeeded, want an error", name)
+		}
 	}
 }

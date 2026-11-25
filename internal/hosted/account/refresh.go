@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"futo-notes-server/internal/auth"
+	"futo-notes-server/internal/hosted/billing"
 )
 
 // RotationKeySize is the length of the key storage refresh token successors
@@ -53,6 +54,9 @@ func (s *Store) successor(token string) string {
 type Exchange struct {
 	UserID   string
 	RegionID string
+	// Entitled reports that the account may write: its storage access token
+	// gets the write scope.
+	Entitled bool
 	// RefreshToken replaces the exchanged token.
 	RefreshToken string
 	// Reissued reports that the token had been exchanged before and
@@ -82,16 +86,17 @@ func (s *Store) ExchangeRefreshToken(ctx context.Context, token string) (Exchang
 
 	hash := auth.HashToken(token)
 	var sessionID string
-	var rotatedAt, deletionRequestedAt *time.Time
+	var rotatedAt, deletionRequestedAt, purgeAt *time.Time
 	var expiresAt time.Time
 	var exchange Exchange
 	var region sql.NullString
-	err = tx.QueryRowContext(ctx, `SELECT t.session_id, t.rotated_at, s.expires_at, u.id, u.region_id, u.deletion_requested_at
+	err = tx.QueryRowContext(ctx, `SELECT t.session_id, t.rotated_at, s.expires_at, u.id, u.region_id, u.deletion_requested_at, u.purge_at,
+			`+billing.EntitledSQL("u.id")+`
 		FROM storage_refresh_tokens t
 		JOIN sessions s ON s.id = t.session_id
 		JOIN users u ON u.id = s.user_id
 		WHERE t.token_hash = $1 FOR UPDATE OF t`, hash).
-		Scan(&sessionID, &rotatedAt, &expiresAt, &exchange.UserID, &region, &deletionRequestedAt)
+		Scan(&sessionID, &rotatedAt, &expiresAt, &exchange.UserID, &region, &deletionRequestedAt, &purgeAt, &exchange.Entitled)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Exchange{}, ErrInvalidRefreshToken
 	}
@@ -126,6 +131,8 @@ func (s *Store) ExchangeRefreshToken(ctx context.Context, token string) (Exchang
 		}
 	}
 	switch {
+	case deletionRequestedAt != nil && purgeAt != nil:
+		return Exchange{}, &PendingDeletionError{PurgeAt: *purgeAt}
 	case deletionRequestedAt != nil:
 		return Exchange{}, ErrPendingDeletion
 	case !region.Valid:

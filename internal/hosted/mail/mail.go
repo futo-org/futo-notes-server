@@ -18,6 +18,10 @@ type Message struct {
 	HTML     string
 	Text     string
 	Category string
+	// IdempotencyKey, when set, makes the provider accept the same message
+	// only once: a send repeated with the same key, within the provider's
+	// window, is not delivered again.
+	IdempotencyKey string
 }
 
 // Mailer sends email. A nil error means the provider accepted the message.

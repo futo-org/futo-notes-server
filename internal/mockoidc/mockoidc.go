@@ -8,12 +8,14 @@
 // browser use, and GET /test/authorize issues a code for the given sub with no
 // UI, for tests and scripts. Never expose it beyond local development.
 //
-// Like Zitadel it remembers when each subject last authenticated, its SSO
-// session, and puts that in the ID token's auth_time. Submitting the form
-// always authenticates afresh. /test/authorize reuses the remembered time,
-// unless the request's max_age says it is too old (max_age=0 always
-// re-authenticates); its auth_time parameter (Unix seconds) overrides the
-// claim, to play a provider that ignores max_age.
+// Both record a fresh sign-in: the ID token's auth_time is when the code was
+// issued. /test/authorize's auth_time parameter (Unix seconds) overrides the
+// claim, to play a provider that answers with an older SSO session or ignores
+// max_age.
+//
+// Every email is verified unless the login says email_verified=false (the
+// form's checkbox, or /test/authorize's parameter), to play a provider that
+// has not confirmed the address.
 package mockoidc
 
 import (
@@ -58,9 +60,10 @@ type Config struct {
 
 // Identity is what a login asserts about the user.
 type Identity struct {
-	Subject string
-	Email   string
-	Name    string
+	Subject       string
+	Email         string
+	Name          string
+	EmailVerified bool
 }
 
 // Provider is an in-memory OIDC issuer. It is safe for concurrent use.
@@ -72,8 +75,6 @@ type Provider struct {
 	mu     sync.Mutex
 	codes  map[string]authCode
 	tokens map[string]accessToken
-	// authTimes is when each subject last authenticated.
-	authTimes map[string]time.Time
 }
 
 type authCode struct {
@@ -115,7 +116,6 @@ func New(cfg Config) (*Provider, error) {
 		keyID:      randomString(8),
 		codes:      map[string]authCode{},
 		tokens:     map[string]accessToken{},
-		authTimes:  map[string]time.Time{},
 	}, nil
 }
 
@@ -157,9 +157,6 @@ type authRequest struct {
 	nonce         string
 	codeChallenge string
 	scopes        []string
-	// maxAge is the oldest authentication the client accepts; nil when it
-	// set no max_age.
-	maxAge *time.Duration
 }
 
 func (p *Provider) parseAuthRequest(q url.Values) (authRequest, error) {
@@ -196,7 +193,6 @@ func (p *Provider) parseAuthRequest(q url.Values) (authRequest, error) {
 		if err != nil || seconds < 0 {
 			return authRequest{}, fmt.Errorf("max_age must be a non-negative integer, got %q", value)
 		}
-		req.maxAge = new(time.Duration(seconds) * time.Second)
 	}
 	return req, nil
 }
@@ -205,6 +201,13 @@ func identityFrom(q url.Values) (Identity, error) {
 	id := Identity{Subject: strings.TrimSpace(q.Get("sub")), Email: strings.TrimSpace(q.Get("email")), Name: strings.TrimSpace(q.Get("name"))}
 	if id.Subject == "" {
 		return Identity{}, errors.New("sub is required")
+	}
+	switch verified := q.Get("email_verified"); verified {
+	case "", "true":
+		id.EmailVerified = true
+	case "false":
+	default:
+		return Identity{}, fmt.Errorf("email_verified must be true or false, got %q", verified)
 	}
 	if id.Email == "" {
 		id.Email = id.Subject + "@example.test"
@@ -222,7 +225,7 @@ func (p *Provider) authorizeForm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The form's own fields must be the first values the POST sees.
-	for _, k := range []string{"sub", "email", "name"} {
+	for _, k := range []string{"sub", "email", "name", "email_verified"} {
 		params.Del(k)
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -244,8 +247,8 @@ func (p *Provider) testAuthorize(w http.ResponseWriter, r *http.Request) {
 	p.issueCode(w, r, r.URL.Query(), false)
 }
 
-// issueCode redirects back with a code for params' subject. interactive is
-// a submitted login form, which authenticates the user afresh.
+// issueCode redirects back with a code for params' subject, signed in now.
+// interactive is a submitted login form, which cannot force auth_time.
 func (p *Provider) issueCode(w http.ResponseWriter, r *http.Request, params url.Values, interactive bool) {
 	req, err := p.parseAuthRequest(params)
 	if err != nil {
@@ -257,26 +260,18 @@ func (p *Provider) issueCode(w http.ResponseWriter, r *http.Request, params url.
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	var forcedAuthTime *time.Time
+	authTime := time.Now()
 	if value := params.Get("auth_time"); value != "" && !interactive {
 		seconds, err := strconv.ParseInt(value, 10, 64)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("auth_time must be Unix seconds, got %q", value), http.StatusBadRequest)
 			return
 		}
-		forcedAuthTime = new(time.Unix(seconds, 0))
+		authTime = time.Unix(seconds, 0)
 	}
 	now := time.Now()
 	code := randomString(32)
 	p.mu.Lock()
-	authTime, known := p.authTimes[id.Subject]
-	if interactive || !known || (req.maxAge != nil && now.Sub(authTime) > *req.maxAge) {
-		authTime = now
-		p.authTimes[id.Subject] = now
-	}
-	if forcedAuthTime != nil {
-		authTime = *forcedAuthTime
-	}
 	p.codes[code] = authCode{
 		identity:      id,
 		redirectURI:   req.redirectURI,
@@ -390,7 +385,7 @@ func scopedClaims(id Identity, scopes []string) jwt.MapClaims {
 	}
 	if slices.Contains(scopes, "email") {
 		c["email"] = id.Email
-		c["email_verified"] = true
+		c["email_verified"] = id.EmailVerified
 	}
 	return c
 }
