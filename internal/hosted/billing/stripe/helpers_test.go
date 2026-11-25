@@ -235,6 +235,11 @@ func (f *fakeStripe) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		writeJSON(w, http.StatusOK, f.withCustomer(s, expandCustomer))
+	case r.Method == http.MethodGet && path == "/prices/"+priceID:
+		writeJSON(w, http.StatusOK, map[string]any{
+			"id": priceID, "object": "price", "currency": "usd", "unit_amount": 700, "product": productID,
+			"recurring": map[string]any{"interval": "year", "interval_count": 1},
+		})
 	case r.Method == http.MethodPost && path == "/billing_portal/sessions":
 		writeJSON(w, http.StatusOK, map[string]any{"id": f.id("bps"), "url": "https://billing.stripe.com/p/session/test_" + form.Get("customer")})
 	default:

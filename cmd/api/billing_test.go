@@ -34,8 +34,8 @@ func TestBillingProvidersRegistersTheWebProvider(t *testing.T) {
 		t.Fatalf("mock web provider = %T", mock.Web)
 	}
 	p := billingProviders(config.Config{WebBilling: config.WebBilling{Provider: config.WebProviderStripe, Stripe: &stripe.Config{PublishableKey: "pk_test_x"}}})
-	embedded, ok := p.Web.(billing.EmbeddedCheckout)
-	if _, isStripe := p.Web.(*stripe.Provider); !ok || !isStripe || embedded.PublishableKey() != "pk_test_x" {
+	custom, ok := p.Web.(billing.CustomCheckout)
+	if _, isStripe := p.Web.(*stripe.Provider); !ok || !isStripe || custom.PublishableKey() != "pk_test_x" {
 		t.Fatalf("stripe web provider = %T", p.Web)
 	}
 }

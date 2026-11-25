@@ -159,14 +159,34 @@ func TestSandbox(t *testing.T) {
 		Mode              string            `json:"mode"`
 		Status            string            `json:"status"`
 		Metadata          map[string]string `json:"metadata"`
+		Currency          string            `json:"currency"`
+		AmountTotal       int64             `json:"amount_total"`
+		AdaptivePricing   struct {
+			Enabled bool `json:"enabled"`
+		} `json:"adaptive_pricing"`
+		PaymentMethodTypes []string `json:"payment_method_types"`
+		WalletOptions      struct {
+			Link struct {
+				Display string `json:"display"`
+			} `json:"link"`
+		} `json:"wallet_options"`
+	}
+	plan, err := p.Plan(t.Context())
+	if err != nil || plan.Currency != "usd" || plan.Amount != 500 || plan.Interval != "month" || plan.IntervalCount != 1 {
+		t.Fatalf("Plan = %+v, %v", plan, err)
 	}
 	var customer string
 	for _, checkout := range sessions {
 		s.call(http.MethodGet, "/checkout/sessions/"+checkout.ID, nil, &session)
 		customers[session.Customer] = true
 		customer = session.Customer
-		if session.ClientReferenceID != subject || session.UIMode != "embedded_page" || session.Mode != "subscription" ||
+		if session.ClientReferenceID != subject || session.UIMode != "elements" || session.Mode != "subscription" ||
 			session.Status != "open" || session.Metadata["sub"] != subject {
+			t.Fatalf("session %s = %+v", checkout.ID, session)
+		}
+		// The price's own amount and currency, by card alone.
+		if session.AdaptivePricing.Enabled || session.Currency != plan.Currency || session.AmountTotal != plan.Amount ||
+			len(session.PaymentMethodTypes) != 1 || session.PaymentMethodTypes[0] != "card" || session.WalletOptions.Link.Display != "never" {
 			t.Fatalf("session %s = %+v", checkout.ID, session)
 		}
 	}

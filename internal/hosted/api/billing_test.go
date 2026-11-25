@@ -625,13 +625,24 @@ func TestDashboardBilling(t *testing.T) {
 		t.Fatalf("htmx dashboard checkout = %d %v", hx.status, hx.header)
 	}
 	browser.subscribe()
-	expectContains(t, browser.expect(http.MethodGet, "/dashboard", nil, http.StatusOK), `data-billing-status="active"`, `data-billing-source="web"`,
-		`action="/dashboard/billing/portal"`)
+	expectContains(t, browser.expect(http.MethodGet, "/dashboard", nil, http.StatusOK), `data-billing-status="active">Active</dd>`, `data-billing-source="web"`,
+		`<dt>Renews</dt>`, `action="/dashboard/billing/portal"`)
 	expectRenderedError(t, browser.submit("/dashboard/billing/checkout", nil), http.StatusConflict)
 	if res := browser.submit("/dashboard/billing/portal", nil); res.status != http.StatusSeeOther ||
 		!strings.HasPrefix(res.header.Get("Location"), h.api.URL+mockweb.PortalPath+"?") {
 		t.Fatalf("dashboard portal = %d %v", res.status, res.header)
 	}
+
+	// While the account awaits deletion its renewal is cancelled, so the
+	// subscription ends and there is nothing to manage; restoring it brings
+	// Manage back.
+	browser.expect(http.MethodDelete, "/api/account", nil, http.StatusOK)
+	deleting := browser.expect(http.MethodGet, "/dashboard", nil, http.StatusOK)
+	expectContains(t, deleting, `<dt>Ends</dt>`, "It won't renew: your account is scheduled for deletion.")
+	expectLacks(t, deleting, `<dt>Renews</dt>`, `action="/dashboard/billing/portal"`)
+	browser.expect(http.MethodPost, "/api/account/restore", nil, http.StatusOK)
+	expectContains(t, browser.expect(http.MethodGet, "/dashboard", nil, http.StatusOK), `action="/dashboard/billing/portal"`)
+	expectLacks(t, browser.expect(http.MethodGet, "/dashboard", nil, http.StatusOK), "scheduled for deletion")
 
 	stores := newStoresOnlyHarness(t)
 	browser = stores.regionBrowser()
@@ -641,4 +652,10 @@ func TestDashboardBilling(t *testing.T) {
 	browser.expect(http.MethodPost, "/api/billing/app-store/transactions", map[string]string{"signed_transaction": token}, http.StatusOK)
 	expectContains(t, browser.expect(http.MethodGet, "/dashboard", nil, http.StatusOK), `data-billing-source="app_store"`, "subscription settings of the store")
 	expectRenderedError(t, browser.submit("/dashboard/billing/portal", nil), http.StatusServiceUnavailable)
+
+	// Only the subscriber can cancel in the App Store, so deletion leaves it
+	// renewing, and the dashboard says so.
+	browser.expect(http.MethodDelete, "/api/account", nil, http.StatusOK)
+	expectContains(t, browser.expect(http.MethodGet, "/dashboard", nil, http.StatusOK), `<dt>Renews</dt>`,
+		"this subscription still renews. Cancel it in the App Store")
 }

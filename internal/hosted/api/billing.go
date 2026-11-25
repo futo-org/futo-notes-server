@@ -109,14 +109,14 @@ var (
 
 // checkoutURL is the web checkout for userID's account. It refuses an
 // account that is already entitled from any source, so nobody pays twice.
-// A provider whose checkout is embedded in our pages gets a one-time link to
+// A provider whose checkout is a page of ours gets a one-time link to
 // our checkout page, which needs no dashboard session, so an app can open it
 // in the system browser.
 func (s *Server) checkoutURL(ctx context.Context, userID string) (string, error) {
 	if err := s.checkoutAllowed(ctx, userID); err != nil {
 		return "", err
 	}
-	if s.embedded() != nil {
+	if s.custom() != nil {
 		return s.checkoutLink(userID)
 	}
 	customer, err := s.billing.Customer(ctx, userID)

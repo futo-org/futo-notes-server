@@ -40,3 +40,10 @@ func (s *Server) HandlerWithSyncPing(interval time.Duration) http.Handler {
 	s.syncPing = interval
 	return s.Handler()
 }
+
+// DeviceLabel is deviceLabel, which names a device on the dashboard.
+var DeviceLabel = deviceLabel
+
+// StatusLabel is statusLabel, which names a subscription status on the
+// dashboard.
+var StatusLabel = statusLabel

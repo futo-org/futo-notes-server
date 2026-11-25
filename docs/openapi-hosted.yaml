@@ -88,8 +88,9 @@ info:
     manual test page at `/dev` with its `/dev/jobs/*`, `/dev/email/*` and
     `/dev/billing/*` triggers and its `/dev/signup` status, and the mock web payment provider's checkout
     and portal pages under `/dev/billing`. With Stripe as the web provider,
-    the dashboard mounts its embedded checkout in place, and
-    `/billing/checkout/{token}` is the page an app's checkout link opens.
+    the dashboard opens its checkout (our page, with Stripe's card fields)
+    in place, and `/billing/checkout/{token}` is the page an app's checkout
+    link opens.
     Those are
     pages and test tooling, not API: clients must not
     depend on them, so they are listed in `x-internal-routes` rather than
@@ -108,6 +109,7 @@ x-internal-routes:
   - GET /dashboard/billing/return
   - GET /dashboard/billing/subscribe
   - GET /billing/checkout/return
+  - GET /billing/checkout/cancelled
   - GET /billing/checkout/{token}
   - POST /billing/checkout/{token}/session
   - GET /dev
@@ -333,6 +335,13 @@ paths:
         session. Existing accounts always sign in.
 
         A login is single-use: replaying a callback answers `400`.
+
+        A person reads this response in the browser the provider sent back,
+        so a sign-in that cannot complete answers an HTML error page in the
+        dashboard's style, under the dashboard's security headers, rather
+        than a JSON error. An app sign-in gets the page only when its login
+        is unknown or its ID token or code exchange fails; every other
+        outcome goes back to the app.
       parameters:
         - name: state
           in: query
@@ -382,52 +391,47 @@ paths:
                 type: string
         "400":
           description: |
-            `invalid_login_state`: missing, mismatched, unknown or
-            already-used state, or a nonce mismatch. Or, for a dashboard
-            sign-in, `sign_in_not_completed`: the provider's error, or a
-            callback with neither `code` nor `error`.
+            An error page. "This sign-in has expired or was already used":
+            missing, mismatched, unknown or already-used state, or a nonce
+            mismatch. Or, for a dashboard sign-in, "Sign-in was not
+            completed": the provider's error, or a callback with neither
+            `code` nor `error`.
           headers:
             X-Request-Id:
               $ref: "#/components/headers/RequestId"
             Set-Cookie:
               $ref: "#/components/headers/ClearsStateCookie"
           content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/HostedError"
+            text/html: {}
         "403":
           description: |
-            Dashboard sign-in only. `reauthentication_required` (JSON): a
-            `reauthenticate=true` sign-in came back with an `auth_time` older
-            than 10 minutes, so the provider did not confirm a fresh sign-in.
-            Or `signup_not_allowed` (an HTML page in the dashboard's style
-            saying "Sign-ups are limited to approved email domains.", without
-            the domains): `ALLOWED_EMAIL_DOMAINS` refuses a new account.
+            An error page in the dashboard's style, for a dashboard sign-in
+            only. Either a `reauthenticate=true` sign-in came back with an
+            `auth_time` older than 10 minutes, so the provider did not confirm a
+            fresh sign-in and the account was not deleted; or
+            `ALLOWED_EMAIL_DOMAINS` refused a new account (`signup_not_allowed`,
+            "Sign-ups are limited to approved email domains.", without the
+            domains).
           headers:
             X-Request-Id:
               $ref: "#/components/headers/RequestId"
             Set-Cookie:
               $ref: "#/components/headers/ClearsStateCookie"
           content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/HostedError"
             text/html: {}
         "500":
           $ref: "#/components/responses/HostedServerError"
         "502":
           description: |
-            `provider_error`: the code exchange or ID token verification
-            failed
+            An error page: the code exchange or ID token verification
+            failed.
           headers:
             X-Request-Id:
               $ref: "#/components/headers/RequestId"
             Set-Cookie:
               $ref: "#/components/headers/ClearsStateCookie"
           content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/HostedError"
+            text/html: {}
 
   /api/auth/oidc/token:
     post:
@@ -993,8 +997,8 @@ paths:
       description: |
         The checkout page for this account. Open it in the system browser;
         it needs no dashboard session. With Stripe, the web provider, it is
-        `<origin>/billing/checkout/<token>`, a page of this server that
-        mounts Stripe's embedded checkout: the token names the account,
+        `<origin>/billing/checkout/<token>`, this server's checkout page,
+        whose card fields are Stripe's Payment Element: the token names the account,
         expires after 15 minutes, and opens one checkout. When the payment
         completes, the page confirms it with Stripe and the account is
         entitled at once; `GET /api/billing` then reports the subscription.
@@ -2409,9 +2413,6 @@ components:
         | `invalid_request` | 400 | The request is malformed or names something unknown |
         | `unauthorized` | 401 | No session token |
         | `invalid_session` | 401 | The session token names no live session |
-        | `invalid_login_state` | 400 | The sign-in callback's state is missing, wrong, used or expired |
-        | `sign_in_not_completed` | 400 | The user did not complete a dashboard sign-in |
-        | `provider_error` | 502 | The identity provider rejected the sign-in |
         | `provider_unavailable` | 503 | The identity provider cannot be reached |
         | `invalid_code` | 400 | The app's one-time code is unknown, used or expired |
         | `code_verifier_mismatch` | 400 | The app's PKCE verifier does not match its challenge |
@@ -2438,9 +2439,6 @@ components:
         - invalid_request
         - unauthorized
         - invalid_session
-        - invalid_login_state
-        - sign_in_not_completed
-        - provider_error
         - provider_unavailable
         - invalid_code
         - code_verifier_mismatch

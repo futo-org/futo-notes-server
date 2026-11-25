@@ -224,7 +224,7 @@ for them):
 ### Stripe sandbox
 
 `api:dev` uses the mock web provider by default. To run against the Stripe
-sandbox instead, with its embedded checkout and real webhooks, keep the keys
+sandbox instead, with its custom checkout and real webhooks, keep the keys
 in files outside the repo and read them at start (never commit or paste
 them):
 

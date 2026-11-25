@@ -1,10 +1,11 @@
 {{define "title"}}Subscribe{{end}}
 
 {{define "main" -}}
-<h1>Subscribe to FUTO Notes</h1>
+<h1>{{if .Subscribed}}Thank you{{else}}Subscribe to FUTO Notes{{end}}</h1>
 {{template "notice" .}}
 {{with .Checkout}}
-<p>One plan: $5 a month, renewing until you cancel. Payment is handled by Stripe.</p>
+<div class="card">
 {{template "checkout-panel" .}}
+</div>
 {{end}}
 {{- end}}

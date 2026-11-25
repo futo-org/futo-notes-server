@@ -5,15 +5,16 @@
 {{if .Account.PurgeAt -}}
 {{template "pending-deletion" .}}
 {{- else -}}
-<section class="card" aria-labelledby="delete-heading">
-<h2 id="delete-heading">What happens</h2>
-<ul>
+<section class="section" aria-labelledby="delete-heading">
+<h2 class="section-title" id="delete-heading">What happens</h2>
+<div class="card">
+<ul class="facts">
 <li>Every other device is signed out right away, and sync stops for this account.</li>
 <li>After {{.GraceDays}} days, your account and all of its collections, notes and attachments are permanently deleted.</li>
 <li>Until then you can sign in here and cancel the deletion. After that it cannot be undone.</li>
 </ul>
 {{if .Reauthenticate -}}
-<p>To delete your account, first sign in again to confirm it is you. You will come back here.</p>
+<p class="hint">To delete your account, first sign in again to confirm it is you. You will come back here.</p>
 <p><a class="button" href="{{.ReauthPath}}">Sign in again</a></p>
 {{- else -}}
 <form class="stack" method="post" action="/dashboard/delete" hx-post="/dashboard/delete">
@@ -23,6 +24,7 @@
 <div><button type="submit" class="danger">Delete my account</button></div>
 </form>
 {{- end}}
+</div>
 </section>
 {{- end}}
 {{- end}}

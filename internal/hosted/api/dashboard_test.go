@@ -15,7 +15,7 @@ import (
 	"futo-notes-server/internal/hosted/config"
 )
 
-const dashboardCSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; " +
+const dashboardCSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; " +
 	"connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
 
 var csrfMeta = regexp.MustCompile(`<meta name="csrf-token" content="([^"]+)">`)
@@ -220,6 +220,17 @@ func expectRenderedError(t *testing.T, res response, status int) {
 	}
 }
 
+// expectCallbackError checks a sign-in callback that cannot complete: a
+// dashboard error page saying message, under the dashboard's headers.
+func expectCallbackError(t *testing.T, res response, status int, message string) {
+	t.Helper()
+	expectRenderedError(t, res, status)
+	if !strings.Contains(res.body, message) || !strings.HasPrefix(res.header.Get("Content-Type"), "text/html") ||
+		res.header.Get("Content-Security-Policy") != dashboardCSP || res.header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("callback error = %d %v %s, want a page saying %q", res.status, res.header, res.body, message)
+	}
+}
+
 // expectAlertFragment checks an htmx error: a fragment retargeted to the
 // alert region.
 func expectAlertFragment(t *testing.T, res response, status int, message string) {
@@ -250,7 +261,7 @@ func TestDashboardOverview(t *testing.T) {
 	expectContains(t, res,
 		`<dt>Name</dt><dd>Test `+sub+`</dd>`,
 		`<dt>Email</dt><dd>`+sub+`@example.test</dd>`,
-		`<strong>us-east name</strong><br><span class="muted">us-east description</span>`,
+		`<p class="item-title"><strong>us-east name</strong></p>`, `<p class="item-desc">us-east description</p>`,
 		`<dt>Collections</dt><dd>1</dd>`,
 		`<dt>Blobs</dt><dd>1</dd>`,
 		`<dt>Stored</dt><dd><data value="1536">1.5 KiB</data></dd>`,
@@ -440,6 +451,8 @@ func TestDashboardSecurityHeaders(t *testing.T) {
 		"redirect": browser.do(http.MethodGet, "/dashboard", nil),
 		"htmx":     browser.do(http.MethodGet, "/dashboard/static/htmx-2.0.4.min.js", nil),
 		"css":      browser.do(http.MethodGet, "/dashboard/static/dashboard.css", nil),
+		"font":     browser.do(http.MethodGet, "/dashboard/static/Barlow-400-latin.woff2", nil),
+		"icon":     browser.do(http.MethodGet, "/dashboard/static/icon-32.png", nil),
 	}
 	scriptTag := regexp.MustCompile(`<script[^>]*>`)
 	inlineStyleOrHandler := regexp.MustCompile(`\son[a-z]+=|\sstyle=|<style`)
@@ -479,7 +492,17 @@ func TestDashboardSecurityHeaders(t *testing.T) {
 	if css := responses["css"]; css.status != http.StatusOK || !strings.HasPrefix(css.header.Get("Content-Type"), "text/css") {
 		t.Fatalf("css = %d %v", css.status, css.header)
 	}
-	for _, path := range []string{"/dashboard/static/", "/dashboard/static/missing.js", "/dashboard/static/..%2ftemplates%2flayout.html"} {
+	if font := responses["font"]; font.status != http.StatusOK || font.header.Get("Content-Type") != "font/woff2" ||
+		font.header.Get("Cache-Control") != "public, max-age=31536000, immutable" {
+		t.Fatalf("font = %d %v", font.status, font.header)
+	}
+	if icon := responses["icon"]; icon.status != http.StatusOK || icon.header.Get("Content-Type") != "image/png" {
+		t.Fatalf("icon = %d %v", icon.status, icon.header)
+	}
+	expectContains(t, page, `<link rel="icon" type="image/png" sizes="32x32" href="/dashboard/static/icon-32.png">`,
+		`<img src="/dashboard/static/icon-128.png" alt="" width="32" height="32">FUTO Notes</a>`)
+	for _, path := range []string{"/dashboard/static/", "/dashboard/static/missing.js", "/dashboard/static/..%2ftemplates%2flayout.html",
+		"/dashboard/static/Barlow-OFL.txt"} {
 		if res := browser.do(http.MethodGet, path, nil); res.status != http.StatusNotFound {
 			t.Fatalf("GET %s = %d", path, res.status)
 		}

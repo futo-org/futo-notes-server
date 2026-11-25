@@ -16,10 +16,7 @@ import (
 // lists each in the ErrorCode enum.
 const (
 	codeInvalidSession         = "invalid_session"
-	codeInvalidLoginState      = "invalid_login_state"
-	codeSignInNotCompleted     = "sign_in_not_completed"
 	codeProviderUnavailable    = "provider_unavailable"
-	codeProviderError          = "provider_error"
 	codeInvalidCode            = "invalid_code"
 	codeCodeVerifierMismatch   = "code_verifier_mismatch"
 	codeRefreshTokenInvalid    = "refresh_token_invalid"

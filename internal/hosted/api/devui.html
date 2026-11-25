@@ -141,8 +141,9 @@ third note</textarea></div>
     <h2>Billing</h2>
     <p class="muted">With <code>BILLING_WEB_PROVIDER=mock</code> the web checkout and portal are pages of this API; completing one
       sends a signed webhook through <code>/api/billing/webhooks/web</code>. With <code>BILLING_WEB_PROVIDER=stripe</code> and sandbox
-      keys (docs/DEVELOPMENT.md), checkout is Stripe's embedded checkout: "Open checkout" opens the one-time page an app gets,
-      "Dashboard checkout panel" the panel the dashboard swaps in; pay with card 4242 4242 4242 4242, any future date and CVC.
+      keys (docs/DEVELOPMENT.md), checkout is our own page with Stripe's card fields (USD, cards only): "Open checkout" opens the
+      one-time page an app gets, "Dashboard checkout panel" the panel the dashboard swaps in; pay with card 4242 4242 4242 4242,
+      any future date and CVC (4000 0000 0000 0002 is declined, 4000 0025 0000 3155 asks for 3-D Secure).
       The account is entitled as soon as the checkout completes; <code>stripe listen</code> forwards later changes.
       Without a subscription, writes answer 402 and storage
       tokens are read-only (exchange again after subscribing). Synthetic events act on the signed-in user's subscriptions directly:

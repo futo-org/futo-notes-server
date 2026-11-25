@@ -115,12 +115,15 @@ type WebProvider interface {
 	PortalURL(ctx context.Context, c Customer) (string, error)
 }
 
-// EmbeddedCheckout is a web provider whose checkout is mounted inside our
-// own pages rather than reached by a redirect. CheckoutURL is then unused.
-type EmbeddedCheckout interface {
+// CustomCheckout is a web provider whose checkout is a page of ours: the
+// provider's own fields collect the card inside it, and our page confirms
+// the payment. CheckoutURL is then unused.
+type CustomCheckout interface {
 	WebProvider
 	// PublishableKey is the browser-side key the page mounts checkout with.
 	PublishableKey() string
+	// Plan is the subscription checkout sells, as the provider prices it.
+	Plan(ctx context.Context) (Plan, error)
 	// StartCheckout opens a checkout for c that, once paid, returns the
 	// browser to returnURL. The client secret mounts it in the browser and
 	// must not be logged.
@@ -132,10 +135,21 @@ type EmbeddedCheckout interface {
 	CompleteCheckout(ctx context.Context, c Customer, checkoutID string) (Event, error)
 }
 
-// Checkout is an open embedded checkout.
+// Checkout is an open custom checkout.
 type Checkout struct {
 	ID           string
 	ClientSecret string
+}
+
+// Plan is a recurring price: Amount in Currency's minor units, charged
+// every IntervalCount Intervals.
+type Plan struct {
+	Amount int64
+	// Currency is an ISO 4217 code, lowercase.
+	Currency string
+	// Interval is day, week, month or year.
+	Interval      string
+	IntervalCount int
 }
 
 // Purchase is what an app submits after a store purchase: the App Store

@@ -9,10 +9,13 @@
 <meta name="csrf-token" content="{{.}}">
 {{- end}}
 <title>{{template "title" .}} · FUTO Notes</title>
+<meta name="color-scheme" content="light dark">
+<link rel="icon" type="image/png" sizes="32x32" href="/dashboard/static/icon-32.png">
+<link rel="preload" href="/dashboard/static/Barlow-400-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/dashboard/static/dashboard.css">
 <script src="/dashboard/static/htmx-2.0.4.min.js" defer></script>
 {{- with .CheckoutHost}}
-<meta name="checkout-host" content="embedded">
+<meta name="checkout-host" content="elements">
 <script src="{{.ScriptURL}}" defer></script>
 {{- end}}
 <script src="/dashboard/static/checkout.js" defer></script>
@@ -20,9 +23,9 @@
 <body hx-target="#page"{{with .HXHeaders}} hx-headers="{{.}}"{{end}}>
 <a class="skip" href="#main">Skip to content</a>
 <header class="site">
-<a class="brand" href="/dashboard">FUTO Notes</a>
+<a class="brand" href="/dashboard"><img src="/dashboard/static/icon-128.png" alt="" width="32" height="32">FUTO Notes</a>
 {{- if .SignedIn}}
-<span class="who">{{.User.Email}}</span>
+<span class="who" title="{{.User.Email}}">{{.User.Email}}</span>
 <form method="post" action="/dashboard/sign-out">
 {{template "csrf-field" .}}
 <button type="submit" class="secondary">Sign out</button>
@@ -60,6 +63,15 @@
 {{define "alert"}}<p class="alert">{{.}}</p>{{end}}
 
 {{define "notice" -}}
+{{with .Subscribed}}
+<div class="success" role="status">
+<span class="success-mark" aria-hidden="true"></span>
+<div>
+<p class="success-title">You're subscribed</p>
+<p>{{.}}</p>
+</div>
+</div>
+{{- end}}
 {{with .Notice}}<p class="notice" role="status">{{.}}</p>{{end}}
 {{- with .PendingURL}}
 <p class="muted" hx-get="{{.}}" hx-trigger="load delay:5s" hx-target="#page">Checking again in a few seconds…</p>
@@ -68,9 +80,32 @@
 
 {{define "checkout-panel" -}}
 <div class="checkout" data-checkout data-publishable-key="{{.PublishableKey}}" data-session-url="{{.SessionURL}}" data-page-url="{{.PageURL}}">
-<p class="muted" data-checkout-status role="status">Loading the secure checkout…</p>
-<div data-checkout-mount></div>
-<noscript><p>The checkout needs JavaScript.</p></noscript>
+<div class="plan">
+<div class="plan-head">
+<h3 class="plan-name">FUTO Notes Sync</h3>
+<p class="plan-price"><strong data-checkout-amount>{{.Plan.Price}}</strong><span class="muted"> / <span data-checkout-period>{{.Plan.Period}}</span></span></p>
+</div>
+<ul class="plan-perks">
+<li>Sync your notes across all your devices</li>
+<li>End-to-end encrypted: only you can read them</li>
+<li>Cancel anytime</li>
+</ul>
+</div>
+<form class="checkout-form" data-checkout-form novalidate>
+<div class="field">
+<span class="field-label" id="checkout-email">Email</span>
+<p class="field-value" aria-labelledby="checkout-email">{{.Email}}</p>
+</div>
+<div class="field">
+<div class="payment" data-checkout-mount></div>
+<p class="muted checkout-loading" data-checkout-status role="status">Loading the secure card form…</p>
+</div>
+<p class="alert" data-checkout-error role="alert" hidden></p>
+<button type="submit" class="checkout-submit" data-checkout-submit disabled><span data-checkout-label>Subscribe · <span data-checkout-amount>{{.Plan.Price}}</span>/<span data-checkout-period>{{.Plan.Period}}</span></span></button>
+<p class="legal">Renews {{.Plan.Renews}} until you cancel. Card payments are processed by Stripe; your card details never reach FUTO. <a href="https://docs.futo.cloud/legal/terms" target="_blank" rel="noopener">Terms</a> · <a href="https://docs.futo.cloud/legal/privacy" target="_blank" rel="noopener">Privacy</a></p>
+<p class="checkout-cancel"><a href="{{.CancelURL}}"{{if .CancelHX}} hx-get="{{.CancelURL}}" hx-push-url="true"{{end}}>Cancel</a></p>
+</form>
+<noscript><p class="alert">The checkout needs JavaScript.</p></noscript>
 </div>
 {{- end}}
 

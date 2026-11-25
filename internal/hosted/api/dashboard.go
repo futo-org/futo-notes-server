@@ -46,12 +46,29 @@ const (
 	// confirmPhrase is what the user types to confirm deleting the account.
 	confirmPhrase = "DELETE"
 
-	dashboardCSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; " +
+	dashboardCSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; " +
 		"connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
-	htmxAsset     = "htmx-2.0.4.min.js"
-	cssAsset      = "dashboard.css"
-	checkoutAsset = "checkout.js"
+
+	cacheForever = "public, max-age=31536000, immutable"
+	cacheCheck   = "no-cache"
 )
+
+// dashboardAssets maps each servable static file to its Cache-Control.
+// htmx's name carries its pinned version and the fonts never change, so they
+// are cached for good; the rest change with the dashboard.
+var dashboardAssets = map[string]string{
+	"htmx-2.0.4.min.js":          cacheForever,
+	"Barlow-400-latin.woff2":     cacheForever,
+	"Barlow-400-latin-ext.woff2": cacheForever,
+	"Barlow-500-latin.woff2":     cacheForever,
+	"Barlow-500-latin-ext.woff2": cacheForever,
+	"Barlow-600-latin.woff2":     cacheForever,
+	"Barlow-600-latin-ext.woff2": cacheForever,
+	"dashboard.css":              cacheCheck,
+	"checkout.js":                cacheCheck,
+	"icon-32.png":                cacheCheck,
+	"icon-128.png":               cacheCheck,
+}
 
 //go:embed dashboard/templates dashboard/static
 var dashboardFiles embed.FS
@@ -73,9 +90,10 @@ func mustSub(fsys fs.FS, dir string) fs.FS {
 // plus the page's "title" and "main".
 func parseDashboardPages() map[string]*template.Template {
 	funcs := template.FuncMap{
-		"isoTime":    func(t time.Time) string { return t.UTC().Format(time.RFC3339) },
-		"utcTime":    func(t time.Time) string { return t.UTC().Format("2006-01-02 15:04 UTC") },
-		"humanBytes": humanBytes,
+		"isoTime":     func(t time.Time) string { return t.UTC().Format(time.RFC3339) },
+		"utcTime":     func(t time.Time) string { return t.UTC().Format("2006-01-02 15:04 UTC") },
+		"humanBytes":  humanBytes,
+		"statusLabel": statusLabel,
 	}
 	layout := template.Must(template.New("").Funcs(funcs).ParseFS(dashboardFiles, "dashboard/templates/layout.html"))
 	pages := map[string]*template.Template{}
@@ -96,6 +114,23 @@ func humanBytes(n int64) string {
 		unit++
 	}
 	return fmt.Sprintf("%.1f %s", value, [...]string{"KiB", "MiB", "GiB", "TiB"}[unit])
+}
+
+// statusLabel names a subscription's status for people. A status that
+// entitles yet is not entitled has run past its end.
+func statusLabel(status billing.Status, entitled bool) string {
+	switch {
+	case status == billing.StatusActive && entitled:
+		return "Active"
+	case status == billing.StatusGrace && entitled:
+		return "Active, payment overdue"
+	case status == billing.StatusOnHold:
+		return "On hold, payment failed"
+	case status == billing.StatusRevoked:
+		return "Revoked"
+	default:
+		return "Expired"
+	}
 }
 
 // dashboardView is what every dashboard template renders from; each page
@@ -124,22 +159,26 @@ type dashboardView struct {
 	Billing *billing.State
 	// WebPayments reports that a web provider is configured.
 	WebPayments bool
-	// EmbeddedCheckout reports that the web provider's checkout mounts in
-	// our pages, so Subscribe opens it in place.
-	EmbeddedCheckout bool
-	// CheckoutHost makes the page able to mount embedded checkout: it
+	// CustomCheckout reports that the web provider's checkout is a page
+	// of ours, so Subscribe opens it in place.
+	CustomCheckout bool
+	// CheckoutHost makes the page able to mount custom checkout: it
 	// loads the provider's script and is served checkoutCSP.
 	CheckoutHost *checkoutHost
-	// Checkout is the embedded checkout panel to show.
+	// Checkout is the custom checkout panel to show.
 	Checkout *checkoutPanel
 	// Notice confirms what just happened.
 	Notice string
+	// Subscribed confirms a checkout that entitled the account.
+	Subscribed string
 	// PendingURL is reloaded every few seconds while a payment clears.
 	PendingURL string
 }
 
 type dashboardDevice struct {
 	account.DeviceSession
+	// Label is what the device is called on the page.
+	Label   string
 	Current bool
 }
 
@@ -172,6 +211,7 @@ func (s *Server) dashboardRoutes(r chi.Router) {
 		d.Get(checkoutLinkPath+"/{token}", s.handleCheckoutLinkPage)
 		d.Post(checkoutLinkPath+"/{token}/session", s.handleCheckoutLinkSession)
 		d.Get(checkoutLinkReturnPath, s.handleCheckoutLinkReturn)
+		d.Get(checkoutLinkCancelledPath, handleCheckoutLinkCancelled)
 		d.Group(func(signed chi.Router) {
 			signed.Use(s.dashboardSession)
 			signed.Get(dashboardPath, s.handleDashboardOverview)
@@ -205,19 +245,16 @@ func dashboardHeaders(next http.Handler) http.Handler {
 	})
 }
 
-// handleDashboardAsset serves the embedded htmx and stylesheet. htmx's file
-// name carries its pinned version, so it can be cached for good.
+// handleDashboardAsset serves the embedded scripts, stylesheet, fonts and
+// icons.
 func handleDashboardAsset(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
-	switch name {
-	case htmxAsset:
-		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-	case cssAsset, checkoutAsset:
-		w.Header().Set("Cache-Control", "no-cache")
-	default:
+	cacheControl, ok := dashboardAssets[name]
+	if !ok {
 		http.NotFound(w, r)
 		return
 	}
+	w.Header().Set("Cache-Control", cacheControl)
 	http.ServeFileFS(w, r, dashboardStatic, name)
 }
 
@@ -306,7 +343,7 @@ func view(r *http.Request, nav string) dashboardView {
 }
 
 // renderDashboard answers 200 with page: the whole document, or for htmx
-// just the part inside #page. A page that hosts embedded checkout is served
+// just the part inside #page. A page that hosts custom checkout is served
 // checkoutCSP instead of the strict policy.
 func renderDashboard(w http.ResponseWriter, r *http.Request, page string, v dashboardView) {
 	if v.CheckoutHost != nil {
@@ -404,8 +441,8 @@ func (s *Server) renderOverview(w http.ResponseWriter, r *http.Request, a accoun
 		}
 		v.Billing = &state
 		v.WebPayments = s.providers.Web != nil
-		if s.embedded() != nil && !state.Entitled {
-			v.EmbeddedCheckout = true
+		if s.custom() != nil && !state.Entitled {
+			v.CustomCheckout = true
 			hostCheckout(&v)
 		}
 	}
@@ -415,12 +452,12 @@ func (s *Server) renderOverview(w http.ResponseWriter, r *http.Request, a accoun
 	renderDashboard(w, r, "overview", v)
 }
 
-// handleDashboardCheckout is the dashboard's POST /api/billing/checkout. An
-// embedded checkout's panel calls it for the session it mounts; otherwise it
+// handleDashboardCheckout is the dashboard's POST /api/billing/checkout. A
+// custom checkout's panel calls it for the session it mounts; otherwise it
 // sends the browser to the web checkout.
 func (s *Server) handleDashboardCheckout(w http.ResponseWriter, r *http.Request) {
 	userID := principalFrom(r).Session.User.ID
-	if s.embedded() != nil {
+	if s.custom() != nil {
 		s.writeCheckoutSession(w, r, userID, s.cfg.PublicURL+checkoutReturnPath+"?session_id="+checkoutSessionID)
 		return
 	}
@@ -519,7 +556,9 @@ func (s *Server) devicesView(r *http.Request) (dashboardView, error) {
 	}
 	v := view(r, "devices")
 	for _, d := range sessions {
-		v.Devices = append(v.Devices, dashboardDevice{DeviceSession: d, Current: d.ID == p.Session.ID})
+		v.Devices = append(v.Devices, dashboardDevice{
+			DeviceSession: d, Label: deviceLabel(d.DeviceName, d.UserAgent), Current: d.ID == p.Session.ID,
+		})
 	}
 	return v, nil
 }
