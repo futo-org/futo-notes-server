@@ -1,0 +1,4 @@
+{{define "subject"}}Your FUTO Notes account has been deleted{{end -}}
+On {{date .PurgeAt}}, after your subscription had ended, your FUTO Notes account for {{.Email}} and everything stored in it were permanently deleted.
+
+You can sign in again at any time to start a new account: {{.DashboardURL}}

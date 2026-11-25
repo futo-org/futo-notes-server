@@ -113,12 +113,37 @@ func TestLoadRejects(t *testing.T) {
 		"bad log level":        {"LOG_LEVEL": "loud"},
 		"bad log format":       {"LOG_FORMAT": "xml"},
 		"bad drain delay":      {"DRAIN_DELAY_MS": "-1"},
+		"bad resend url":       {"RESEND_API_URL": "api.resend.com"},
+		"bad from address":     {"EMAIL_FROM_ADDRESS": "FUTO Notes"},
 	} {
 		env := validEnv(t)
 		maps.Copy(env, change)
 		if _, err := config.Load(getenv(env)); err == nil {
 			t.Errorf("%s: Load succeeded, want an error", name)
 		}
+	}
+}
+
+func TestLoadEmail(t *testing.T) {
+	cfg, err := config.Load(getenv(validEnv(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Email.APIKey != "" || cfg.Email.APIURL != "https://api.resend.com" || cfg.Email.From != "FUTO Notes <noreply@notes.futo.cloud>" {
+		t.Fatalf("email defaults = %#v", cfg.Email)
+	}
+
+	env := validEnv(t)
+	maps.Copy(env, map[string]string{
+		"RESEND_API_KEY":     " re_test \n",
+		"RESEND_API_URL":     "http://localhost:8093/",
+		"EMAIL_FROM_ADDRESS": "noreply@example.com",
+	})
+	if cfg, err = config.Load(getenv(env)); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Email.APIKey != "re_test" || cfg.Email.APIURL != "http://localhost:8093" || cfg.Email.From != "noreply@example.com" {
+		t.Fatalf("email = %#v", cfg.Email)
 	}
 }
 

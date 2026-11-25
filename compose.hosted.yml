@@ -69,6 +69,32 @@ services:
       retries: 30
       start_period: 5s
 
+  # Catches every email the API sends in dev: UI and REST API on 8025, SMTP
+  # on 1025.
+  mailpit:
+    image: axllent/mailpit:v1.31.3@sha256:ed9b00c609e77e99c79b93f1178255ebc271868920f2c69a8d166bd5634ed10d
+    ports:
+      - 8025:8025
+      - 1025:1025
+
+  # Resend's POST /emails, relayed to Mailpit; the API's RESEND_API_URL in dev.
+  mock-resend:
+    build:
+      context: .
+      dockerfile: cmd/mock-resend/Dockerfile
+    environment:
+      MOCK_RESEND_SMTP_ADDR: mailpit:1025
+    ports:
+      - 8093:8093
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://localhost:8093/health > /dev/null']
+      interval: 1s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    depends_on:
+      - mailpit
+
   # The hosted services themselves, one storage region each. Profile
   # "services" keeps them out of `docker:start`; start them with
   #   docker compose -f compose.hosted.yml --profile services up -d --build

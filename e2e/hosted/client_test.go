@@ -154,6 +154,8 @@ type request struct {
 	body       io.Reader
 	length     int64
 	mutationID string
+	// contentType is sent when set; a body without a length is JSON.
+	contentType string
 }
 
 type response struct {
@@ -177,6 +179,9 @@ func (d *device) do(r request) response {
 	}
 	if r.body != nil && r.length == 0 {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if r.contentType != "" {
+		req.Header.Set("Content-Type", r.contentType)
 	}
 	resp, err := d.client.Do(req)
 	if err != nil {
@@ -287,6 +292,62 @@ func (d *device) upload(grant storageGrant, data []byte) upload {
 		d.t.Fatalf("upload returned %s", resp.body)
 	}
 	return u
+}
+
+// uploadBatch stores blobs at the grant's region in one batch upload, the
+// frame of blobs[i] named ids[i], and returns their receipts in order.
+func (d *device) uploadBatch(grant storageGrant, ids []string, blobs [][]byte) []upload {
+	d.t.Helper()
+	var body []byte
+	for i, blob := range blobs {
+		body = blobframe.AppendUpload(body, ids[i], blob)
+	}
+	resp := d.do(request{method: http.MethodPost, url: grant.Region.Endpoint + "/blobs/batch-upload", bearer: grant.AccessToken,
+		body: bytes.NewReader(body), length: int64(len(body)), contentType: "application/octet-stream"})
+	d.expect("batch upload", resp, http.StatusOK)
+	var answer struct {
+		Results []struct {
+			ID     string `json:"id"`
+			Status int    `json:"status"`
+			Body   upload `json:"body"`
+		} `json:"results"`
+	}
+	decode(d.t, resp, &answer)
+	if len(answer.Results) != len(blobs) {
+		d.t.Fatalf("batch upload of %d blobs answered %d results", len(blobs), len(answer.Results))
+	}
+	uploads := make([]upload, 0, len(blobs))
+	for i, r := range answer.Results {
+		u := r.Body
+		if r.ID != ids[i] || r.Status != http.StatusCreated || !strings.HasPrefix(u.Key, d.userID+"/") ||
+			u.Size != int64(len(blobs[i])) || u.Receipt == "" {
+			d.t.Fatalf("batch upload frame %d (%s): %d %+v", i, ids[i], r.Status, u)
+		}
+		uploads = append(uploads, u)
+	}
+	return uploads
+}
+
+// batchResult is one entry's result from the API's object batch.
+type batchResult struct {
+	Status int             `json:"status"`
+	Body   json.RawMessage `json:"body"`
+}
+
+// claimBatch sends entries to the collection's object batch and returns
+// their results.
+func (d *device) claimBatch(collectionID string, entries []map[string]any) []batchResult {
+	d.t.Helper()
+	resp := d.api(http.MethodPost, objectPath(collectionID, "")+"/batch", map[string]any{"entries": entries}, "")
+	d.expect("object batch", resp, http.StatusOK)
+	var answer struct {
+		Results []batchResult `json:"results"`
+	}
+	decode(d.t, resp, &answer)
+	if len(answer.Results) != len(entries) {
+		d.t.Fatalf("object batch of %d entries answered %d results", len(entries), len(answer.Results))
+	}
+	return answer.Results
 }
 
 // download GETs key from the grant's region.

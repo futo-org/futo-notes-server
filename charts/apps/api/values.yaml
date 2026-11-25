@@ -78,6 +78,13 @@ oidcClientId: notes-dev
 # tech.futo.notes.dev (docs/Hosted deployment.md); prod must not.
 appRedirectSchemes: [tech.futo.notes]
 
+# Where and as whom the API sends email (the lapse and purge notices). Without
+# RESEND_API_KEY in the Secret every send is logged and skipped, as in dev.
+# The From domain is a placeholder until the sending domain is confirmed and
+# verified in Resend.
+resendApiUrl: https://api.resend.com
+emailFromAddress: FUTO Notes <noreply@notes.futo.cloud>
+
 # The regions users choose from, rendered into the regions ConfigMap. endpoint
 # is the storage service's address as clients reach it; receipt_public_keys
 # lists every kid the region signs receipts with (old and new during
@@ -121,7 +128,9 @@ regions:
 # key access tokens are signed with; every storage region lists its public
 # half) and STORAGE_REFRESH_ROTATION_KEY (base64 of 32 random bytes,
 # `openssl rand -base64 32`), which derives each storage refresh token's
-# successor; see docs/Hosted deployment.md for rotating it.
+# successor; see docs/Hosted deployment.md for rotating it. It may also hold
+# RESEND_API_KEY (a Resend sending key for emailFromAddress's domain); without
+# it the API sends no email.
 secretData:
   OIDC_CLIENT_SECRET: notes-dev-secret
 

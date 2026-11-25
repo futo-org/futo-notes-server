@@ -33,16 +33,22 @@ const (
 	CodeInternalError    = "internal_error"
 )
 
-// WriteError answers with status and an ErrorResponse carrying code, message
-// and the request id.
-func WriteError(w http.ResponseWriter, r *http.Request, status int, code, message string) {
+// NewError returns the ErrorResponse for status, code and message, with r's
+// request id.
+func NewError(r *http.Request, status int, code, message string) ErrorResponse {
 	id := ""
 	if requestID, ok := hlog.IDFromRequest(r); ok {
 		id = requestID.String()
 	}
+	return ErrorResponse{StatusCode: status, Code: code, Message: message, RequestID: id}
+}
+
+// WriteError answers with status and an ErrorResponse carrying code, message
+// and the request id.
+func WriteError(w http.ResponseWriter, r *http.Request, status int, code, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(ErrorResponse{StatusCode: status, Code: code, Message: message, RequestID: id}); err != nil {
+	if err := json.NewEncoder(w).Encode(NewError(r, status, code, message)); err != nil {
 		hlog.FromRequest(r).Error().Err(err).Msg("writing error response")
 	}
 }

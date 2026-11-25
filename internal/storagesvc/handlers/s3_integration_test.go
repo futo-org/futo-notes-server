@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/url"
 	"os"
@@ -101,6 +102,31 @@ func TestS3EndToEnd(t *testing.T) {
 	}
 	if resp := e.do(http.MethodGet, "/blobs/"+up.Key, token, nil, nil); resp.status != http.StatusNotFound {
 		t.Fatalf("after delete: %d", resp.status)
+	}
+}
+
+func TestS3BatchUpload(t *testing.T) {
+	e, user := newS3Env(t)
+	token := e.access(user)
+	body := blobframe.AppendUpload(blobframe.AppendUpload(nil, "a", []byte("first")), "b", []byte("second"))
+	results := e.uploadBatch(token, body).batchResults(t)
+	if len(results) != 2 {
+		t.Fatalf("results %+v", results)
+	}
+	var keys []string
+	for i, want := range []string{"first", "second"} {
+		var up UploadResponse
+		if err := json.Unmarshal(results[i].Body, &up); err != nil || results[i].Status != http.StatusCreated {
+			t.Fatalf("frame %d: %d %s", i, results[i].Status, results[i].Body)
+		}
+		if r, err := e.receipts.Verify(up.Receipt, testRegion); err != nil || r.Key != up.Key || r.Size != int64(len(want)) {
+			t.Fatalf("frame %d: receipt %+v %v", i, r, err)
+		}
+		keys = append(keys, up.Key)
+	}
+	frames := decodeFrames(t, e.batch(token, map[string][]string{"keys": keys}).body)
+	if len(frames) != 2 || string(frames[0].Blob) != "first" || string(frames[1].Blob) != "second" {
+		t.Fatalf("fetched back %v", statuses(frames))
 	}
 }
 

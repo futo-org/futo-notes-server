@@ -30,6 +30,8 @@ info:
     | batch request body | 64 KiB |
     | batch keys | 1 to 200, each at most 128 characters |
     | batch response payload | 32 MiB (33554432), but the first available blob always ships |
+    | batch upload body | 32 MiB (33554432), so each blob is also under the 100 MiB upload limit |
+    | batch upload frames | 1 to 200 |
     | admin delete keys | 1 to 1000 |
     | admin list page | 1 to 1000 (default 1000) |
     | user purge per call | up to 1000 objects |
@@ -239,7 +241,7 @@ paths:
                     maxLength: 128
       responses:
         "200":
-          description: Binary frame stream
+          description: The binary frame stream
           content:
             application/octet-stream:
               schema:
@@ -258,12 +260,76 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "413":
-          description: "`payload_too_large`: request body over 64 KiB"
+          description: "`payload_too_large`: a body over 64 KiB"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /blobs/batch-upload:
+    post:
+      operationId: batchUploadBlobs
+      tags: [blobs]
+      summary: Upload up to 200 blobs in one request
+      description: |
+        The body concatenates 1–200 frames, repeating to EOF, integers
+        big-endian. It is the self-hosted `blob-objects/batch` framing with
+        only the blob left:
+
+        ```
+        [u16 idLen][id utf8][u32 blobLen][blob bytes]
+        ```
+
+        `id` is the client's name for the frame, echoed in its result. It
+        has the batch-safe `Mutation-Id` syntax, `^[A-Za-z0-9._~-]{1,128}$`,
+        so a client can use the `Mutation-Id` of the create that will claim
+        the blob. Ids need not be unique; results are in request order.
+
+        The answer is `200` with one result per frame, in request order. Each
+        is the status and body a single `POST /blobs` of that blob answers:
+        `201` with the key, size and receipt, or a failure with its `code`.
+        Frames are stored one at a time and fail independently: an empty
+        blob (`400 invalid_request`) or a storage failure (`500
+        internal_error`) fails only its own frame. Upload again only the
+        frames that failed.
+
+        Malformed framing rejects the whole request with `400` and stores
+        nothing.
+      security:
+        - accessToken: []
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+              description: Batch upload frames
+      responses:
+        "200":
+          description: One result per frame, in request order
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BatchUploadResponse"
+        "400":
+          description: |
+            `invalid_request`: malformed framing (`truncated id length`,
+            `truncated id`, `invalid id`, `truncated blob length`, `truncated
+            blob`), no frames (`batch must contain at least one frame`), or
+            more than 200 (`too many frames (max 200)`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          description: "`payload_too_large`: a body over 32 MiB"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /internal/blobs:
     delete:
       operationId: deleteBlobs
@@ -551,6 +617,40 @@ components:
         receipt:
           type: string
           description: Region-signed JWT naming `sub`, `key` and `size`
+    BatchUploadResponse:
+      type: object
+      required: [results]
+      additionalProperties: false
+      properties:
+        results:
+          type: array
+          minItems: 1
+          maxItems: 200
+          items:
+            $ref: "#/components/schemas/BatchUploadResult"
+    BatchUploadResult:
+      type: object
+      required: [id, status, body]
+      additionalProperties: false
+      description: |
+        One frame's result: the status and body a single `POST /blobs` of
+        its blob answers.
+      properties:
+        id:
+          type: string
+          pattern: '^[A-Za-z0-9._~-]{1,128}$'
+          description: The frame's id
+        status:
+          type: integer
+          enum: [201, 400, 500]
+          description: |
+            `201` stored, with the receipt. `400 invalid_request`: the blob is
+            empty. `500 internal_error`: storing it or signing its receipt
+            failed; upload it again.
+        body:
+          oneOf:
+            - $ref: "#/components/schemas/UploadResponse"
+            - $ref: "#/components/schemas/Error"
     DeleteBlobsResponse:
       type: object
       required: [deleted, failed]

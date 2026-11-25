@@ -55,7 +55,8 @@ func (s *Server) routes() chi.Router {
 	r.Group(func(r chi.Router) {
 		r.Use(auth.Access(s.Verifier, s.Metrics.AuthFailure))
 		r.Post("/blobs", s.uploadBlob)
-		r.Post("/blobs/batch", s.batchBlobs)
+		r.Post("/blobs/batch", s.downloadBatch)
+		r.Post("/blobs/batch-upload", s.uploadBatch)
 		r.Get("/blobs/{userId}/{blobId}", s.getBlob)
 	})
 	r.Group(func(r chi.Router) {

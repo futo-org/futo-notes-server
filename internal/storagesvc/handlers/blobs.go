@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -142,7 +143,71 @@ func singleRange(header string) string {
 	return header
 }
 
-func (s *Server) batchBlobs(w http.ResponseWriter, r *http.Request) {
+// BatchUploadResponse is the body of a batch upload: one result per frame,
+// in request order.
+type BatchUploadResponse struct {
+	Results []BatchUploadResult `json:"results"`
+}
+
+// BatchUploadResult is one frame's result: the frame's id, and the status and
+// body a single POST /blobs of its blob answers (an UploadResponse, or an
+// httputil.ErrorResponse).
+type BatchUploadResult struct {
+	ID     string `json:"id"`
+	Status int    `json:"status"`
+	Body   any    `json:"body"`
+}
+
+func (s *Server) uploadBatch(w http.ResponseWriter, r *http.Request) {
+	body, ok := readLimitedBody(w, r, blobframe.MaxBatchBytes, "request too large")
+	if !ok {
+		return
+	}
+	frames, err := blobframe.ParseUpload(body)
+	if err != nil {
+		httputil.WriteError(w, r, http.StatusBadRequest, httputil.CodeInvalidRequest, err.Error())
+		return
+	}
+	userID := auth.UserID(r.Context())
+	results := make([]BatchUploadResult, 0, len(frames))
+	for _, frame := range frames {
+		status, result := s.uploadFrame(r, userID, frame.Blob)
+		if clientGone(r) {
+			hlog.FromRequest(r).Warn().Int("stored", len(results)).Msg("batch upload aborted: client disconnected")
+			httputil.WriteError(w, r, statusClientClosedRequest, codeClientClosedRequest, "Client closed request")
+			return
+		}
+		results = append(results, BatchUploadResult{ID: frame.ID, Status: status, Body: result})
+	}
+	httputil.WriteJSON(w, r, http.StatusOK, BatchUploadResponse{Results: results})
+}
+
+// uploadFrame stores one frame's blob as POST /blobs stores a body, and
+// returns the status and body that upload would answer with.
+func (s *Server) uploadFrame(r *http.Request, userID string, blob []byte) (int, any) {
+	if len(blob) == 0 {
+		return http.StatusBadRequest, httputil.NewError(r, http.StatusBadRequest, httputil.CodeInvalidRequest, "empty body")
+	}
+	size := int64(len(blob))
+	key := userID + "/" + uuid.NewV7().String()
+	if err := s.Storage.PutObject(r.Context(), key, bytes.NewReader(blob), size); err != nil {
+		if !clientGone(r) {
+			hlog.FromRequest(r).Error().Err(err).Str("key", key).Msg("batch upload blob failed")
+		}
+		return http.StatusInternalServerError, httputil.NewError(r, http.StatusInternalServerError, httputil.CodeInternalError, "Storage error")
+	}
+	receipt, err := s.Signer.Sign(userID, key, size)
+	if err != nil {
+		// The object is stored but unclaimable; reconciliation deletes it.
+		hlog.FromRequest(r).Error().Err(err).Str("key", key).Msg("sign receipt failed")
+		return http.StatusInternalServerError, httputil.NewError(r, http.StatusInternalServerError, httputil.CodeInternalError, "Internal Server Error")
+	}
+	s.Metrics.ReceiptSigned(r.Context())
+	s.Metrics.AddUploaded(r.Context(), size)
+	return http.StatusCreated, UploadResponse{Key: key, Size: size, Receipt: receipt}
+}
+
+func (s *Server) downloadBatch(w http.ResponseWriter, r *http.Request) {
 	body, ok := readLimitedBody(w, r, blobframe.MaxRequestBytes, "request too large")
 	if !ok {
 		return

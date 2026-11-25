@@ -2,6 +2,7 @@ package api
 
 import (
 	_ "embed"
+	"errors"
 	"fmt"
 	"net/http"
 	"slices"
@@ -11,6 +12,7 @@ import (
 
 	"futo-notes-server/internal/hosted/config"
 	"futo-notes-server/internal/hosted/hostedjobs"
+	"futo-notes-server/internal/hosted/mail"
 	"futo-notes-server/internal/hosted/pairing"
 	"futo-notes-server/internal/httputil"
 )
@@ -20,9 +22,9 @@ var devUIHTML []byte
 
 // handleDevUI serves a page for exercising the hosted API by hand: dashboard
 // and app sign-in, account, region, devices, deletion, storage tokens,
-// receipt-backed object writes, vault key material with its recovery
-// envelope, the pairing relay, and the jobs. DEV_UI enables it;
-// never in production.
+// receipt-backed object writes, batch upload and claim, vault key material
+// with its recovery envelope, the pairing relay, the jobs, and the lapse
+// emails. DEV_UI enables it; never in production.
 func handleDevUI(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write(devUIHTML)
@@ -108,4 +110,54 @@ func handleDevJob[T any](run func(*http.Request) (T, error)) http.HandlerFunc {
 		}
 		httputil.WriteJSON(w, r, http.StatusOK, result)
 	}
+}
+
+// devLapsePurgeDelay is how long after a lapse the account is purged
+// (launch plan C5), for the purge date the dev emails show.
+const devLapsePurgeDelay = 90 * 24 * time.Hour
+
+// devEmailSent is the result of a dev email send.
+type devEmailSent struct {
+	Template string `json:"template"`
+	To       string `json:"to"`
+	Subject  string `json:"subject"`
+	// Delivered is false when RESEND_API_KEY is unset and the send was
+	// only logged.
+	Delivered bool `json:"delivered"`
+}
+
+// handleDevEmail serves POST /dev/email/{template}: it renders lapse email
+// {template} for the signed-in user, with the purge date it would carry if
+// sent now, and sends it through the configured mailer (Mailpit in dev). It
+// leaves the user's email stamps alone.
+func (s *Server) handleDevEmail(w http.ResponseWriter, r *http.Request) {
+	t := mail.Template(chi.URLParam(r, "template"))
+	user := principalFrom(r).Session.User
+	purgeAt := time.Now()
+	switch t {
+	case mail.Lapsed:
+		purgeAt = purgeAt.Add(devLapsePurgeDelay)
+	case mail.PurgeWarning:
+		purgeAt = purgeAt.Add(7 * 24 * time.Hour)
+	}
+	message, err := mail.Render(t, mail.Data{Email: user.Email, PurgeAt: purgeAt, DashboardURL: s.cfg.PublicURL + "/dashboard"})
+	if errors.Is(err, mail.ErrUnknownTemplate) {
+		httputil.WriteError(w, r, http.StatusNotFound, httputil.CodeNotFound, fmt.Sprintf("unknown template %q", t))
+		return
+	}
+	if err != nil {
+		serverError(w, r, "rendering email", err)
+		return
+	}
+	if user.Email == "" {
+		badRequest(w, r, "the signed-in user has no email address")
+		return
+	}
+	if err := s.mailer.Send(r.Context(), message); err != nil {
+		httputil.WriteError(w, r, http.StatusBadGateway, httputil.CodeInternalError, err.Error())
+		return
+	}
+	httputil.WriteJSON(w, r, http.StatusOK, devEmailSent{
+		Template: string(t), To: message.To, Subject: message.Subject, Delivered: s.cfg.Email.APIKey != "",
+	})
 }

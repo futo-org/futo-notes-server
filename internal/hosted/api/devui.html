@@ -84,6 +84,22 @@
     </div>
   </section>
   <section class="card">
+    <h2>Batch upload and claim</h2>
+    <p class="muted">A first sync in two requests. Build the storage batch from the notes below (one per line): each frame is named
+      by the Mutation-Id of the create that will claim it. The storage service is another origin, so upload with curl, paste its
+      answer, and claim every receipt into the collection above in one call. Claiming again replays each entry.</p>
+    <div class="row"><textarea id="batch-notes" rows="3">first note
+second note
+third note</textarea></div>
+    <div class="row"><button id="batch-build">Build batch frames</button><a id="batch-file" hidden download="batch.bin">batch.bin</a></div>
+    <pre id="batch-curl" class="muted"></pre>
+    <div class="row"><textarea id="batch-uploaded" rows="3" placeholder="storage POST /blobs/batch-upload answer"></textarea></div>
+    <div class="row">
+      <button id="batch-claim">Claim batch (create all)</button>
+      <button id="batch-retry">Send the same claim again</button>
+    </div>
+  </section>
+  <section class="card">
     <h2>Vault key</h2>
     <p class="muted">Key material for the collection above. With the recovery envelope unticked, a put deletes any stored one.
       Rotate sends the last <code>key_updated_at</code> seen as <code>previous_key_updated_at</code>.</p>
@@ -118,6 +134,17 @@
       <button id="pair-poll">Poll once</button>
       <button id="pair-wait">Poll until collected</button>
       <button data-job="/dev/jobs/pairing-sweep">Sweep expired pairings</button>
+    </div>
+  </section>
+  <section class="card">
+    <h2>Email</h2>
+    <p class="muted">Renders a lapse email for the signed-in user, with the purge date it would carry if sent now, and sends it
+      through the configured Resend (the mock in dev, which delivers to <a href="http://localhost:8025">Mailpit</a>).
+      Without <code>RESEND_API_KEY</code> the send is only logged. The user's sent-email stamps are left alone.</p>
+    <div class="row">
+      <button data-email="lapsed">Send "lapsed"</button>
+      <button data-email="purge_warning">Send "purge in 7 days"</button>
+      <button data-email="purged">Send "purged"</button>
     </div>
   </section>
   <section class="card">
@@ -195,6 +222,7 @@ async function loadRegions() {
 }
 document.querySelectorAll("[data-get]").forEach((b) => b.onclick = () => call("GET", b.dataset.get));
 document.querySelectorAll("[data-job]").forEach((b) => b.onclick = () => call("POST", b.dataset.job));
+document.querySelectorAll("[data-email]").forEach((b) => b.onclick = () => call("POST", "/dev/email/" + b.dataset.email));
 $("reconcile").onclick = () => {
   const q = new URLSearchParams();
   if ($("reconcile-user").value) q.set("user", $("reconcile-user").value.trim());
@@ -217,6 +245,7 @@ $("storage-token").onclick = async () => {
     store.setItem("refresh-prev", sent);
     store.setItem("refresh", res.body.refresh_token);
   }
+  if (res.status === 200) { store.setItem("access", res.body.access_token); store.setItem("endpoint", res.body.region.endpoint); }
   refreshWho();
 };
 $("storage-token-previous").onclick = async () => {
@@ -287,6 +316,35 @@ $("pair-wait").onclick = async () => {
     await new Promise((resolve) => setTimeout(resolve, 2000));
   }
 };
+$("batch-build").onclick = () => {
+  // Frames: [u16 idLen][id][u32 blobLen][blob], big-endian.
+  const run = b64url(crypto.getRandomValues(new Uint8Array(6)));
+  const enc = new TextEncoder();
+  const parts = [];
+  $("batch-notes").value.split("\n").filter((line) => line !== "").forEach((line, i) => {
+    const id = enc.encode("dev-batch-" + run + "-" + i), blob = enc.encode(line);
+    const head = new DataView(new ArrayBuffer(2));
+    head.setUint16(0, id.length);
+    const len = new DataView(new ArrayBuffer(4));
+    len.setUint32(0, blob.length);
+    parts.push(head, id, len, blob);
+  });
+  const link = $("batch-file");
+  link.href = URL.createObjectURL(new Blob(parts, { type: "application/octet-stream" }));
+  link.hidden = false;
+  $("batch-curl").textContent = "curl -H 'Authorization: Bearer " + (store.getItem("access") || "<access_token>") + "' \\\n" +
+    "  -H 'Content-Type: application/octet-stream' --data-binary @batch.bin " + (store.getItem("endpoint") || "<endpoint>") + "/blobs/batch-upload";
+};
+let lastClaim = null;
+const claimBatch = () => call("POST", "/api/collections/" + $("collection").value + "/objects/batch", lastClaim);
+$("batch-claim").onclick = () => {
+  let uploaded;
+  try { uploaded = JSON.parse($("batch-uploaded").value); } catch { return show(400, "paste the storage batch answer first"); }
+  const entries = uploaded.results.filter((r) => r.status === 201).map((r) => ({ mutation_id: r.id, receipt: r.body.receipt }));
+  lastClaim = { entries };
+  claimBatch();
+};
+$("batch-retry").onclick = () => lastClaim ? claimBatch() : show(400, "claim a batch first");
 $("list").onclick = () => call("GET", "/api/collections/" + $("collection").value + "/objects");
 loadRegions();
 finishAppLogin().then(refreshWho);

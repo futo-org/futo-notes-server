@@ -25,6 +25,10 @@ info:
       `{"receipt": "<jwt>"}`, the receipt the storage service returned for
       the upload. It names the key and the size; the object's `blob_key` and
       `size_bytes` come from it.
+    - **Batch claim.** `POST /api/collections/{id}/objects/batch` claims up
+      to 200 receipts in one call, after one storage `POST /blobs/batch`
+      uploaded their blobs. Self-hosted has no such route; its
+      `blob-objects/batch` carries the bytes instead.
     - **OIDC sign-in.** No password or dev login. Sessions last 90 days and
       slide: every authenticated request extends them, and a request
       authenticated by the session cookie gets the cookie re-issued when it
@@ -70,7 +74,8 @@ info:
     `/dashboard` (server-rendered HTML for browsers, behind the session
     cookie and CSRF tokens; every state-changing page calls the same service
     code as the JSON operation it matches) and, when `DEV_UI` is set, a
-    manual test page at `/dev` with its `/dev/jobs/*` triggers. Those are
+    manual test page at `/dev` with its `/dev/jobs/*` and `/dev/email/*`
+    triggers. Those are
     pages and test tooling, not API: clients must not
     depend on them, so they are listed in `x-internal-routes` rather than
     described as operations.
@@ -91,6 +96,7 @@ x-internal-routes:
   - POST /dashboard/region
   - POST /dashboard/restore
   - POST /dashboard/sign-out
+  - POST /dev/email/{template}
   - POST /dev/jobs/account-purge
   - POST /dev/jobs/blob-gc
   - POST /dev/jobs/pairing-sweep
@@ -1348,6 +1354,96 @@ paths:
         "500":
           $ref: "#/components/responses/SyncServerError"
 
+  /api/collections/{id}/objects/batch:
+    parameters:
+      - $ref: "#/components/parameters/CollectionId"
+    post:
+      operationId: batchObjects
+      tags: [sync]
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      summary: Create and update up to 200 objects from storage receipts
+      description: |
+        The batch form of `createObject` and `updateObject`, for a first sync
+        of a large vault: upload the blobs with one storage
+        `POST /blobs/batch`, then claim their receipts here in one call.
+        Hosted only.
+
+        Each entry is one object write. Without `object_id` it is a create,
+        and it must not carry `version`. With `object_id` it is an update of
+        that object to `version`. Every entry carries its own
+        `mutation_id`, which is **required** here: it is what the single
+        call's `Mutation-Id` header would carry, so every entry can replay.
+
+        Entries run in order, each exactly as the single call with that
+        `Mutation-Id` and body would run: in its own transaction, with the
+        replay checked before the receipt, and with its own SSE `change`
+        event when it commits. They are not one transaction, and one failing
+        does not stop the rest. Retrying a whole batch after a lost response
+        is safe: each entry that already has a result answers with it, and
+        the others run.
+
+        The answer is `200` with one result per entry, in request order:
+        the `status` and `body` the single call would have answered. For an
+        entry, an invalid `mutation_id` is `400 invalid Mutation-Id`, and a
+        missing or non-positive `version` on an update, or any `version` on
+        a create, is `400 invalid version`. A failure that is not the
+        entry's own (the database failing) is
+        `500 {"error": "internal server error"}` for that entry.
+
+        The request as a whole is refused when its body is not JSON or names
+        a field this schema does not list (`400 invalid json`), when
+        `entries` is empty (`400 batch must contain at least one entry`) or
+        longer than 200 (`400 too many entries (max 200)`), when the body is
+        over 256 KiB (`413 request too large`), and when the collection is
+        not the caller's (`404`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BatchObjectsRequest"
+      responses:
+        "200":
+          description: One result per entry, in request order
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BatchObjectsResponse"
+        "400":
+          description: |
+            The body is not JSON or has an unknown field (`invalid json`),
+            or `entries` is empty or over 200
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error]
+                additionalProperties: false
+                properties:
+                  error:
+                    type: string
+                    enum:
+                      - invalid json
+                      - batch must contain at least one entry
+                      - too many entries (max 200)
+        "401":
+          $ref: "#/components/responses/SyncUnauthorized"
+        "403":
+          $ref: "#/components/responses/PendingDeletion"
+        "404":
+          $ref: "openapi.yaml#/components/responses/NotFound"
+        "413":
+          description: The body is over 256 KiB
+          content:
+            application/json:
+              schema:
+                $ref: "openapi.yaml#/components/schemas/Error"
+              example: { error: request too large }
+        "500":
+          $ref: "#/components/responses/SyncServerError"
+
   /api/collections/{id}/objects/{objectId}:
     parameters:
       - $ref: "#/components/parameters/CollectionId"
@@ -2074,6 +2170,138 @@ components:
         receipt:
           type: string
           description: The receipt JWT from the storage service's `POST /blobs`
+
+    BatchObjectsRequest:
+      type: object
+      required: [entries]
+      additionalProperties: false
+      properties:
+        entries:
+          type: array
+          minItems: 1
+          maxItems: 200
+          items:
+            $ref: "#/components/schemas/BatchObjectEntry"
+
+    BatchObjectEntry:
+      type: object
+      required: [mutation_id, receipt]
+      additionalProperties: false
+      properties:
+        mutation_id:
+          type: string
+          pattern: '^[A-Za-z0-9._~-]{1,128}$'
+          description: The entry's Mutation-Id, as the single call's header would carry it
+        object_id:
+          type: string
+          format: uuid
+          description: The object to update; absent for a create
+        version:
+          type: integer
+          format: int64
+          minimum: 1
+          description: An update's version, the object's current version + 1; absent for a create
+        receipt:
+          type: string
+          description: The receipt JWT from the storage service's `POST /blobs` or `POST /blobs/batch`
+
+    BatchObjectsResponse:
+      type: object
+      required: [results]
+      additionalProperties: false
+      properties:
+        results:
+          type: array
+          minItems: 1
+          maxItems: 200
+          items:
+            $ref: "#/components/schemas/BatchObjectResult"
+
+    BatchObjectResult:
+      description: |
+        One entry's result: the status and body `createObject` or
+        `updateObject` answers for the same Mutation-Id and body.
+      oneOf:
+        - type: object
+          required: [status, body]
+          additionalProperties: false
+          description: Created, or a create's replayed outcome
+          properties:
+            status:
+              type: integer
+              enum: [201]
+            body:
+              $ref: "openapi.yaml#/components/schemas/CreateMutationSuccess"
+        - type: object
+          required: [status, body]
+          additionalProperties: false
+          description: Updated, or an update's replayed outcome
+          properties:
+            status:
+              type: integer
+              enum: [200]
+            body:
+              $ref: "openapi.yaml#/components/schemas/MutationSuccess"
+        - type: object
+          required: [status, body]
+          additionalProperties: false
+          description: An invalid `mutation_id` or `version`, or a rejected receipt
+          properties:
+            status:
+              type: integer
+              enum: [400]
+            body:
+              oneOf:
+                - type: object
+                  required: [error]
+                  additionalProperties: false
+                  properties:
+                    error:
+                      type: string
+                      enum: [invalid Mutation-Id, invalid version]
+                - $ref: "#/components/schemas/ReceiptRejectedError"
+        - type: object
+          required: [status, body]
+          additionalProperties: false
+          description: The update's object is not in the collection
+          properties:
+            status:
+              type: integer
+              enum: [404]
+            body:
+              type: object
+              required: [error]
+              additionalProperties: false
+              properties:
+                error:
+                  type: string
+                  enum: [not found]
+        - type: object
+          required: [status, body]
+          additionalProperties: false
+          description: |
+            Version conflict, receipt already spent, Mutation-Id reused for a
+            different intent, or its first request still running
+          properties:
+            status:
+              type: integer
+              enum: [409]
+            body:
+              oneOf:
+                - $ref: "openapi.yaml#/components/schemas/VersionConflict"
+                - $ref: "#/components/schemas/ReceiptUsedError"
+                - $ref: "openapi.yaml#/components/schemas/MutationMismatchError"
+                - $ref: "#/components/schemas/MutationPendingError"
+        - type: object
+          required: [status, body]
+          additionalProperties: false
+          description: An internal failure on this entry; retry it
+          properties:
+            status:
+              type: integer
+              enum: [500]
+            body:
+              $ref: "openapi.yaml#/components/schemas/Error"
 
     UpdateObjectRequest:
       type: object

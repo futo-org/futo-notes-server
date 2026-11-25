@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-#MISE description="Start the hosted dev stack (Postgres, MinIO, victoria-metrics, mock-oidc)"
+#MISE description="Start the hosted dev stack (Postgres, MinIO, victoria-metrics, mock-oidc, Mailpit, mock-resend)"
 #MISE dir="{{config_root}}"
 set -euo pipefail
 
 compose=(docker compose -f compose.hosted.yml)
 # --wait treats the exited one-shot minio-init as a failure, so wait on the
 # long-running services and run the bucket init separately.
-"${compose[@]}" up -d --build --wait database minio victoria-metrics mock-oidc "$@"
+"${compose[@]}" up -d --build --wait database minio victoria-metrics mock-oidc mailpit mock-resend "$@"
 "${compose[@]}" run --rm minio-init

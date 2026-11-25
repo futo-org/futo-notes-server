@@ -1,8 +1,10 @@
 // Package blobframe parses the request and encodes the binary response of a
 // batch blob download (self-hosted POST /api/blobs/batch, hosted storage
-// POST /blobs/batch).
+// POST /blobs/batch), and parses the binary request of a hosted storage batch
+// upload (POST /blobs/batch-upload, ParseUpload).
 //
-// One frame per requested key, in request order, integers big-endian:
+// A download answers one frame per requested key, in request order, integers
+// big-endian:
 //
 //	[u16 keyLen][key utf8][u8 status][u32 blobLen][blob bytes]
 //

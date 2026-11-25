@@ -64,6 +64,8 @@ plain-http cookies). Every prod release sets the following.
 | `oidcClientId` | the Zitadel application's client id |
 | `appRedirectSchemes` | the custom URL schemes the apps sign in through: `[tech.futo.notes]` (the release apps, and the chart default) in prod, `[tech.futo.notes, tech.futo.notes.dev]` in staging so dev builds can sign in too. Loopback `http://127.0.0.1:<port>` and `http://[::1]:<port>` are always allowed (desktop); `http` and `https` are refused, so claimed `https` app links are not accepted. |
 | `regions` | the regions file (format below) |
+| `resendApiUrl` | `https://api.resend.com` (the default; `RESEND_API_URL`) |
+| `emailFromAddress` | the `From` of every email (`EMAIL_FROM_ADDRESS`). The default, `FUTO Notes <noreply@notes.futo.cloud>`, is a **placeholder**: confirm the sending domain, verify it in Resend, then set this. |
 | `postgresClusterName` | `notes-db` |
 | `secretData` | `null` |
 | `env` | replaces the whole list: `API_PORT=3005`, `LOG_LEVEL=info`, `OTLP_METRICS_ENDPOINT`, `OTLP_METRICS_URL_PATH`. Drop the dev entries `COOKIE_SECURE=false` and `DRAIN_DELAY_MS=1000`: the defaults are a `Secure` cookie and 15 s. Never set `DEV_UI` (it serves `/dev`, which runs storage jobs on demand). |
@@ -80,6 +82,7 @@ keys are committed.
 | `notes-api` | `OIDC_CLIENT_SECRET` | The Zitadel application's client secret. |
 | | `API_SIGNING_KEY` | One Ed25519 private key PEM (with `kid`): signs storage access and admin tokens. |
 | | `STORAGE_REFRESH_ROTATION_KEY` | 32 random bytes, base64 (`openssl rand -base64 32`): derives each storage refresh token's successor, `base64url(HMAC-SHA256(key, token))`, so an exchange whose response was lost can be repeated. The API refuses to start without it. |
+| | `RESEND_API_KEY` | A Resend API key with sending access for the `emailFromAddress` domain. Without it the API logs and skips every email (the lapse and purge notices), and starts anyway. |
 | `notes-storage-<region>` | `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | Credentials for the region's bucket: get, put, list and delete objects. |
 | | `API_PUBLIC_KEYS` | The public half of the API signing key, one PEM block per `kid` (several during rotation). Same value in every region. |
 | | `RECEIPT_SIGNING_KEY` | This region's Ed25519 private key PEM (with `kid`): signs upload receipts. |
@@ -241,6 +244,7 @@ track (bookkeeping table `hosted_migrations`). The chart runs it as a Helm
 | browsers | Zitadel | the sign-in page |
 | API pods | each region's `endpoint`, path `/internal/*` | blob GC, orphan reconciliation and account purge. The API calls the same `endpoint` clients use. If the ingress restricts `/internal/*`, it must still admit the API's egress. These routes require an admin JWT either way. |
 | API pods | Zitadel issuer | discovery, code exchange and JWKS |
+| API pods | `resendApiUrl` (HTTPS, `POST /emails`) | lapse and purge emails, when `RESEND_API_KEY` is set |
 | API pods | `notes-db-rw` | Postgres, including `LISTEN/NOTIFY` for SSE across replicas |
 | storage pods | the region's S3 | blob bytes |
 | all pods | OTLP endpoint | metrics |

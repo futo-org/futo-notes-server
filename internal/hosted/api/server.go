@@ -21,6 +21,7 @@ import (
 	"futo-notes-server/internal/events"
 	"futo-notes-server/internal/hosted/account"
 	"futo-notes-server/internal/hosted/config"
+	"futo-notes-server/internal/hosted/mail"
 	"futo-notes-server/internal/hosted/storageclient"
 	"futo-notes-server/internal/hostedauth"
 	"futo-notes-server/internal/httputil"
@@ -58,6 +59,7 @@ type Server struct {
 	version   string
 	oidc      *oidcClient
 	storage   *storageclient.Client
+	mailer    mail.Mailer
 }
 
 // New returns a Server for o.
@@ -85,6 +87,7 @@ func New(o Options) (*Server, error) {
 		version:   o.Version,
 		oidc:      newOIDCClient(o.Config.OIDC, o.Config.PublicURL+callbackPath),
 		storage:   o.Storage,
+		mailer:    mail.New(o.Config.Email),
 	}, nil
 }
 
@@ -153,6 +156,7 @@ func (s *Server) router() chi.Router {
 	if s.cfg.DevUI {
 		r.Get("/dev", handleDevUI)
 		s.devJobRoutes(r)
+		r.With(s.authenticate(hostedErrors)).Post("/dev/email/{template}", s.handleDevEmail)
 		log.Info().Str("path", "/dev").Msg("dev UI enabled")
 	}
 	return r
@@ -176,6 +180,7 @@ func (s *Server) syncRoutes(r chi.Router) {
 	r.Put("/collections/{id}/key", strictKeyBody(syncapi.HandlePutCollectionKey(keys)))
 	r.Get("/collections/{id}/objects", syncapi.HandleListObjects(s.database))
 	r.Post("/collections/{id}/objects", syncapi.HandleCreateObject(s.database, s.publisher, blobs))
+	r.Post("/collections/{id}/objects/batch", s.handleBatchObjects(blobs))
 	r.Get("/collections/{id}/objects/{objectId}", syncapi.HandleGetObject(s.database))
 	r.Put("/collections/{id}/objects/{objectId}", syncapi.HandleUpdateObject(s.database, s.publisher, blobs))
 	r.Delete("/collections/{id}/objects/{objectId}", syncapi.HandleDeleteObject(s.database, s.publisher))
