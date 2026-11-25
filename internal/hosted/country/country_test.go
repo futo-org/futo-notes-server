@@ -58,6 +58,14 @@ func TestParse(t *testing.T) {
 	}
 }
 
+func TestName(t *testing.T) {
+	for code, want := range map[string]string{"US": "United States", "CA": "Canada", "XK": "Kosovo", "ZZ": "ZZ", "": ""} {
+		if got := country.Name(code); got != want {
+			t.Errorf("Name(%q) = %q, want %q", code, got, want)
+		}
+	}
+}
+
 func TestFromAcceptLanguage(t *testing.T) {
 	for header, want := range map[string]string{
 		"en-GB,en;q=0.9":            "GB",

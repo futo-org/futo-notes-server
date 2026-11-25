@@ -127,102 +127,170 @@ func TestSandbox(t *testing.T) {
 		SecretKey: key, PublishableKey: publishable, WebhookSecret: []byte(webhookSecret), PriceID: price,
 		PublicURL: "https://notes.example.test",
 	})
-	subject := "s7-sandbox-" + uuid.NewV7().String()
-	me := billing.Customer{Subject: subject, Email: "sandbox-test@example.com"}
-	customers := map[string]bool{}
+	run := uuid.NewV7().String()
+	subject := "s7-sandbox-" + run
+	me := billing.Customer{Subject: subject, Email: "sandbox-test+" + run + "@example.com"}
+	var customer string
 	var subscriptions []string
 	t.Cleanup(func() {
 		for _, id := range subscriptions {
-			s.call(http.MethodDelete, "/subscriptions/"+id, nil, nil)
+			var current struct {
+				Status string `json:"status"`
+			}
+			s.call(http.MethodGet, "/subscriptions/"+id, nil, &current)
+			if current.Status != "canceled" && current.Status != "incomplete_expired" {
+				s.call(http.MethodDelete, "/subscriptions/"+id, nil, nil)
+			}
 		}
-		for id := range customers {
-			s.call(http.MethodDelete, "/customers/"+id, nil, nil)
+		if customer != "" {
+			s.call(http.MethodDelete, "/customers/"+customer, nil, nil)
 		}
 	})
 
-	// Find-or-create by sub is idempotent: two checkouts, one customer.
-	var sessions []billing.Checkout
+	// Find-or-create by sub is idempotent: two payment sessions, one
+	// customer (listed by its unique email: search lags).
 	for range 2 {
-		checkout, err := p.StartCheckout(t.Context(), me, "https://notes.example.test/dashboard/billing/return?session_id={CHECKOUT_SESSION_ID}")
-		if err != nil {
-			t.Fatal(err)
+		secret, err := p.StartPayment(t.Context(), me)
+		if err != nil || secret == "" {
+			t.Fatalf("StartPayment: secret set %t, %v", secret != "", err)
 		}
-		if !strings.HasPrefix(checkout.ID, "cs_test_") || checkout.ClientSecret == "" {
-			t.Fatalf("checkout id %q, client secret set %t", checkout.ID, checkout.ClientSecret != "")
-		}
-		sessions = append(sessions, checkout)
 	}
-	var session struct {
-		Customer          string            `json:"customer"`
-		ClientReferenceID string            `json:"client_reference_id"`
-		UIMode            string            `json:"ui_mode"`
-		Mode              string            `json:"mode"`
-		Status            string            `json:"status"`
-		Metadata          map[string]string `json:"metadata"`
-		Currency          string            `json:"currency"`
-		AmountTotal       int64             `json:"amount_total"`
-		AdaptivePricing   struct {
-			Enabled bool `json:"enabled"`
-		} `json:"adaptive_pricing"`
-		PaymentMethodTypes []string `json:"payment_method_types"`
-		WalletOptions      struct {
-			Link struct {
-				Display string `json:"display"`
-			} `json:"link"`
-		} `json:"wallet_options"`
+	var found struct {
+		Data []struct {
+			ID       string            `json:"id"`
+			Metadata map[string]string `json:"metadata"`
+		} `json:"data"`
 	}
+	s.call(http.MethodGet, "/customers", url.Values{"email": {me.Email}}, &found)
+	if len(found.Data) != 1 || found.Data[0].Metadata["sub"] != subject {
+		t.Fatalf("two payment sessions for one sub made customers %+v", found.Data)
+	}
+	customer = found.Data[0].ID
 	plan, err := p.Plan(t.Context())
 	if err != nil || plan.Currency != "usd" || plan.Amount != 500 || plan.Interval != "month" || plan.IntervalCount != 1 {
 		t.Fatalf("Plan = %+v, %v", plan, err)
 	}
-	var customer string
-	for _, checkout := range sessions {
-		s.call(http.MethodGet, "/checkout/sessions/"+checkout.ID, nil, &session)
-		customers[session.Customer] = true
-		customer = session.Customer
-		if session.ClientReferenceID != subject || session.UIMode != "elements" || session.Mode != "subscription" ||
-			session.Status != "open" || session.Metadata["sub"] != subject {
-			t.Fatalf("session %s = %+v", checkout.ID, session)
+
+	// token is a test ConfirmationToken for a new card from cardToken,
+	// billed in country, as the Payment Element makes in subscription mode.
+	token := func(cardToken, country string) string {
+		var ct struct {
+			ID string `json:"id"`
 		}
-		// The price's own amount and currency, by card alone.
-		if session.AdaptivePricing.Enabled || session.Currency != plan.Currency || session.AmountTotal != plan.Amount ||
-			len(session.PaymentMethodTypes) != 1 || session.PaymentMethodTypes[0] != "card" || session.WalletOptions.Link.Display != "never" {
-			t.Fatalf("session %s = %+v", checkout.ID, session)
+		s.call(http.MethodPost, "/test_helpers/confirmation_tokens", url.Values{
+			"payment_method_data[type]":                                  {"card"},
+			"payment_method_data[card][token]":                           {cardToken},
+			"payment_method_data[billing_details][address][country]":     {country},
+			"payment_method_data[billing_details][address][postal_code]": {"10001"},
+			"return_url":         {"https://notes.example.test/billing/checkout/x"},
+			"setup_future_usage": {"off_session"},
+		}, &ct)
+		return ct.ID
+	}
+	// mine lists the customer's subscriptions, by status.
+	mine := func() map[string]string {
+		var list struct {
+			Data []struct {
+				ID     string `json:"id"`
+				Status string `json:"status"`
+			} `json:"data"`
 		}
+		s.call(http.MethodGet, "/subscriptions", url.Values{"customer": {customer}, "status": {"all"}}, &list)
+		out := map[string]string{}
+		for _, sub := range list.Data {
+			out[sub.ID] = sub.Status
+		}
+		return out
 	}
-	if len(customers) != 1 {
-		t.Fatalf("two checkouts for one sub made customers %v", customers)
-	}
-	var cus struct {
-		Email    string            `json:"email"`
-		Metadata map[string]string `json:"metadata"`
-	}
-	s.call(http.MethodGet, "/customers/"+customer, nil, &cus)
-	if cus.Metadata["sub"] != subject || cus.Email != me.Email {
-		t.Fatalf("customer = %+v", cus)
+	pay := func(country, ct string) (billing.PaymentResult, error) {
+		result, err := p.Pay(t.Context(), me, billing.Payment{BillingCountry: country, ConfirmationToken: ct})
+		if result.SubscriptionID != "" {
+			subscriptions = append(subscriptions, result.SubscriptionID)
+		}
+		return result, err
 	}
 
-	// An open session is not complete, and is nobody else's.
-	if _, err := p.CompleteCheckout(t.Context(), me, sessions[0].ID); !errors.Is(err, billing.ErrCheckoutIncomplete) {
-		t.Fatalf("CompleteCheckout of an open session = %v", err)
+	// Billed in another country: refused before anything exists.
+	var mismatch *billing.CountryMismatchError
+	if _, err := pay("US", token("tok_visa", "CA")); !errors.As(err, &mismatch) || mismatch.Billed != "CA" || mismatch.Refunded {
+		t.Fatalf("Pay billed in CA = %v", err)
 	}
-	if _, err := p.CompleteCheckout(t.Context(), billing.Customer{Subject: "someone-else"}, sessions[0].ID); !errors.Is(err, billing.ErrCheckoutForeign) {
-		t.Fatalf("CompleteCheckout as someone else = %v", err)
+	if subs := mine(); len(subs) != 0 {
+		t.Fatalf("a refused payment created %v", subs)
 	}
 
-	// A subscription paid with the test card, as checkout would make it.
+	// Declined: the subscription it was for is cancelled at once.
+	var declined *billing.PaymentDeclinedError
+	if _, err := pay("US", token("tok_chargeDeclined", "US")); !errors.As(err, &declined) || declined.Message == "" {
+		t.Fatalf("Pay with a declined card = %v", err)
+	}
+	// 3-D Secure: the page's step, until the buyer answers.
+	secure, err := pay("US", token("tok_threeDSecure2Required", "US"))
+	if err != nil || !strings.Contains(secure.ActionSecret, "_secret_") {
+		t.Fatalf("Pay with a 3-D Secure card = %+v (secret set %t), %v", secure.SubscriptionID, secure.ActionSecret != "", err)
+	}
+	if again, err := p.FinishPayment(t.Context(), me, secure.SubscriptionID); err != nil || again.ActionSecret == "" {
+		t.Fatalf("FinishPayment before 3-D Secure: secret set %t, %v", again.ActionSecret != "", err)
+	}
+
+	// Billed in the country chosen: paid, and active at once.
+	paid, err := pay("US", token("tok_visa", "US"))
+	if err != nil || paid.Event.Status != billing.StatusActive || paid.Event.Subject != subject {
+		t.Fatalf("Pay billed in US = %+v, %v", paid.Event, err)
+	}
+	subs := mine()
+	for id, status := range subs {
+		want := map[string]string{paid.SubscriptionID: "active", secure.SubscriptionID: "incomplete"}[id]
+		if want == "" {
+			want = "incomplete_expired" // the declined one, cancelled unpaid
+		}
+		if status != want {
+			t.Fatalf("subscription %s is %s, want %s (all: %v)", id, status, want, subs)
+		}
+	}
+	if len(subs) != 3 {
+		t.Fatalf("subscriptions = %v", subs)
+	}
+	sub := struct{ ID string }{paid.SubscriptionID}
+
+	// A subscription sold on our page for US but charged with a CA
+	// billing address (which Pay never lets through) is refused and
+	// refunded by the checks after payment, read from the charge.
 	var pm struct {
 		ID string `json:"id"`
 	}
-	s.call(http.MethodPost, "/payment_methods/pm_card_visa/attach", url.Values{"customer": {customer}}, &pm)
-	var sub struct {
+	s.call(http.MethodPost, "/payment_methods", url.Values{
+		"type": {"card"}, "card[token]": {"tok_visa"}, "billing_details[address][country]": {"CA"},
+	}, &pm)
+	s.call(http.MethodPost, "/payment_methods/"+pm.ID+"/attach", url.Values{"customer": {customer}}, nil)
+	var stray struct {
 		ID string `json:"id"`
 	}
 	s.call(http.MethodPost, "/subscriptions", url.Values{
 		"customer": {customer}, "items[0][price]": {price}, "default_payment_method": {pm.ID},
-		"metadata[sub]": {subject},
-	}, &sub)
-	subscriptions = append(subscriptions, sub.ID)
+		"metadata[sub]": {subject}, "metadata[billing_country]": {"US"},
+	}, &stray)
+	subscriptions = append(subscriptions, stray.ID)
+	if ev, err := p.Refresh(t.Context(), stray.ID); err != nil || ev.Status != billing.StatusExpired {
+		t.Fatalf("Refresh of a subscription billed in CA = %+v, %v", ev, err)
+	}
+	var refunds struct {
+		Data []struct {
+			Status   string            `json:"status"`
+			Metadata map[string]string `json:"metadata"`
+		} `json:"data"`
+	}
+	var invoices struct {
+		Data []paidInvoiceJSON `json:"data"`
+	}
+	s.call(http.MethodGet, "/invoices", url.Values{"subscription": {stray.ID}, "expand[]": {"data.payments"}}, &invoices)
+	if len(invoices.Data) != 1 || len(invoices.Data[0].Payments.Data) != 1 {
+		t.Fatalf("invoices of the stray subscription = %+v", invoices)
+	}
+	s.call(http.MethodGet, "/refunds", url.Values{"payment_intent": {invoices.Data[0].Payments.Data[0].Payment.PaymentIntent}}, &refunds)
+	if len(refunds.Data) != 1 || refunds.Data[0].Metadata["reason"] != "billing_country_mismatch" {
+		t.Fatalf("refunds of the stray subscription = %+v", refunds)
+	}
 
 	ev, err := p.Refresh(t.Context(), sub.ID)
 	if err != nil {
@@ -262,10 +330,20 @@ func TestSandbox(t *testing.T) {
 
 	// Ended at once, it maps as expired.
 	s.call(http.MethodDelete, "/subscriptions/"+sub.ID, nil, nil)
-	subscriptions = nil
 	if ev, err = p.Refresh(t.Context(), sub.ID); err != nil || ev.Status != billing.StatusExpired || ev.WillRenew {
 		t.Fatalf("Refresh after deletion = %+v, %v", ev, err)
 	}
+}
+
+// paidInvoiceJSON is an invoice with its payments expanded.
+type paidInvoiceJSON struct {
+	Payments struct {
+		Data []struct {
+			Payment struct {
+				PaymentIntent string `json:"payment_intent"`
+			} `json:"payment"`
+		} `json:"data"`
+	} `json:"payments"`
 }
 
 // sandboxEvent waits for a customer.subscription.updated event about subID

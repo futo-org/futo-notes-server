@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,7 +41,31 @@ type fakeStripe struct {
 	idempotent    map[string]string
 	sessions      map[string]map[string]any
 	subscriptions map[string]map[string]any
-	requests      []fakeRequest
+	// invoices are each subscription's invoices; intents and charges the
+	// PaymentIntents paying them and their charges; refunded the
+	// PaymentIntents refunded.
+	invoices map[string][]map[string]any
+	intents  map[string]map[string]any
+	charges  map[string]map[string]any
+	refunded map[string]bool
+	// tokens are the ConfirmationTokens the browser made.
+	tokens map[string]*fakeToken
+	// responses are earlier answers by idempotency key; conflicts the
+	// number of 409s still to answer under a key, as Stripe does while a
+	// request under it is in flight.
+	responses map[string]any
+	conflicts map[string]int
+	requests  []fakeRequest
+}
+
+// fakeToken is a ConfirmationToken: the billing country its form (or
+// saved card) gave, the card's issuing country, and how its payment goes.
+type fakeToken struct {
+	billed, issued string
+	// saved is the Customer whose saved card it uses, "" for a new card.
+	saved string
+	// outcome is "succeeded", "requires_action" (3-D Secure) or "declined".
+	outcome string
 }
 
 type fakeCustomer struct {
@@ -72,6 +97,9 @@ func newFakeStripe(t *testing.T) *fakeStripe {
 	f := &fakeStripe{
 		t: t, customers: map[string]*fakeCustomer{}, idempotent: map[string]string{},
 		sessions: map[string]map[string]any{}, subscriptions: map[string]map[string]any{},
+		invoices: map[string][]map[string]any{}, intents: map[string]map[string]any{}, charges: map[string]map[string]any{},
+		refunded: map[string]bool{}, tokens: map[string]*fakeToken{},
+		responses: map[string]any{}, conflicts: map[string]int{},
 	}
 	f.srv = httptest.NewServer(f)
 	t.Cleanup(f.srv.Close)
@@ -113,7 +141,7 @@ func (f *fakeStripe) addSubscription(customer, sub, status string, periodEnd int
 	}
 	s := map[string]any{
 		"id": f.id("sub"), "object": "subscription", "status": status, "cancel_at_period_end": false, "cancel_at": nil,
-		"livemode": false, "metadata": metadata, "customer": customer,
+		"livemode": false, "metadata": metadata, "customer": customer, "created": time.Now().Unix(),
 		"items": map[string]any{"object": "list", "data": []any{map[string]any{
 			"id": "si_1", "current_period_end": periodEnd, "current_period_start": periodEnd - 30*86400,
 			"price": map[string]any{"id": priceID, "product": productID},
@@ -126,19 +154,143 @@ func (f *fakeStripe) addSubscription(customer, sub, status string, periodEnd int
 	return s["id"].(string)
 }
 
-// completeSession marks a session paid, creating its subscription.
-func (f *fakeStripe) completeSession(id string, periodEnd int64) string {
+// completeSession marks a Checkout Session on Stripe's page paid, creating
+// its subscription, with the session's subscription metadata, and its paid
+// first invoice, billed in country billed.
+func (f *fakeStripe) completeSession(id, billed string, periodEnd int64) string {
 	f.mu.Lock()
 	s := f.sessions[id]
 	customer, _ := s["customer"].(string)
 	sub, _ := s["client_reference_id"].(string)
+	metadata := s["subscription_metadata"].(map[string]any)
 	f.mu.Unlock()
-	subID := f.addSubscription(customer, sub, "active", periodEnd, nil)
+	subID := f.addSubscription(customer, sub, "active", periodEnd, func(sub map[string]any) { sub["metadata"] = metadata })
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	s["status"] = "complete"
 	s["subscription"] = subID
+	f.payInvoice(f.newInvoice(subID), billed)
 	return subID
+}
+
+// paidSubscription is an active subscription of customer, for sub, sold
+// on our page for chosen, whose first payment was charged with a billing
+// address in billed: what the check before payment never lets through,
+// for the checks after it.
+func (f *fakeStripe) paidSubscription(customer, sub, chosen, billed string) string {
+	subID := f.addSubscription(customer, sub, "active", time.Now().Add(30*24*time.Hour).Unix(), func(s map[string]any) {
+		s["metadata"].(map[string]any)["billing_country"] = chosen
+	})
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.payInvoice(f.newInvoice(subID), billed)
+	return subID
+}
+
+// newInvoice opens subscription subID's first invoice, with its default
+// payment's PaymentIntent, and makes it the subscription's latest.
+func (f *fakeStripe) newInvoice(subID string) map[string]any {
+	intent := f.id("pi")
+	f.intents[intent] = map[string]any{
+		"id": intent, "object": "payment_intent", "status": "requires_payment_method", "client_secret": intent + "_secret_fake",
+		"last_payment_error": nil, "latest_charge": nil,
+	}
+	invoice := map[string]any{
+		"id": f.id("in"), "object": "invoice", "status": "open", "billing_reason": "subscription_create", "subscription": subID,
+		"payments": map[string]any{"object": "list", "data": []any{map[string]any{
+			"id": f.id("inpay"), "object": "invoice_payment", "status": "open", "is_default": true,
+			"payment": map[string]any{"type": "payment_intent", "payment_intent": intent},
+		}}},
+	}
+	f.invoices[subID] = append(f.invoices[subID], invoice)
+	if s, ok := f.subscriptions[subID]; ok {
+		s["latest_invoice"] = invoice["id"]
+	}
+	return invoice
+}
+
+// payInvoice charges invoice's PaymentIntent with a billing address in
+// billed, marking it and its payment paid and its subscription active.
+func (f *fakeStripe) payInvoice(invoice map[string]any, billed string) {
+	payment := invoice["payments"].(map[string]any)["data"].([]any)[0].(map[string]any)
+	intent := f.intents[payment["payment"].(map[string]any)["payment_intent"].(string)]
+	charge := f.id("ch")
+	f.charges[charge] = map[string]any{
+		"id": charge, "object": "charge", "paid": true,
+		"billing_details": map[string]any{"address": map[string]any{"country": nilIfEmpty(billed), "postal_code": nil}},
+	}
+	intent["status"] = "succeeded"
+	intent["latest_charge"] = charge
+	payment["status"] = "paid"
+	invoice["status"] = "paid"
+	if s := f.subscriptions[invoice["subscription"].(string)]; s["status"] == "incomplete" {
+		s["status"] = "active"
+	}
+}
+
+// token makes a ConfirmationToken for a new card billed in billed (and
+// issued in the same country) whose payment ends as outcome.
+func (f *fakeStripe) token(billed, outcome string) string {
+	return f.addToken(&fakeToken{billed: billed, issued: billed, outcome: outcome})
+}
+
+func (f *fakeStripe) addToken(t *fakeToken) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	id := f.id("ctoken")
+	f.tokens[id] = t
+	return id
+}
+
+// authenticate ends the 3-D Secure step of subscription subID's payment:
+// passed, the card is charged; failed, the payment needs another card.
+func (f *fakeStripe) authenticate(subID string, passed bool, billed string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	invoice := f.invoices[subID][0]
+	if passed {
+		f.payInvoice(invoice, billed)
+		return
+	}
+	payment := invoice["payments"].(map[string]any)["data"].([]any)[0].(map[string]any)
+	intent := f.intents[payment["payment"].(map[string]any)["payment_intent"].(string)]
+	intent["status"] = "requires_payment_method"
+	intent["last_payment_error"] = map[string]any{"type": "card_error", "code": "authentication_required",
+		"message": "We are unable to authenticate your payment method."}
+}
+
+// subscriptionList is every subscription the fake holds.
+func (f *fakeStripe) subscriptionList() []map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []map[string]any
+	for _, s := range f.subscriptions {
+		out = append(out, maps.Clone(s))
+	}
+	return out
+}
+
+// subscriptionStatus is a subscription's status as the fake holds it.
+func (f *fakeStripe) subscriptionStatus(id string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.subscriptions[id]["status"].(string)
+}
+
+// refunds lists the payment intents refunded on subscription id's invoices.
+func (f *fakeStripe) refunds(id string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for _, invoice := range f.invoices[id] {
+		for _, payment := range invoice["payments"].(map[string]any)["data"].([]any) {
+			intent := payment.(map[string]any)["payment"].(map[string]any)["payment_intent"].(string)
+			if f.refunded[intent] {
+				out = append(out, intent)
+			}
+		}
+	}
+	return out
 }
 
 func (f *fakeStripe) calls(method, path string) []fakeRequest {
@@ -175,7 +327,18 @@ func (f *fakeStripe) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	f.requests = append(f.requests, fakeRequest{Method: r.Method, Path: r.URL.Path, Form: form, IdempotencyKey: r.Header.Get("Idempotency-Key")})
 	path := strings.TrimPrefix(r.URL.Path, "/v1")
-	expandCustomer := form.Get("expand[]") == "customer"
+	expand := form["expand[]"]
+	expandCustomer := slices.Contains(expand, "customer")
+	key := r.Header.Get("Idempotency-Key")
+	if f.conflicts[key] > 0 {
+		f.conflicts[key]--
+		writeJSON(w, http.StatusConflict, stripeError("idempotency_error", "idempotency_key_in_use", "There is currently another in-progress request using this Idempotent Key."))
+		return
+	}
+	if earlier, ok := f.responses[key]; ok && key != "" && r.Method != http.MethodGet && path != "/customers" {
+		writeJSON(w, http.StatusOK, earlier)
+		return
+	}
 	switch {
 	case r.Method == http.MethodGet && path == "/customers/search":
 		f.search(w, form.Get("query"))
@@ -205,16 +368,134 @@ func (f *fakeStripe) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, c.object())
 	case r.Method == http.MethodPost && path == "/checkout/sessions":
 		id := f.id("cs_test")
+		metadata, subscriptionMetadata := map[string]any{}, map[string]any{}
+		for key := range form {
+			if name, ok := strings.CutPrefix(key, "metadata["); ok {
+				metadata[strings.TrimSuffix(name, "]")] = form.Get(key)
+			}
+			if name, ok := strings.CutPrefix(key, "subscription_data[metadata]["); ok {
+				subscriptionMetadata[strings.TrimSuffix(name, "]")] = form.Get(key)
+			}
+		}
 		f.sessions[id] = map[string]any{
 			"id": id, "object": "checkout.session", "client_secret": id + "_secret_fake", "status": "open",
 			"mode": form.Get("mode"), "ui_mode": form.Get("ui_mode"), "customer": form.Get("customer"),
 			"client_reference_id": nilIfEmpty(form.Get("client_reference_id")), "subscription": nil, "url": nil,
+			"metadata": metadata, "subscription_metadata": subscriptionMetadata, "customer_details": nil,
 		}
 		if form.Get("ui_mode") == "hosted_page" {
 			f.sessions[id]["client_secret"] = nil
 			f.sessions[id]["url"] = "https://checkout.stripe.com/c/pay/" + id
 		}
 		writeJSON(w, http.StatusOK, f.sessions[id])
+	case r.Method == http.MethodGet && path == "/invoices":
+		if form.Get("status") != "paid" || form.Get("expand[]") != "data.payments" {
+			f.t.Errorf("invoices listed with %v", form)
+		}
+		data := []any{}
+		for _, invoice := range slices.Backward(f.invoices[form.Get("subscription")]) {
+			if invoice["status"] == "paid" {
+				data = append(data, invoice)
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data, "has_more": false})
+	case r.Method == http.MethodPost && path == "/customer_sessions":
+		if _, ok := f.customers[form.Get("customer")]; !ok {
+			writeJSON(w, http.StatusBadRequest, stripeError("invalid_request_error", "resource_missing", "No such customer"))
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"object": "customer_session", "client_secret": f.id("cuss") + "_secret_MUST-NOT-BE-LOGGED", "customer": form.Get("customer"),
+		})
+	case r.Method == http.MethodGet && strings.HasPrefix(path, "/confirmation_tokens/"):
+		id := strings.TrimPrefix(path, "/confirmation_tokens/")
+		token, ok := f.tokens[id]
+		if !ok {
+			writeJSON(w, http.StatusNotFound, stripeError("invalid_request_error", "resource_missing", "No such confirmationtoken"))
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"id": id, "object": "confirmation_token", "setup_future_usage": "off_session", "payment_intent": nil,
+			"payment_method_preview": map[string]any{
+				"type": "card", "customer": nilIfEmpty(token.saved),
+				"billing_details": map[string]any{"address": map[string]any{"country": nilIfEmpty(token.billed), "postal_code": nil}},
+				"card":            map[string]any{"brand": "visa", "country": token.issued, "last4": "4242"},
+			},
+		})
+	case r.Method == http.MethodPost && path == "/subscriptions":
+		if _, ok := f.customers[form.Get("customer")]; !ok {
+			writeJSON(w, http.StatusBadRequest, stripeError("invalid_request_error", "resource_missing", "No such customer"))
+			return
+		}
+		metadata := map[string]any{}
+		for key := range form {
+			if name, ok := strings.CutPrefix(key, "metadata["); ok {
+				metadata[strings.TrimSuffix(name, "]")] = form.Get(key)
+			}
+		}
+		id := f.id("sub")
+		end := time.Now().Add(30 * 24 * time.Hour).Unix()
+		f.subscriptions[id] = map[string]any{
+			"id": id, "object": "subscription", "status": "incomplete", "cancel_at_period_end": false, "cancel_at": nil,
+			"livemode": false, "metadata": metadata, "customer": form.Get("customer"), "created": time.Now().Unix(),
+			"items": map[string]any{"object": "list", "data": []any{map[string]any{
+				"id": "si_1", "current_period_end": end, "current_period_start": end - 30*86400,
+				"price": map[string]any{"id": form.Get("items[0][price]"), "product": productID},
+			}}},
+		}
+		f.newInvoice(id)
+		created := f.subscriptionObject(f.subscriptions[id], expand)
+		f.responses[key] = created
+		writeJSON(w, http.StatusOK, created)
+	case r.Method == http.MethodPost && strings.HasPrefix(path, "/payment_intents/") && strings.HasSuffix(path, "/confirm"):
+		intent, ok := f.intents[strings.TrimSuffix(strings.TrimPrefix(path, "/payment_intents/"), "/confirm")]
+		token, known := f.tokens[form.Get("confirmation_token")]
+		if !ok || !known {
+			writeJSON(w, http.StatusBadRequest, stripeError("invalid_request_error", "resource_missing", "No such payment_intent or confirmation token"))
+			return
+		}
+		if intent["status"] != "requires_payment_method" {
+			writeJSON(w, http.StatusBadRequest, stripeError("invalid_request_error", "payment_intent_unexpected_state",
+				"This PaymentIntent's status is "+intent["status"].(string)+"."))
+			return
+		}
+		invoice := f.invoiceOf(intent["id"].(string))
+		switch token.outcome {
+		case "succeeded":
+			f.payInvoice(invoice, token.billed)
+		case "requires_action":
+			intent["status"] = "requires_action"
+			intent["next_action"] = map[string]any{"type": "use_stripe_sdk"}
+		case "declined":
+			intent["last_payment_error"] = map[string]any{"type": "card_error", "code": "card_declined", "message": "Your card was declined."}
+			writeJSON(w, http.StatusPaymentRequired, map[string]any{"error": map[string]any{
+				"type": "card_error", "code": "card_declined", "decline_code": "generic_decline", "message": "Your card was declined.",
+			}})
+			return
+		}
+		f.responses[key] = maps.Clone(intent)
+		writeJSON(w, http.StatusOK, intent)
+	case r.Method == http.MethodGet && strings.HasPrefix(path, "/payment_intents/"):
+		intent, ok := f.intents[strings.TrimPrefix(path, "/payment_intents/")]
+		if !ok {
+			writeJSON(w, http.StatusNotFound, stripeError("invalid_request_error", "resource_missing", "No such payment_intent"))
+			return
+		}
+		out := maps.Clone(intent)
+		if charge, ok := out["latest_charge"].(string); ok && slices.Contains(expand, "latest_charge") {
+			out["latest_charge"] = f.charges[charge]
+		}
+		writeJSON(w, http.StatusOK, out)
+	case r.Method == http.MethodPost && path == "/refunds":
+		intent := form.Get("payment_intent")
+		if f.refunded[intent] {
+			writeJSON(w, http.StatusBadRequest, stripeError("invalid_request_error", "charge_already_refunded", "Charge has already been refunded."))
+			return
+		}
+		f.refunded[intent] = true
+		refund := map[string]any{"id": f.id("re"), "object": "refund", "payment_intent": intent, "status": "succeeded"}
+		f.responses[key] = refund
+		writeJSON(w, http.StatusOK, refund)
 	case r.Method == http.MethodGet && strings.HasPrefix(path, "/checkout/sessions/"):
 		s, ok := f.sessions[strings.TrimPrefix(path, "/checkout/sessions/")]
 		if !ok {
@@ -222,11 +503,32 @@ func (f *fakeStripe) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, f.withCustomer(s, expandCustomer))
+	case r.Method == http.MethodGet && path == "/subscriptions":
+		// status=all: every subscription of the customer, ended ones too.
+		var data []any
+		for _, s := range f.subscriptions {
+			if s["customer"] == r.URL.Query().Get("customer") {
+				data = append(data, f.subscriptionObject(s, nil))
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data, "has_more": false})
 	case strings.HasPrefix(path, "/subscriptions/"):
 		s, ok := f.subscriptions[strings.TrimPrefix(path, "/subscriptions/")]
 		if !ok {
 			writeJSON(w, http.StatusNotFound, stripeError("invalid_request_error", "resource_missing", "No such subscription"))
 			return
+		}
+		if r.Method == http.MethodDelete {
+			if s["status"] == "canceled" || s["status"] == "incomplete_expired" {
+				writeJSON(w, http.StatusBadRequest, stripeError("invalid_request_error", "", "A canceled subscription can only update its cancellation_details and metadata."))
+				return
+			}
+			// As the sandbox does: cancelling an unpaid subscription expires it.
+			if s["status"] == "incomplete" {
+				s["status"] = "incomplete_expired"
+			} else {
+				s["status"] = "canceled"
+			}
 		}
 		if r.Method == http.MethodPost {
 			if s["status"] == "canceled" {
@@ -238,7 +540,7 @@ func (f *fakeStripe) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				s["cancel_at"] = s["items"].(map[string]any)["data"].([]any)[0].(map[string]any)["current_period_end"]
 			}
 		}
-		writeJSON(w, http.StatusOK, f.withCustomer(s, expandCustomer))
+		writeJSON(w, http.StatusOK, f.subscriptionObject(s, expand))
 	case r.Method == http.MethodGet && path == "/prices/"+priceID:
 		writeJSON(w, http.StatusOK, map[string]any{
 			"id": priceID, "object": "price", "currency": "usd", "unit_amount": 700, "product": productID,
@@ -267,6 +569,33 @@ func (f *fakeStripe) search(w http.ResponseWriter, query string) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"object": "search_result", "data": data, "has_more": false})
+}
+
+// subscriptionObject is subscription s as Stripe answers it, with expand.
+func (f *fakeStripe) subscriptionObject(s map[string]any, expand []string) map[string]any {
+	out := f.withCustomer(s, slices.Contains(expand, "customer"))
+	if id, ok := out["latest_invoice"].(string); ok && slices.Contains(expand, "latest_invoice.payments") {
+		for _, invoice := range f.invoices[s["id"].(string)] {
+			if invoice["id"] == id {
+				out["latest_invoice"] = invoice
+			}
+		}
+	}
+	return out
+}
+
+// invoiceOf is the invoice PaymentIntent intent pays.
+func (f *fakeStripe) invoiceOf(intent string) map[string]any {
+	for _, invoices := range f.invoices {
+		for _, invoice := range invoices {
+			for _, payment := range invoice["payments"].(map[string]any)["data"].([]any) {
+				if payment.(map[string]any)["payment"].(map[string]any)["payment_intent"] == intent {
+					return invoice
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func (f *fakeStripe) withCustomer(obj map[string]any, expand bool) map[string]any {

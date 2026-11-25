@@ -201,6 +201,7 @@ func (s *Server) dashboardActions() []dashboardAction {
 		{dashboardPath + "/restore", "POST /api/account/restore", s.handleDashboardRestore},
 		{dashboardPath + "/sign-out", "POST /api/auth/logout", s.handleDashboardSignOut},
 		{dashboardPath + "/billing/checkout", "POST /api/billing/checkout", s.handleDashboardCheckout},
+		{payPath, "POST /api/billing/checkout", s.handleDashboardPay},
 		{subscribePath, "POST /api/billing/checkout", s.handleDashboardChooseCountry},
 		{dashboardPath + "/billing/portal", "GET /api/billing/portal", s.handleDashboardPortal},
 	}
@@ -215,6 +216,7 @@ func (s *Server) dashboardRoutes(r chi.Router) {
 		d.Get(checkoutLinkPath+"/{token}", s.handleCheckoutLinkPage)
 		d.Post(checkoutLinkPath+"/{token}", s.handleCheckoutLinkCountry)
 		d.Post(checkoutLinkPath+"/{token}/session", s.handleCheckoutLinkSession)
+		d.Post(checkoutLinkPath+"/{token}/pay", s.handleCheckoutLinkPay)
 		d.Get(checkoutLinkReturnPath, s.handleCheckoutLinkReturn)
 		d.Get(checkoutLinkCancelledPath, handleCheckoutLinkCancelled)
 		d.Group(func(signed chi.Router) {
@@ -457,19 +459,28 @@ func (s *Server) renderOverview(w http.ResponseWriter, r *http.Request, a accoun
 	renderDashboard(w, r, "overview", v)
 }
 
+// selfPaymentCountry is the self-payment billing country a dashboard
+// panel's request names (?country=); otherwise it answers 400 and returns
+// false.
+func (s *Server) selfPaymentCountry(w http.ResponseWriter, r *http.Request) (string, bool) {
+	code, ok := country.Parse(r.URL.Query().Get("country"))
+	if !ok || s.custom().Route(code) != billing.RouteSelf {
+		badRequest(w, r, "Choose your billing country again.")
+		return "", false
+	}
+	return code, true
+}
+
 // handleDashboardCheckout is the dashboard's POST /api/billing/checkout. A
-// custom checkout's panel calls it for the session it mounts, for a
-// self-payment billing country (?country=); otherwise it sends the browser
-// to the web checkout.
+// custom checkout's panel calls it for the payment session it mounts, for
+// a self-payment billing country (?country=); otherwise it sends the
+// browser to the web checkout.
 func (s *Server) handleDashboardCheckout(w http.ResponseWriter, r *http.Request) {
 	userID := principalFrom(r).Session.User.ID
 	if s.custom() != nil {
-		code, ok := country.Parse(r.URL.Query().Get("country"))
-		if !ok || s.custom().Route(code) != billing.RouteSelf {
-			badRequest(w, r, "Choose your billing country again.")
-			return
+		if _, ok := s.selfPaymentCountry(w, r); ok {
+			s.writePaymentSession(w, r, userID)
 		}
-		s.writeCheckoutSession(w, r, userID, s.cfg.PublicURL+checkoutReturnPath+"?session_id="+checkoutSessionID)
 		return
 	}
 	target, err := s.checkoutURL(r.Context(), userID)

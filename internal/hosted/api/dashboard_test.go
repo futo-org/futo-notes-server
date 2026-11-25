@@ -683,7 +683,7 @@ func TestDashboardParity(t *testing.T) {
 			if res.status != http.StatusSeeOther || !ok {
 				t.Fatalf("dashboard checkout = %d %v", res.status, res.header)
 			}
-			c.web.pay(id, billing.StatusActive)
+			c.web.payMerchant(id, billing.StatusActive)
 			viaDashboard.expect(http.MethodGet, "/dashboard/billing/return?session_id="+id, nil, http.StatusOK)
 			if !viaDashboard.billing().Entitled {
 				t.Fatal("API sees no subscription")
@@ -696,12 +696,27 @@ func TestDashboardParity(t *testing.T) {
 			}
 			viaAPI.expect(http.MethodPost, "/api/billing/checkout", nil, http.StatusOK).json(t, &link)
 			pay := payPath(t, c.client(), strings.TrimPrefix(link.URL, c.api.URL))
-			var session sessionBody
-			c.client().expect(http.MethodPost, pay+"/session", nil, http.StatusOK).json(t, &session)
-			c.web.pay(checkoutID(t, session.ReturnURL), billing.StatusActive)
-			c.client().expect(http.MethodGet, session.ReturnURL, nil, http.StatusOK)
+			paid(t, c.client(), pay+"/pay", c.web.token("US", "succeeded"), "")
 			expectContains(t, viaAPI.expect(http.MethodGet, "/dashboard", nil, http.StatusOK), `data-billing-status="active"`)
 			expectRenderedError(t, viaAPI.submit("/dashboard/billing/subscribe", url.Values{"country": {"DE"}}), http.StatusConflict)
+		}},
+		{"POST /dashboard/billing/pay", "POST /api/billing/checkout", func(t *testing.T) {
+			c := newCustomHarness(t)
+			viaDashboard := c.regionBrowser()
+			paid(t, viaDashboard, "/dashboard/billing/pay?country=US", c.web.token("US", "succeeded"), viaDashboard.csrf())
+			if !viaDashboard.billing().Entitled {
+				t.Fatal("API sees no subscription")
+			}
+			expectHostedError(t, viaDashboard.do(http.MethodPost, "/api/billing/checkout", nil), http.StatusConflict, "already_subscribed")
+
+			viaAPI := c.regionBrowser()
+			var link struct {
+				URL string `json:"url"`
+			}
+			viaAPI.expect(http.MethodPost, "/api/billing/checkout", nil, http.StatusOK).json(t, &link)
+			paid(t, c.client(), payPath(t, c.client(), strings.TrimPrefix(link.URL, c.api.URL))+"/pay", c.web.token("US", "succeeded"), "")
+			expectHostedError(t, payStep(viaAPI, "/dashboard/billing/pay?country=US", map[string]string{"confirmation_token": c.web.token("US", "succeeded")}, viaAPI.csrf()),
+				http.StatusConflict, "already_subscribed")
 		}},
 		{"POST /dashboard/billing/portal", "GET /api/billing/portal", func(t *testing.T) {
 			b := newBillingHarness(t)

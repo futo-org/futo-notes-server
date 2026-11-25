@@ -145,11 +145,19 @@ third note</textarea></div>
       United Kingdom). Countries in <code>STRIPE_SELF_PAYMENT_COUNTRIES</code> pay on our own page with Stripe's card fields (USD,
       cards only); every other country is sent to Stripe's hosted page, where Stripe is merchant of record (Managed Payments, plus
       tax); China, Cuba, Iran, Kosovo, North Korea, Russia, Syria, Ascension Island and Tristan da Cunha cannot pay on the web.
-      "Open checkout" opens the one-time page an app gets (the link is used by its Checkout, not by opening it), the
+      "Open checkout" opens the one-time page an app gets (the link is used by its Checkout, not by opening it; the page it
+      leads to is used by the payment that goes through, so reload it, or decline a card and pay again, as often as you like), the
       "Dashboard country step" links the dashboard's, with a country chosen (a self-payment country opens our panel at once);
-      pay with card 4242 4242 4242 4242, any future date and CVC (4000 0000 0000 0002 is declined, 4000 0025 0000 3155 asks for
-      3-D Secure; on Stripe's page, Link's test passcode is 000000).
-      The account is entitled as soon as the checkout completes, by either route; <code>stripe listen</code> forwards later changes.
+      pay with card 4242 4242 4242 4242, any future date and CVC (4000 0000 0000 0002 is declined and leaves the form up to try
+      another; 4000 0027 6000 3184 asks for 3-D Secure, then the server finishes the payment; on Stripe's page, Link's test
+      passcode is 000000). Our page posts the card form, as a ConfirmationToken, to the server, which checks its billing country
+      before anything is charged: the card form's Country starts at the country chosen, Subscribe is held, naming it, while the
+      form names another (pick Canada after "… United States"), and forcing the button from the console is refused with
+      "Nothing was charged", with no subscription or payment created. Tick "Save payment details" when paying: once that
+      subscription is over (cancel it in the sandbox dashboard), the next checkout offers the saved card, checked the same way
+      (open "… United States" with a card saved in Canada, or the reverse, to see it held and refused).
+      The account is entitled as soon as the payment goes through, by either route; <code>stripe listen</code> forwards later
+      changes.
       Without a subscription, writes answer 402 and storage
       tokens are read-only (exchange again after subscribing). Synthetic events act on the signed-in user's subscriptions directly:
       grant adds a 30-day web one; lapse reports them expired; expire lets their paid period end with no news; refund revokes them.

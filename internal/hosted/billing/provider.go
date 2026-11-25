@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 )
@@ -127,7 +128,7 @@ type CheckoutRoute int
 const (
 	// RouteUnavailable: the web takes no payment from this country.
 	RouteUnavailable CheckoutRoute = iota
-	// RouteSelf: our own checkout page (StartCheckout), where FUTO is the
+	// RouteSelf: our own checkout page (Pay), where FUTO is the
 	// merchant of record.
 	RouteSelf
 	// RouteMerchantOfRecord: the provider's own checkout page
@@ -137,9 +138,9 @@ const (
 )
 
 // CustomCheckout is a web provider whose checkout is a page of ours: the
-// provider's own fields collect the card inside it, and our page confirms
-// the payment. For buyers in countries where it sells as merchant of
-// record, the browser is sent to its own checkout page instead.
+// provider's own fields collect the card inside it, and the server pays
+// with what they collected. For buyers in countries where it sells as
+// merchant of record, the browser is sent to its own checkout page instead.
 // CheckoutURL is unused.
 type CustomCheckout interface {
 	WebProvider
@@ -150,27 +151,99 @@ type CustomCheckout interface {
 	// where it is the merchant of record, for c, and returns the URL to
 	// send the browser to. Once paid, the browser returns to successURL,
 	// with the checkout's id in place of {CHECKOUT_SESSION_ID}; abandoned,
-	// to cancelURL. CompleteCheckout confirms it like any other.
+	// to cancelURL. CompleteCheckout confirms it.
 	StartMerchantCheckout(ctx context.Context, c Customer, successURL, cancelURL string) (string, error)
-	// PublishableKey is the browser-side key the page mounts checkout with.
-	PublishableKey() string
-	// Plan is the subscription checkout sells, as the provider prices it.
-	Plan(ctx context.Context) (Plan, error)
-	// StartCheckout opens a checkout for c that, once paid, returns the
-	// browser to returnURL. The client secret mounts it in the browser and
-	// must not be logged.
-	StartCheckout(ctx context.Context, c Customer, returnURL string) (Checkout, error)
-	// CompleteCheckout returns the subscription a completed checkout
-	// created, so entitlement need not wait for the webhook. It returns
-	// ErrCheckoutForeign for a checkout opened for another customer, and
-	// ErrCheckoutIncomplete for one not yet paid.
+	// CompleteCheckout returns the subscription a completed checkout on
+	// the provider's page created, so entitlement need not wait for the
+	// webhook. It returns ErrCheckoutForeign for a checkout opened for
+	// another customer, and ErrCheckoutIncomplete for one not yet paid.
 	CompleteCheckout(ctx context.Context, c Customer, checkoutID string) (Event, error)
+	// PublishableKey is the browser-side key the page mounts the card
+	// fields with.
+	PublishableKey() string
+	// Plan is the subscription our page sells, as the provider prices it.
+	Plan(ctx context.Context) (Plan, error)
+	// StartPayment returns the client secret our page's card fields mount
+	// with for c: it lets them offer to save the card, and show the cards
+	// c saved that way. It is for the browser alone and must not be
+	// logged.
+	StartPayment(ctx context.Context, c Customer) (string, error)
+	// Pay pays for the plan for c with what the card fields collected.
+	// Before anything is created or charged, the card's billing address
+	// must be in the billing country c chose: otherwise Pay returns a
+	// *CountryMismatchError (not Refunded). A declined card returns a
+	// *PaymentDeclinedError, the subscription it was for cancelled. A
+	// payment that needs the buyer (3-D Secure) returns its ActionSecret;
+	// FinishPayment settles it once the page has handled it. While c has a
+	// subscription that entitles at the provider, Pay returns
+	// ErrSubscribed, and while another payment of c's on our page waits on
+	// the buyer, ErrPaymentPending: two windows never make two
+	// subscriptions.
+	Pay(ctx context.Context, c Customer, p Payment) (PaymentResult, error)
+	// FinishPayment settles the payment Pay started for subscriptionID,
+	// as Pay does. It returns ErrCheckoutForeign for another customer's
+	// subscription.
+	FinishPayment(ctx context.Context, c Customer, subscriptionID string) (PaymentResult, error)
 }
 
-// Checkout is an open custom checkout.
-type Checkout struct {
-	ID           string
-	ClientSecret string
+// Payment is one attempt to pay on our page.
+type Payment struct {
+	// BillingCountry is the billing country the buyer chose, a
+	// self-payment country, ISO 3166-1 alpha-2.
+	BillingCountry string
+	// ConfirmationToken is the provider's record of what the card fields
+	// collected, made in the browser for this attempt alone.
+	ConfirmationToken string
+}
+
+// PaymentResult is where a payment on our page stands.
+type PaymentResult struct {
+	// SubscriptionID is the subscription paid for.
+	SubscriptionID string
+	// ActionSecret, when set, is the client secret the page finishes the
+	// payment's next action (3-D Secure) with, before FinishPayment.
+	// It must not be logged.
+	ActionSecret string
+	// Event is the subscription once the payment went through: active, or
+	// on hold while it clears. Zero while ActionSecret is set.
+	Event Event
+}
+
+// ErrSubscribed refuses a payment for a customer who already has a
+// subscription that entitles at the provider, which the account's
+// entitlement may not show yet.
+var ErrSubscribed = errors.New("billing: already subscribed at the provider")
+
+// ErrPaymentPending refuses a payment on our page while another of the
+// customer's waits on the buyer (3-D Secure), in another window.
+var ErrPaymentPending = errors.New("billing: another payment is waiting on the buyer")
+
+// CountryMismatchError reports a payment on our page whose billing address
+// is outside the billing country the buyer chose, which decided its route.
+// The provider refused it: before charging anything, or, when Refunded,
+// after the fact, cancelling the subscription and refunding what it
+// charged.
+type CountryMismatchError struct {
+	// Chosen is the billing country the buyer chose; Billed is the
+	// payment's, "" when it had none. Both are ISO 3166-1 alpha-2 codes.
+	Chosen, Billed string
+	Refunded       bool
+}
+
+func (e *CountryMismatchError) Error() string {
+	return fmt.Sprintf("payment with a billing address in %q, not the chosen %q (refunded: %t)", e.Billed, e.Chosen, e.Refunded)
+}
+
+// PaymentDeclinedError reports a payment on our page that did not go
+// through; nothing was charged, and the subscription it was for is
+// cancelled.
+type PaymentDeclinedError struct {
+	// Message is the provider's explanation, written for the buyer.
+	Message string
+}
+
+func (e *PaymentDeclinedError) Error() string {
+	return "payment declined: " + e.Message
 }
 
 // Plan is a recurring price: Amount in Currency's minor units, charged

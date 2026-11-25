@@ -4,11 +4,20 @@
 // cannot be used. The server decides the route again when it is posted.
 //
 // Mounts our checkout in every [data-checkout] panel, on page load and
-// whenever htmx swaps one in. The panel's session URL opens a Stripe
-// Checkout Session (ui_mode=elements); Stripe's Payment Element collects the
-// card inside its own frames, styled with our theme, and our button confirms
-// the session. Once it is confirmed, the return URL the server answered with
-// confirms it on our side and shows the result.
+// whenever htmx swaps one in. Stripe's Payment Element, made without an
+// intent for the plan's amount and currency, collects the card inside its
+// own frames, styled with our theme, and offers the account's saved cards
+// (the panel's session URL answers the CustomerSession secret). Our button
+// turns the form into a ConfirmationToken and posts it to the pay URL; the
+// server checks its billing country and pays, and answers either the page
+// that shows the result or a 3-D Secure step, which Stripe.js handles
+// before the page posts the subscription back for the server to settle.
+// A declined card leaves the form up to try another.
+//
+// The card form's own Country field starts at the billing country chosen
+// before checkout (data-country), and the button is held, with a message,
+// while the field, or the saved card picked, names another. The server
+// refuses such a payment anyway, before charging anything.
 (() => {
   "use strict";
   // The Payment Element in the page, destroyed when another panel mounts.
@@ -84,19 +93,24 @@
     };
   }
 
-  async function openSession(panel) {
+  // post sends a JSON body (or none) to url with the page's CSRF token, if
+  // any, and returns the JSON answer, throwing its message on failure.
+  async function post(url, body) {
     const headers = { Accept: "application/json" };
     const csrf = document.querySelector('meta[name="csrf-token"]');
     if (csrf) headers["X-CSRF-Token"] = csrf.content;
+    if (body) headers["Content-Type"] = "application/json";
     let res;
     try {
-      res = await fetch(panel.dataset.sessionUrl, { method: "POST", headers, credentials: "same-origin" });
+      res = await fetch(url, {
+        method: "POST", headers, credentials: "same-origin", body: body ? JSON.stringify(body) : undefined,
+      });
     } catch {
       throw new Error("We couldn't reach FUTO Notes. Check your connection and try again.");
     }
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(body.message || body.error || "The checkout could not be opened. Try again.");
-    return body;
+    const answer = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(answer.message || answer.error || "The payment did not go through. Try again.");
+    return answer;
   }
 
   function finish(panel, returnURL) {
@@ -106,6 +120,19 @@
     } else {
       window.location.assign(returnURL);
     }
+  }
+
+  // The billing country a Payment Element change event shows: the saved
+  // card's, when one is picked, or the new card's Country field (which
+  // Stripe.js reports under billingDetails.address, though its reference
+  // shows billingDetails.country).
+  function eventCountry(value) {
+    if (!value) return undefined;
+    const saved = value.payment_method;
+    if (saved) return (saved.billing_details && saved.billing_details.address && saved.billing_details.address.country) || "";
+    const details = value.billingDetails;
+    if (!details) return undefined;
+    return details.address ? details.address.country : details.country;
   }
 
   async function mount(panel) {
@@ -121,43 +148,36 @@
     const status = panel.querySelector("[data-checkout-status]");
     const errorBox = panel.querySelector("[data-checkout-error]");
     const submit = panel.querySelector("[data-checkout-submit]");
+    const countryBox = panel.querySelector("[data-checkout-country]");
+    const chosen = panel.dataset.country;
     const label = panel.querySelector("[data-checkout-label]");
     const idleLabel = label.innerHTML;
 
-    let actions = null;
-    let returnURL = "";
-    // The card fields are complete, and Stripe can confirm the session.
+    let stripe = null;
+    let elements = null;
+    // The card fields are complete.
     let complete = false;
-    let canConfirm = false;
     let busy = false;
+    // The card form's Country field, or the saved card's, as change events
+    // report it.
+    let formCountry = chosen;
 
     const showError = (message) => {
       errorBox.textContent = message;
       errorBox.hidden = !message;
     };
     const update = () => {
-      submit.disabled = busy || !actions || !complete || !canConfirm;
+      const otherCountry = formCountry !== chosen;
+      countryBox.hidden = !otherCountry;
+      submit.disabled = busy || !elements || !complete || otherCountry;
       submit.setAttribute("aria-busy", String(busy));
     };
     const setBusy = (on, text) => {
       busy = on;
       if (on) label.textContent = text;
       else label.innerHTML = idleLabel;
-      if (!on) canConfirm = actions.getSession().canConfirm;
       panel.toggleAttribute("data-busy", on);
       update();
-    };
-    // The amount and period Stripe will charge, as it formats them;
-    // Stripe requires the page to show its total before confirming.
-    const show = (session) => {
-      const amount = session.total.total.amount;
-      const recurring = session.recurring;
-      const period = recurring && recurring.intervalCount > 1
-        ? `${recurring.intervalCount} ${recurring.interval}s`
-        : recurring ? recurring.interval : "";
-      panel.querySelectorAll("[data-checkout-amount]").forEach((el) => { el.textContent = amount; });
-      if (period) panel.querySelectorAll("[data-checkout-period]").forEach((el) => { el.textContent = period; });
-      canConfirm = session.canConfirm;
     };
 
     if (current) {
@@ -165,24 +185,31 @@
       current = null;
     }
     try {
-      const stripe = window.Stripe(panel.dataset.publishableKey);
-      const checkout = stripe.initCheckoutElementsSdk({
-        clientSecret: openSession(panel).then((session) => {
-          returnURL = session.return_url;
-          return session.client_secret;
-        }),
-        elementsOptions: { appearance: appearance(), loader: "auto" },
-        adaptivePricing: { allowed: false },
+      stripe = window.Stripe(panel.dataset.publishableKey);
+      const [session, faces] = await Promise.all([
+        post(panel.dataset.sessionUrl),
+        // Without Barlow the fields keep the fallback fonts.
+        fonts().catch(() => []),
+      ]);
+      elements = stripe.elements({
+        mode: "subscription",
+        amount: Number(panel.dataset.amount),
+        currency: panel.dataset.currency,
+        allowedPaymentMethodTypes: ["card"],
+        paymentMethodCreation: "manual",
+        customerSessionClientSecret: session.client_secret,
+        appearance: appearance(),
+        fonts: faces,
+        loader: "auto",
       });
-      // Without Barlow the fields keep the fallback fonts; nothing else waits.
-      fonts().then((faces) => checkout.loadFonts(faces)).catch(() => {});
       const scheme = window.matchMedia("(prefers-color-scheme: dark)");
-      const restyle = () => checkout.changeAppearance(appearance());
+      const restyle = () => elements.update({ appearance: appearance() });
       scheme.addEventListener("change", restyle);
 
-      const element = checkout.createPaymentElement({
+      const element = elements.create("payment", {
         layout: "tabs",
         wallets: { applePay: "never", googlePay: "never", link: "never" },
+        defaultValues: { billingDetails: { address: { country: chosen } } },
       });
       current = {
         destroy() {
@@ -197,19 +224,11 @@
       });
       element.on("change", (event) => {
         complete = event.complete;
-        if (actions) canConfirm = actions.getSession().canConfirm;
-        update();
-      });
-      checkout.on("change", (session) => {
-        show(session);
+        const country = eventCountry(event.value);
+        if (country !== undefined) formCountry = country;
         update();
       });
       element.mount(panel.querySelector("[data-checkout-mount]"));
-
-      const loaded = await checkout.loadActions();
-      if (loaded.type === "error") throw new Error(loaded.error.message);
-      actions = loaded.actions;
-      show(actions.getSession());
       update();
     } catch (err) {
       status.hidden = true;
@@ -222,23 +241,32 @@
       if (submit.disabled) return;
       showError("");
       setBusy(true, "Subscribing…");
-      let result;
       try {
-        result = await actions.confirm({ redirect: "if_required" });
+        const submitted = await elements.submit();
+        if (submitted.error) throw submitted.error;
+        const made = await stripe.createConfirmationToken({
+          elements,
+          params: { return_url: new URL(panel.dataset.pageUrl, window.location.href).href },
+        });
+        if (made.error) throw made.error;
+        let answer = await post(panel.dataset.payUrl, { confirmation_token: made.confirmationToken.id });
+        if (answer.status === "requires_action") {
+          setBusy(true, "Waiting for your bank…");
+          // Whatever the bank says, the server settles the payment.
+          await stripe.handleNextAction({ clientSecret: answer.client_secret });
+          setBusy(true, "Subscribing…");
+          answer = await post(panel.dataset.payUrl, { subscription: answer.subscription });
+        }
+        setBusy(true, "Confirming your subscription…");
+        if (current) {
+          current.destroy();
+          current = null;
+        }
+        finish(panel, answer.return_url);
       } catch (err) {
-        result = { type: "error", error: err };
-      }
-      if (result.type === "error") {
         setBusy(false);
-        showError((result.error && result.error.message) || "The payment did not go through. Try again.");
-        return;
+        showError((err && err.message) || "The payment did not go through. Try again.");
       }
-      setBusy(true, "Confirming your subscription…");
-      if (current) {
-        current.destroy();
-        current = null;
-      }
-      finish(panel, returnURL);
     });
   }
 

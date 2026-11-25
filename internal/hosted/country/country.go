@@ -31,6 +31,15 @@ func Parse(s string) (string, bool) {
 	return code, true
 }
 
+// Name returns the English name of the country code names, or code itself
+// when it is not one of All.
+func Name(code string) string {
+	if i := slices.IndexFunc(all, func(c Country) bool { return c.Code == code }); i >= 0 {
+		return all[i].Name
+	}
+	return code
+}
+
 // FromAcceptLanguage returns the country of the most preferred language in
 // an Accept-Language header that names one explicitly ("en-GB" is GB), or
 // "" when none does. A bare language ("en") names no country: the region
